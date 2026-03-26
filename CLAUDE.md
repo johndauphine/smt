@@ -56,7 +56,7 @@ workspace: ./migration_workspace
 
 - **Target schema**: Auto-derived as `dw__{source.database}__{source.schema}` (lowercase)
 - **Env var overrides**: `SMT_SOURCE_PASSWORD` and `SMT_TARGET_PASSWORD` override YAML passwords
-- **Schema name length**: Validated at load time (PG: 63 chars, MSSQL: 128 chars)
+- **Schema name validation**: Characters (`[A-Za-z0-9_]+`) and length (PG: 63, MSSQL: 128) validated at load time
 - **Default ports**: postgresql=5432, mssql=1433
 - **Default drivers**: postgresql=psycopg2, mssql=pyodbc
 
@@ -99,11 +99,11 @@ Target DB <- alembic upgrade <- migration file <- alembic autogenerate (diff mod
 - Apply: checks if at head, generates DDL SQL file, `command.upgrade("head")`. Supports `--dry-run`.
 - Rollback: `command.downgrade(target)` where target is "base", "-N", or revision hash
 
-**`database.py`**: Dialect-specific DDL dispatch for schema creation/drop:
+**`database.py`**: Dialect-specific DDL dispatch for schema creation/drop. Schema names validated against `[A-Za-z0-9_]+` before DDL interpolation.
 - PostgreSQL: `CREATE SCHEMA IF NOT EXISTS` / `DROP SCHEMA IF EXISTS ... CASCADE`
-- MSSQL: `IF NOT EXISTS (SELECT FROM sys.schemas ...) EXEC('CREATE SCHEMA ...')` / `DROP SCHEMA IF EXISTS`
+- MSSQL: `IF NOT EXISTS (SELECT FROM sys.schemas ...) EXEC('CREATE SCHEMA ...')` / `IF EXISTS ... EXEC('DROP SCHEMA ...')`
 
-**`config.py`**: Loads YAML, applies env var overrides for passwords, validates schema name length against dialect limits, builds SQLAlchemy `URL.create()` (handles password encoding automatically).
+**`config.py`**: Loads YAML, applies env var overrides for passwords, validates schema name characters (`[A-Za-z0-9_]+`) and length against dialect limits, builds SQLAlchemy `URL.create()` (handles password encoding). MSSQL+pyodbc URLs automatically include ODBC Driver 18, TrustServerCertificate, and Encrypt params. `get_url_string()` renders the URL with password visible (for alembic.ini).
 
 ### Design Decisions
 
@@ -114,6 +114,8 @@ Target DB <- alembic upgrade <- migration file <- alembic autogenerate (diff mod
 - **PascalCase Python attributes, lowercase DB identifiers** — `Users.DisplayName` -> column `displayname`
 - **env.py uses `include_schemas=True`** — required for multi-schema Alembic support
 - **env.py rewritten on every init** — ensures template is current
+- **Identifier validation** — schema names checked against `[A-Za-z0-9_]+` before DDL interpolation
+- **Duplicate handler guard** — `_setup_logging()` checks `root.handlers` to avoid duplicate log output
 
 ### Generated Artifacts (in workspace directory)
 
@@ -138,6 +140,13 @@ Tests use mocked SQLAlchemy inspectors — no database connection needed.
 - Python 3.12+
 - Database drivers: `pip install smt[postgres]` for PostgreSQL, `pip install smt[mssql]` for MSSQL
 - MSSQL requires Microsoft ODBC Driver for SQL Server installed on the system (for pyodbc)
+
+## Documentation
+
+- `docs/SETUP.md` — Installation, ODBC driver setup, Docker testing, troubleshooting
+- `docs/DESIGN.md` — Architecture, module dependencies, design decisions with rationale
+- `docs/TECH_SPEC.md` — Module API, config schema, type mappings, Alembic integration details
+- `docs/PHILOSOPHY.md` — Guiding principles, what SMT is and is not
 
 ## Legacy Bash Scripts
 
