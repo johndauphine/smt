@@ -45,8 +45,6 @@ def upgrade():
 
 class TestCollationStripping:
     def test_strip_comma_prefix_collation(self):
-        import re
-
         text = "sa.String(40), collation='SQL_Latin1'"
         for pattern, replacement in _COLLATION_PATTERNS:
             text = pattern.sub(replacement, text)
@@ -54,8 +52,6 @@ class TestCollationStripping:
         assert text == "sa.String(40)"
 
     def test_strip_comma_suffix_collation(self):
-        import re
-
         text = "collation='SQL_Latin1', nullable=False"
         for pattern, replacement in _COLLATION_PATTERNS:
             text = pattern.sub(replacement, text)
@@ -63,8 +59,6 @@ class TestCollationStripping:
         assert "nullable=False" in text
 
     def test_strip_parenthesized_collation(self):
-        import re
-
         text = "sa.Unicode(collation='Latin1')"
         for pattern, replacement in _COLLATION_PATTERNS:
             text = pattern.sub(replacement, text)

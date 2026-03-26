@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -92,7 +93,15 @@ class SmtConfig:
         self.target_schema = (
             f"dw__{self.source.database.lower()}__{self.source.schema.lower()}"
         )
+        self._validate_schema_name_chars()
         self._validate_schema_name_length()
+
+    def _validate_schema_name_chars(self):
+        if not re.match(r"^[A-Za-z0-9_]+$", self.target_schema):
+            raise ConfigError(
+                f"Derived target schema '{self.target_schema}' contains invalid characters. "
+                f"Only alphanumeric characters and underscores are allowed."
+            )
 
     def _validate_schema_name_length(self):
         limit = IDENTIFIER_LENGTH_LIMITS.get(self.target.dialect)

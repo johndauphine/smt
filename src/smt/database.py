@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
@@ -10,6 +11,8 @@ from sqlalchemy.engine import Engine
 from smt.config import DatabaseConfig
 
 logger = logging.getLogger(__name__)
+
+_VALID_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 class DatabaseError(Exception):
@@ -47,6 +50,7 @@ class DatabaseManager:
 
     def create_schema(self, schema_name: str) -> None:
         """Create a schema if it does not exist (dialect-aware)."""
+        _validate_identifier(schema_name)
         dialect = self.config.dialect
         logger.info("Creating schema '%s' (%s)...", schema_name, dialect)
 
@@ -63,6 +67,7 @@ class DatabaseManager:
 
     def drop_schema(self, schema_name: str) -> None:
         """Drop a schema if it exists (dialect-aware)."""
+        _validate_identifier(schema_name)
         dialect = self.config.dialect
         logger.info("Dropping schema '%s' (%s)...", schema_name, dialect)
 
@@ -83,6 +88,15 @@ class DatabaseManager:
         return sorted(inspector.get_table_names(schema=schema_name))
 
 
+def _validate_identifier(name: str) -> None:
+    """Validate that a schema name contains only safe identifier characters."""
+    if not _VALID_IDENTIFIER.match(name):
+        raise DatabaseError(
+            f"Invalid schema name '{name}': "
+            f"only alphanumeric characters and underscores are allowed"
+        )
+
+
 _CREATE_SCHEMA_DDL: dict[str, str] = {
     "postgresql": "CREATE SCHEMA IF NOT EXISTS {schema}",
     "mssql": (
@@ -93,5 +107,8 @@ _CREATE_SCHEMA_DDL: dict[str, str] = {
 
 _DROP_SCHEMA_DDL: dict[str, str] = {
     "postgresql": "DROP SCHEMA IF EXISTS {schema} CASCADE",
-    "mssql": "DROP SCHEMA IF EXISTS [{schema}]",
+    "mssql": (
+        "IF EXISTS (SELECT * FROM sys.schemas WHERE name = '{schema}') "
+        "EXEC('DROP SCHEMA [{schema}]')"
+    ),
 }

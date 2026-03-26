@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from smt.config import DatabaseConfig
 from smt.database import DatabaseManager, _CREATE_SCHEMA_DDL, _DROP_SCHEMA_DDL
 
@@ -24,7 +22,8 @@ class TestSchemaDialectDDL:
 
     def test_mssql_drop_schema_ddl(self):
         ddl = _DROP_SCHEMA_DDL["mssql"].format(schema="test_schema")
-        assert "DROP SCHEMA IF EXISTS [test_schema]" in ddl
+        assert "sys.schemas" in ddl
+        assert "DROP SCHEMA [test_schema]" in ddl
 
     def test_all_supported_dialects_have_ddl(self):
         from smt.config import SUPPORTED_DIALECTS

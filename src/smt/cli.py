@@ -13,11 +13,14 @@ from smt.config import ConfigError, load_config
 def _setup_logging(log_level: str) -> None:
     """Configure logging with timestamped output."""
     level = getattr(logging, log_level.upper(), logging.INFO)
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     root = logging.getLogger()
     root.setLevel(level)
-    root.addHandler(handler)
+
+    # Guard against duplicate handlers when called multiple times
+    if not root.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        root.addHandler(handler)
 
     # SQLAlchemy echo at DEBUG
     if level <= logging.DEBUG:

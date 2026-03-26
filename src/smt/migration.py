@@ -177,8 +177,6 @@ class MigrationManager:
         """Get the current applied revision hash."""
         if not self.ini_path.exists():
             return None
-        config = self._get_config()
-        script = ScriptDirectory.from_config(config)
 
         from alembic.runtime.migration import MigrationContext
         from sqlalchemy import create_engine
