@@ -34,7 +34,7 @@ class Pipeline:
         self.target_db = DatabaseManager(config.target)
         self.migration_mgr = MigrationManager(
             workspace=config.workspace,
-            target_url=str(config.target.get_url()),
+            target_url=config.target.get_url_string(),
             target_schema=config.target_schema,
         )
         self.model_gen = ModelGenerator(

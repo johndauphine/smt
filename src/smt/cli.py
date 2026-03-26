@@ -108,7 +108,7 @@ def init_cmd(ctx: click.Context) -> None:
 
     mgr = MigrationManager(
         workspace=config.workspace,
-        target_url=str(config.target.get_url()),
+        target_url=config.target.get_url_string(),
         target_schema=config.target_schema,
     )
     mgr.init_alembic()
@@ -133,7 +133,7 @@ def create(ctx: click.Context, message: str) -> None:
 
     mgr = MigrationManager(
         workspace=config.workspace,
-        target_url=str(config.target.get_url()),
+        target_url=config.target.get_url_string(),
         target_schema=config.target_schema,
     )
     result = mgr.create_migration(message)
@@ -157,7 +157,7 @@ def apply(ctx: click.Context, dry_run: bool) -> None:
 
     mgr = MigrationManager(
         workspace=config.workspace,
-        target_url=str(config.target.get_url()),
+        target_url=config.target.get_url_string(),
         target_schema=config.target_schema,
     )
     ddl_path = mgr.apply_migration(dry_run=dry_run)
@@ -190,7 +190,7 @@ def rollback(ctx: click.Context, steps: int | None, revision: str | None, drop_s
 
     mgr = MigrationManager(
         workspace=config.workspace,
-        target_url=str(config.target.get_url()),
+        target_url=config.target.get_url_string(),
         target_schema=config.target_schema,
     )
 
@@ -225,7 +225,7 @@ def status(ctx: click.Context) -> None:
 
     mgr = MigrationManager(
         workspace=config.workspace,
-        target_url=str(config.target.get_url()),
+        target_url=config.target.get_url_string(),
         target_schema=config.target_schema,
     )
 
@@ -268,7 +268,7 @@ def history(ctx: click.Context) -> None:
 
     mgr = MigrationManager(
         workspace=config.workspace,
-        target_url=str(config.target.get_url()),
+        target_url=config.target.get_url_string(),
         target_schema=config.target_schema,
     )
 

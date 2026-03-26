@@ -58,6 +58,13 @@ class DatabaseConfig:
     def get_url(self) -> URL:
         """Build SQLAlchemy connection URL with proper password encoding."""
         backend = f"{self.dialect}+{self.driver}"
+        query: dict[str, str] = {}
+
+        if self.dialect == "mssql" and self.driver == "pyodbc":
+            query["driver"] = "ODBC Driver 18 for SQL Server"
+            query["TrustServerCertificate"] = "yes"
+            query["Encrypt"] = "yes"
+
         return URL.create(
             drivername=backend,
             username=self.user,
@@ -65,7 +72,12 @@ class DatabaseConfig:
             host=self.host,
             port=self.port,
             database=self.database,
+            query=query,
         )
+
+    def get_url_string(self) -> str:
+        """Return the connection URL as a string with password visible."""
+        return self.get_url().render_as_string(hide_password=False)
 
 
 @dataclass
