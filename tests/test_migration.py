@@ -9,6 +9,98 @@ import pytest
 from smt.migration import MigrationManager, _COLLATION_PATTERNS, _OP_PATTERNS
 
 
+class TestDdlSplitting:
+    def test_split_ddl_by_table(self, tmp_path: Path):
+        mgr = MigrationManager(
+            workspace=tmp_path,
+            target_url="sqlite:///test.db",
+            target_schema="test_schema",
+        )
+
+        ddl = """\
+-- Running upgrade  -> abc123
+
+CREATE TABLE test_schema.users (
+    id INTEGER NOT NULL,
+    displayname VARCHAR(40) NOT NULL,
+    PRIMARY KEY (id)
+);
+
+CREATE TABLE test_schema.posts (
+    id INTEGER NOT NULL,
+    owneruserid INTEGER,
+    PRIMARY KEY (id),
+    FOREIGN KEY(owneruserid) REFERENCES test_schema.users (id)
+);
+
+CREATE INDEX ix_posts_owneruserid ON test_schema.posts (owneruserid);
+
+UPDATE alembic_version SET version_num='abc123' WHERE alembic_version.version_num = 'prev';
+
+"""
+        result = mgr._split_ddl_by_table(ddl)
+
+        assert "users" in result
+        assert "posts" in result
+        assert "CREATE TABLE" in result["users"]
+        assert "CREATE TABLE" in result["posts"]
+        assert "CREATE INDEX" in result["posts"]
+        assert len(result) == 2  # no alembic_version
+
+    def test_extract_table_from_create(self, tmp_path: Path):
+        mgr = MigrationManager(
+            workspace=tmp_path,
+            target_url="sqlite:///test.db",
+            target_schema="test_schema",
+        )
+        assert mgr._extract_table_from_ddl("CREATE TABLE schema.users (") == "users"
+        assert mgr._extract_table_from_ddl("CREATE TABLE users (") == "users"
+
+    def test_extract_table_from_index(self, tmp_path: Path):
+        mgr = MigrationManager(
+            workspace=tmp_path,
+            target_url="sqlite:///test.db",
+            target_schema="test_schema",
+        )
+        assert mgr._extract_table_from_ddl(
+            "CREATE INDEX ix_users_name ON schema.users (name)"
+        ) == "users"
+
+    def test_extract_table_from_alter(self, tmp_path: Path):
+        mgr = MigrationManager(
+            workspace=tmp_path,
+            target_url="sqlite:///test.db",
+            target_schema="test_schema",
+        )
+        assert mgr._extract_table_from_ddl(
+            "ALTER TABLE schema.users ADD COLUMN email VARCHAR"
+        ) == "users"
+
+    def test_generate_per_table_ddl_creates_files(self, tmp_path: Path):
+        mgr = MigrationManager(
+            workspace=tmp_path,
+            target_url="sqlite:///test.db",
+            target_schema="test_schema",
+        )
+
+        ddl = (
+            "CREATE TABLE test_schema.users (\n"
+            "    id INTEGER NOT NULL\n"
+            ");\n\n"
+            "CREATE TABLE test_schema.posts (\n"
+            "    id INTEGER NOT NULL\n"
+            ");\n"
+        )
+        mgr._generate_per_table_ddl(ddl)
+
+        ddl_dir = tmp_path / "ddl"
+        assert ddl_dir.exists()
+        assert (ddl_dir / "users.sql").exists()
+        assert (ddl_dir / "posts.sql").exists()
+        assert "CREATE TABLE" in (ddl_dir / "users.sql").read_text()
+        assert "CREATE TABLE" in (ddl_dir / "posts.sql").read_text()
+
+
 class TestOpPatterns:
     @pytest.mark.parametrize("line", [
         "    op.create_table('users',",

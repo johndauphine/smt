@@ -93,7 +93,7 @@ def generate(ctx: click.Context) -> None:
             source_database=config.source.database,
             tables=config.tables if config.tables != "all" else None,
         )
-        gen.write(config.workspace / "models.py")
+        gen.write(config.workspace / "models")
     finally:
         source_db.dispose()
 

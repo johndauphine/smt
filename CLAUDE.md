@@ -78,25 +78,31 @@ templates/
 ### Pipeline Flow
 
 ```
-Source DB -> inspect() -> ModelGenerator -> models.py (with lowercase transforms baked in)
+Source DB -> inspect() -> ModelGenerator -> models/ package (one .py per table, lowercase transforms)
                                                 |
 Target DB <- alembic upgrade <- migration file <- alembic autogenerate (diff models vs target) <-+
+                                    |
+                              ddl/<table>.sql (per-table DDL snapshots)
 ```
 
 ### Key Module Details
 
-**`models.py`** (core module): Replaces sqlacodegen + regex post-processing. Uses `sqlalchemy.inspect()` to reflect columns, PKs, FKs per table. Generates SQLAlchemy 2.0 declarative code directly with correct naming:
+**`models.py`** (core module): Replaces sqlacodegen + regex post-processing. Uses `sqlalchemy.inspect()` to reflect columns, PKs, FKs per table. Generates **one Python file per table** in a `models/` package:
+- `models/base.py` — `Base(DeclarativeBase)` class
+- `models/<table>.py` — One file per table with its own imports
+- `models/__init__.py` — Re-exports `Base` and all model classes
 - `__tablename__` = lowercase, column DB names = lowercase, constraint names = lowercase
 - Python attribute names = original PascalCase from source
 - FK references rewritten to `target_schema.table.col`
 - Collations detected during reflection are logged as warnings and skipped
 - Unrecognized dialect-specific types fall back to `String` with a warning
-- Backs up previous models.py as `models_<timestamp>.py.bak`
+- Backs up previous `models/` directory as `models_<timestamp>.bak/`
+- Backs up legacy `models.py` as `models_<timestamp>.py.bak` if present
 
 **`migration.py`**: Drives Alembic via `alembic.config.Config` + `alembic.command.*` (no subprocess). Handles:
 - Init: `command.init()`, writes env.py from template, updates alembic.ini URL
 - Create: applies pending migrations first, `command.revision(autogenerate=True)`, removes empty migrations, strips collation params
-- Apply: checks if at head, generates DDL SQL file, `command.upgrade("head")`. Supports `--dry-run`.
+- Apply: checks if at head, generates DDL SQL file + **per-table DDL files** in `ddl/`, `command.upgrade("head")`. Supports `--dry-run`.
 - Rollback: `command.downgrade(target)` where target is "base", "-N", or revision hash
 
 **`database.py`**: Dialect-specific DDL dispatch for schema creation/drop. Schema names validated against `[A-Za-z0-9_]+` before DDL interpolation.
@@ -119,9 +125,13 @@ Target DB <- alembic upgrade <- migration file <- alembic autogenerate (diff mod
 
 ### Generated Artifacts (in workspace directory)
 
-- `models.py` — SQLAlchemy 2.0 models with timestamp header
-- `models_*.py.bak` — Backups of previous models
-- `migration_*.sql` — DDL snapshots for review
+- `models/` — SQLAlchemy 2.0 models package (one file per table)
+  - `base.py` — `Base(DeclarativeBase)` class
+  - `<table>.py` — Per-table model files
+  - `__init__.py` — Re-exports Base and all models
+- `models_*.bak/` — Backups of previous models package
+- `migration_*.sql` — Full DDL snapshots for review
+- `ddl/<table>.sql` — Per-table DDL files
 - `alembic/versions/` — Migration files
 - `alembic.ini` — Target DB URL (%-escaped)
 

@@ -292,7 +292,12 @@ class MigrationManager:
         return counts
 
     def _generate_ddl_file(self) -> Path:
-        """Generate DDL SQL file using Alembic offline mode."""
+        """Generate DDL SQL file(s) using Alembic offline mode.
+
+        Generates both:
+        - Full DDL file: migration_<timestamp>.sql
+        - Per-table DDL files: ddl/<table>.sql
+        """
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         ddl_path = self.workspace / f"migration_{timestamp}.sql"
 
@@ -301,5 +306,81 @@ class MigrationManager:
         config.output_buffer = output
         command.upgrade(config, "head", sql=True)
 
-        ddl_path.write_text(output.getvalue())
+        full_ddl = output.getvalue()
+        ddl_path.write_text(full_ddl)
+
+        # Generate per-table DDL files
+        self._generate_per_table_ddl(full_ddl)
+
         return ddl_path
+
+    def _generate_per_table_ddl(self, ddl_content: str) -> None:
+        """Split DDL into per-table files in ddl/ directory."""
+        table_ddls = self._split_ddl_by_table(ddl_content)
+        if not table_ddls:
+            return
+
+        ddl_dir = self.workspace / "ddl"
+        ddl_dir.mkdir(exist_ok=True)
+
+        for table_name, table_sql in table_ddls.items():
+            table_path = ddl_dir / f"{table_name}.sql"
+            table_path.write_text(table_sql)
+            logger.info("DDL for '%s': %s", table_name, table_path.name)
+
+    def _split_ddl_by_table(self, ddl_content: str) -> dict[str, str]:
+        """Split DDL SQL content into per-table statement groups."""
+        raw_statements = re.split(r";\s*\n", ddl_content)
+
+        table_ddl: dict[str, list[str]] = {}
+
+        for raw in raw_statements:
+            stmt = raw.strip()
+            if not stmt:
+                continue
+            # Skip Alembic bookkeeping
+            if "alembic_version" in stmt.lower():
+                continue
+            # Skip comment-only blocks
+            if all(
+                line.strip().startswith("--") or not line.strip()
+                for line in stmt.split("\n")
+            ):
+                continue
+
+            table_name = self._extract_table_from_ddl(stmt)
+            if table_name:
+                table_ddl.setdefault(table_name, []).append(stmt + ";")
+
+        return {name: "\n\n".join(stmts) + "\n" for name, stmts in table_ddl.items()}
+
+    def _extract_table_from_ddl(self, statement: str) -> str | None:
+        """Extract the table name from a SQL DDL statement."""
+        # CREATE TABLE [schema.]table
+        m = re.search(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[\w\"]+\.)?(\w+)",
+            statement,
+            re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).lower()
+
+        # CREATE [UNIQUE] INDEX ... ON [schema.]table
+        m = re.search(
+            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+\S+\s+ON\s+(?:[\w\"]+\.)?(\w+)",
+            statement,
+            re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).lower()
+
+        # ALTER TABLE [schema.]table
+        m = re.search(
+            r"ALTER\s+TABLE\s+(?:[\w\"]+\.)?(\w+)",
+            statement,
+            re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).lower()
+
+        return None

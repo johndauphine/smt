@@ -110,8 +110,8 @@ class Pipeline:
 
     def _step_generate(self) -> None:
         try:
-            models_path = self.config.workspace / "models.py"
-            self.model_gen.write(models_path)
+            models_dir = self.config.workspace / "models"
+            self.model_gen.write(models_dir)
         except Exception as e:
             raise PipelineError(1, "Generate models", e) from e
 
