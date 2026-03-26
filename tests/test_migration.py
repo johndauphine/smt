@@ -48,33 +48,27 @@ UPDATE alembic_version SET version_num='abc123' WHERE alembic_version.version_nu
         assert len(result) == 2  # no alembic_version
 
     def test_extract_table_from_create(self, tmp_path: Path):
-        mgr = MigrationManager(
-            workspace=tmp_path,
-            target_url="sqlite:///test.db",
-            target_schema="test_schema",
-        )
-        assert mgr._extract_table_from_ddl("CREATE TABLE schema.users (") == "users"
-        assert mgr._extract_table_from_ddl("CREATE TABLE users (") == "users"
+        extract = MigrationManager._extract_table_from_ddl
+        # Bare identifiers
+        assert extract("CREATE TABLE schema.users (") == "users"
+        assert extract("CREATE TABLE users (") == "users"
+        # Double-quoted identifiers
+        assert extract('CREATE TABLE "schema"."users" (') == "users"
+        # Bracket-quoted identifiers (MSSQL)
+        assert extract("CREATE TABLE [dbo].[users] (") == "users"
+        assert extract("CREATE TABLE [users] (") == "users"
 
     def test_extract_table_from_index(self, tmp_path: Path):
-        mgr = MigrationManager(
-            workspace=tmp_path,
-            target_url="sqlite:///test.db",
-            target_schema="test_schema",
-        )
-        assert mgr._extract_table_from_ddl(
-            "CREATE INDEX ix_users_name ON schema.users (name)"
-        ) == "users"
+        extract = MigrationManager._extract_table_from_ddl
+        assert extract("CREATE INDEX ix_users_name ON schema.users (name)") == "users"
+        assert extract('CREATE INDEX ix ON "schema"."users" (name)') == "users"
+        assert extract("CREATE UNIQUE INDEX ix ON [dbo].[users] (name)") == "users"
 
     def test_extract_table_from_alter(self, tmp_path: Path):
-        mgr = MigrationManager(
-            workspace=tmp_path,
-            target_url="sqlite:///test.db",
-            target_schema="test_schema",
-        )
-        assert mgr._extract_table_from_ddl(
-            "ALTER TABLE schema.users ADD COLUMN email VARCHAR"
-        ) == "users"
+        extract = MigrationManager._extract_table_from_ddl
+        assert extract("ALTER TABLE schema.users ADD COLUMN email VARCHAR") == "users"
+        assert extract('ALTER TABLE "schema"."users" ADD COLUMN email') == "users"
+        assert extract("ALTER TABLE [dbo].[users] ADD COLUMN email") == "users"
 
     def test_generate_per_table_ddl_creates_files(self, tmp_path: Path):
         mgr = MigrationManager(
@@ -99,6 +93,28 @@ UPDATE alembic_version SET version_num='abc123' WHERE alembic_version.version_nu
         assert (ddl_dir / "posts.sql").exists()
         assert "CREATE TABLE" in (ddl_dir / "users.sql").read_text()
         assert "CREATE TABLE" in (ddl_dir / "posts.sql").read_text()
+
+    def test_generate_per_table_ddl_clears_stale_files(self, tmp_path: Path):
+        mgr = MigrationManager(
+            workspace=tmp_path,
+            target_url="sqlite:///test.db",
+            target_schema="test_schema",
+        )
+
+        # Create stale file from a previous run
+        ddl_dir = tmp_path / "ddl"
+        ddl_dir.mkdir()
+        (ddl_dir / "old_table.sql").write_text("-- stale")
+
+        ddl = (
+            "CREATE TABLE test_schema.users (\n"
+            "    id INTEGER NOT NULL\n"
+            ");\n"
+        )
+        mgr._generate_per_table_ddl(ddl)
+
+        assert (ddl_dir / "users.sql").exists()
+        assert not (ddl_dir / "old_table.sql").exists()
 
 
 class TestOpPatterns:

@@ -171,22 +171,30 @@ class ModelGenerator:
         """
         output_dir = Path(output_dir)
         workspace = output_dir.parent
+        dir_name = output_dir.name
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Back up existing models/ directory
         if output_dir.is_dir():
-            backup_dir = workspace / f"models_{timestamp}.bak"
+            backup_dir = workspace / f"{dir_name}_{timestamp}.bak"
             shutil.copytree(output_dir, backup_dir)
-            logger.info("Backed up existing models/ to %s", backup_dir.name)
+            logger.info("Backed up existing %s/ to %s", dir_name, backup_dir.name)
             shutil.rmtree(output_dir)
+        elif output_dir.exists():
+            # output_dir exists as a plain file — back up and remove
+            backup_path = workspace / f"{dir_name}_{timestamp}.file.bak"
+            shutil.copy2(output_dir, backup_path)
+            output_dir.unlink()
+            logger.info("Backed up existing file %s to %s", dir_name, backup_path.name)
 
-        # Back up and remove legacy models.py if present
-        legacy_file = workspace / "models.py"
-        if legacy_file.is_file():
-            backup_path = workspace / f"models_{timestamp}.py.bak"
-            shutil.copy2(legacy_file, backup_path)
-            legacy_file.unlink()
-            logger.info("Backed up legacy models.py to %s", backup_path.name)
+        # Back up and remove legacy models.py if present (only when writing models/)
+        if dir_name == "models":
+            legacy_file = workspace / "models.py"
+            if legacy_file.is_file():
+                backup_path = workspace / f"models_{timestamp}.py.bak"
+                shutil.copy2(legacy_file, backup_path)
+                legacy_file.unlink()
+                logger.info("Backed up legacy models.py to %s", backup_path.name)
 
         output_dir.mkdir(parents=True, exist_ok=True)
 

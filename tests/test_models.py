@@ -283,6 +283,34 @@ class TestModelGenerator:
         assert "from .posts import Posts" in init_content
 
     @patch("smt.models.sa_inspect")
+    def test_keyword_escaping(self, mock_inspect):
+        """Python keywords in column/class names get underscore suffix."""
+        mock_inspect.return_value = _mock_inspector({
+            "Badges": {
+                "columns": [
+                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
+                    {"name": "Class", "type": Integer(), "nullable": False, "autoincrement": False},
+                ],
+                "pk": {"constrained_columns": ["Id"], "name": "PK_Badges"},
+                "fks": [],
+            },
+        })
+
+        engine = MagicMock()
+        gen = ModelGenerator(
+            source_engine=engine,
+            target_schema="dw__testdb__dbo",
+            source_schema="dbo",
+            source_database="TestDB",
+        )
+        output = gen.generate()
+
+        # 'Class' is a keyword — attribute should be escaped, DB column name preserved
+        assert "Class_: Mapped[int] = mapped_column('class', Integer, nullable=False)" in output
+        # Class name should not be affected (Badges is not a keyword)
+        assert "class Badges(Base):" in output
+
+    @patch("smt.models.sa_inspect")
     def test_no_tables_found(self, mock_inspect):
         mock_inspect.return_value = _mock_inspector({})
 

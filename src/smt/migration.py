@@ -321,6 +321,10 @@ class MigrationManager:
             return
 
         ddl_dir = self.workspace / "ddl"
+        # Clear stale files from previous runs
+        if ddl_dir.exists():
+            for old_file in ddl_dir.glob("*.sql"):
+                old_file.unlink()
         ddl_dir.mkdir(exist_ok=True)
 
         for table_name, table_sql in table_ddls.items():
@@ -354,33 +358,50 @@ class MigrationManager:
 
         return {name: "\n\n".join(stmts) + "\n" for name, stmts in table_ddl.items()}
 
-    def _extract_table_from_ddl(self, statement: str) -> str | None:
-        """Extract the table name from a SQL DDL statement."""
-        # CREATE TABLE [schema.]table
+    @staticmethod
+    def _extract_table_from_ddl(statement: str) -> str | None:
+        """Extract the table name from a SQL DDL statement.
+
+        Handles unquoted, double-quoted, and bracket-quoted identifiers:
+            schema.table, "schema"."table", [schema].[table]
+        """
+        # Pattern for an identifier: [name], "name", or bare name
+        _ident = r'(?:\[(\w+)\]|"(\w+)"|(\w+))'
+        # Optional schema prefix: ident.
+        _opt_schema = r"(?:" + _ident + r"\s*\.\s*)?"
+
+        def _first_group(m: re.Match, start: int) -> str | None:
+            """Return the first non-None group starting at index."""
+            for i in range(start, start + 3):
+                if m.group(i):
+                    return m.group(i).lower()
+            return None
+
+        # CREATE TABLE [IF NOT EXISTS] [schema.]table
         m = re.search(
-            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[\w\"]+\.)?(\w+)",
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?" + _opt_schema + _ident,
             statement,
             re.IGNORECASE,
         )
         if m:
-            return m.group(1).lower()
+            return _first_group(m, 4)
 
         # CREATE [UNIQUE] INDEX ... ON [schema.]table
         m = re.search(
-            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+\S+\s+ON\s+(?:[\w\"]+\.)?(\w+)",
+            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+\S+\s+ON\s+" + _opt_schema + _ident,
             statement,
             re.IGNORECASE,
         )
         if m:
-            return m.group(1).lower()
+            return _first_group(m, 4)
 
         # ALTER TABLE [schema.]table
         m = re.search(
-            r"ALTER\s+TABLE\s+(?:[\w\"]+\.)?(\w+)",
+            r"ALTER\s+TABLE\s+" + _opt_schema + _ident,
             statement,
             re.IGNORECASE,
         )
         if m:
-            return m.group(1).lower()
+            return _first_group(m, 4)
 
         return None
