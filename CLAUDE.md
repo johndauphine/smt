@@ -1,150 +1,144 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Repository Purpose
 
-PostgreSQL schema migration toolkit using SQLAlchemy and Alembic. Migrates schemas between PostgreSQL databases with automatic lowercase naming and derived schema names.
-
-## Key Files
-
-- **scripts/config.env.example** - Configuration template
-- **scripts/migrate-all.sh** - Full migration pipeline
-- **scripts/01-generate-models.sh** - Generate SQLAlchemy models
-- **scripts/02-init-alembic.sh** - Initialize Alembic
-- **scripts/03-create-migration.sh** - Create Alembic migration
-- **scripts/04-apply-migration.sh** - Apply migration
-- **scripts/05-rollback.sh** - Rollback migrations
+Schema migration toolkit supporting PostgreSQL and MSSQL. Migrates schemas between databases using SQLAlchemy reflection + Alembic migrations, with automatic lowercase naming and derived target schema names.
 
 ## Common Commands
 
-### Run Full Migration
-
 ```bash
-cp scripts/config.env.example scripts/config.env
-# Edit config.env with database credentials
-./scripts/migrate-all.sh
-```
+# Install (requires Python 3.12+)
+uv venv --python 3.12 .venv && uv pip install -e ".[dev,postgres]"
 
-### Run Individual Steps
+# Full migration pipeline
+smt migrate -c smt.yaml              # Interactive (prompts for confirmation)
+smt migrate -c smt.yaml --yes        # Non-interactive
 
-```bash
-./scripts/01-generate-models.sh   # Generate models from source
-./scripts/02-init-alembic.sh      # Initialize Alembic
-./scripts/03-create-migration.sh  # Create migration
-./scripts/04-apply-migration.sh   # Apply migration
-```
+# Individual steps (must run in order on first use)
+smt generate -c smt.yaml             # Reflect source -> models.py
+smt init -c smt.yaml                 # Init Alembic + create target schema
+smt create -c smt.yaml               # Autogenerate migration (removes empty ones)
+smt apply -c smt.yaml                # Generate DDL, apply, verify tables
+smt apply -c smt.yaml --dry-run      # Generate DDL only, don't apply
 
-### Rollback
+# Rollback
+smt rollback -c smt.yaml             # Rollback all (to base)
+smt rollback -c smt.yaml -n 1        # Rollback one revision
+smt rollback -c smt.yaml --drop-schema  # Rollback all + drop target schema
 
-```bash
-./scripts/05-rollback.sh              # Rollback all
-./scripts/05-rollback.sh -1           # Rollback one revision
-./scripts/05-rollback.sh base yes     # Rollback and drop schema
-```
+# Status and history
+smt status -c smt.yaml               # Current revision, tables
+smt history -c smt.yaml              # Migration history
 
-### Manual Alembic Commands
+# Run tests
+.venv/bin/pytest tests/ -v
 
-```bash
-cd scripts/migration_workspace
-source venv/bin/activate
-alembic current           # Check status
-alembic history --verbose # View history
-alembic upgrade head      # Apply migrations
-alembic downgrade -1      # Rollback one
+# Lint
+.venv/bin/ruff check src/ tests/
 ```
 
 ## Configuration
 
-### config.env Variables
+Copy `config.example.yaml` to `smt.yaml` and edit. Key fields:
 
-```bash
-# Source PostgreSQL
-SOURCE_PG_HOST, SOURCE_PG_PORT, SOURCE_PG_USER
-SOURCE_PG_PASSWORD, SOURCE_PG_DATABASE, SOURCE_PG_SCHEMA
-
-# Target PostgreSQL
-TARGET_PG_HOST, TARGET_PG_PORT, TARGET_PG_USER
-TARGET_PG_PASSWORD, TARGET_PG_DATABASE
-
-# Migration settings
-TABLES=all                    # or comma-separated list
-WORK_DIR=./migration_workspace
+```yaml
+source:
+  dialect: postgresql | mssql
+  host, port, user, password, database, schema
+target:
+  dialect: postgresql | mssql
+  host, port, user, password, database
+tables: [Users, Posts] or "all"
+workspace: ./migration_workspace
 ```
 
-### Schema Naming
-
-Target schema is derived as: `dw__<source_database>__<source_schema>` (lowercase)
-
-Example: `StackOverflow2010.dbo` -> `dw__stackoverflow2010__dbo`
+- **Target schema**: Auto-derived as `dw__{source.database}__{source.schema}` (lowercase)
+- **Env var overrides**: `SMT_SOURCE_PASSWORD` and `SMT_TARGET_PASSWORD` override YAML passwords
+- **Schema name length**: Validated at load time (PG: 63 chars, MSSQL: 128 chars)
+- **Default ports**: postgresql=5432, mssql=1433
+- **Default drivers**: postgresql=psycopg2, mssql=pyodbc
 
 ## Architecture
 
-### Migration Pipeline
-
-1. **01-generate-models.sh**: sqlacodegen generates SQLAlchemy models, transforms to lowercase
-2. **02-init-alembic.sh**: Creates venv, installs packages, initializes Alembic, creates target schema
-3. **03-create-migration.sh**: Runs alembic autogenerate, removes empty migrations
-4. **04-apply-migration.sh**: Generates DDL, applies migration, verifies tables
-
-### Schema Change Detection
-
-Models are always regenerated from source to capture schema changes:
-- Alembic compares models to target database
-- Creates incremental migrations for differences
-- Removes empty migrations if no changes detected
-- Skips apply if already at head
-
-### Generated Artifacts
+### Package Structure (`src/smt/`)
 
 ```
-scripts/migration_workspace/
-├── venv/              # Python virtual environment
-├── models.py          # SQLAlchemy models (with timestamp header)
-├── models_*.py.bak    # Backup of previous models
-├── migration_*.sql    # Generated DDL (timestamped)
-├── alembic.ini        # Alembic config
-└── alembic/
-    └── versions/      # Migration files
+cli.py          Click CLI entry point (group + subcommands)
+config.py       YAML loading, DatabaseConfig/SmtConfig dataclasses, URL building, validation
+database.py     DatabaseManager: engine creation, dialect-specific schema DDL, table listing
+models.py       ModelGenerator: SQLAlchemy inspect() -> model code generation (replaces sqlacodegen)
+migration.py    MigrationManager: Alembic programmatic API wrapper
+pipeline.py     Pipeline orchestrator (composes the above)
+templates/
+  env.py.mako   Alembic env.py template (imports Base from models.py)
 ```
 
-models.py includes generation timestamp, source/target info, and tables list in header comment.
+### Pipeline Flow
 
-## Model Generation
+```
+Source DB -> inspect() -> ModelGenerator -> models.py (with lowercase transforms baked in)
+                                                |
+Target DB <- alembic upgrade <- migration file <- alembic autogenerate (diff models vs target) <-+
+```
 
-Models use SQLAlchemy 2.0 syntax:
-- `Mapped` type annotations
-- `DeclarativeBase` pattern
-- Lowercase database names, PascalCase Python names
-- Identity columns properly mapped
+### Key Module Details
+
+**`models.py`** (core module): Replaces sqlacodegen + regex post-processing. Uses `sqlalchemy.inspect()` to reflect columns, PKs, FKs per table. Generates SQLAlchemy 2.0 declarative code directly with correct naming:
+- `__tablename__` = lowercase, column DB names = lowercase, constraint names = lowercase
+- Python attribute names = original PascalCase from source
+- FK references rewritten to `target_schema.table.col`
+- Collations detected during reflection are logged as warnings and skipped
+- Unrecognized dialect-specific types fall back to `String` with a warning
+- Backs up previous models.py as `models_<timestamp>.py.bak`
+
+**`migration.py`**: Drives Alembic via `alembic.config.Config` + `alembic.command.*` (no subprocess). Handles:
+- Init: `command.init()`, writes env.py from template, updates alembic.ini URL
+- Create: applies pending migrations first, `command.revision(autogenerate=True)`, removes empty migrations, strips collation params
+- Apply: checks if at head, generates DDL SQL file, `command.upgrade("head")`. Supports `--dry-run`.
+- Rollback: `command.downgrade(target)` where target is "base", "-N", or revision hash
+
+**`database.py`**: Dialect-specific DDL dispatch for schema creation/drop:
+- PostgreSQL: `CREATE SCHEMA IF NOT EXISTS` / `DROP SCHEMA IF EXISTS ... CASCADE`
+- MSSQL: `IF NOT EXISTS (SELECT FROM sys.schemas ...) EXEC('CREATE SCHEMA ...')` / `DROP SCHEMA IF EXISTS`
+
+**`config.py`**: Loads YAML, applies env var overrides for passwords, validates schema name length against dialect limits, builds SQLAlchemy `URL.create()` (handles password encoding automatically).
+
+### Design Decisions
+
+- **No sqlacodegen dependency** — replaced with SQLAlchemy `inspect()` + custom code generator
+- **No subprocess calls** — Alembic and DB operations are all Python API
+- **No venv management** — tool is pip-installed; workspace only has models.py + alembic artifacts
+- **Idempotent pipeline** — running twice with no source changes reports "Already in sync"
+- **PascalCase Python attributes, lowercase DB identifiers** — `Users.DisplayName` -> column `displayname`
+- **env.py uses `include_schemas=True`** — required for multi-schema Alembic support
+- **env.py rewritten on every init** — ensures template is current
+
+### Generated Artifacts (in workspace directory)
+
+- `models.py` — SQLAlchemy 2.0 models with timestamp header
+- `models_*.py.bak` — Backups of previous models
+- `migration_*.sql` — DDL snapshots for review
+- `alembic/versions/` — Migration files
+- `alembic.ini` — Target DB URL (%-escaped)
 
 ## Testing
 
 ```bash
-# Test no-change detection
-./scripts/migrate-all.sh  # Run once
-./scripts/migrate-all.sh  # Run again - should report "Already in sync"
-
-# Test schema change detection
-psql -d SourceDB -c "ALTER TABLE dbo.Users ADD COLUMN Email VARCHAR(100)"
-./scripts/migrate-all.sh  # Should detect and migrate new column
-
-# Test rollback cycle
-./scripts/05-rollback.sh base yes
-./scripts/migrate-all.sh
+.venv/bin/pytest tests/ -v          # All tests (56 tests, no DB required)
+.venv/bin/pytest tests/test_config.py -v    # Config module only
+.venv/bin/pytest tests/test_models.py -v    # Model generator only
 ```
 
-## Troubleshooting
+Tests use mocked SQLAlchemy inspectors — no database connection needed.
 
-### Connection issues
-```bash
-psql -h $HOST -p $PORT -U $USER -d $DATABASE
-```
+## Prerequisites
 
-### Check migration status
-```bash
-cd scripts/migration_workspace && source venv/bin/activate && alembic current
-```
+- Python 3.12+
+- Database drivers: `pip install smt[postgres]` for PostgreSQL, `pip install smt[mssql]` for MSSQL
+- MSSQL requires Microsoft ODBC Driver for SQL Server installed on the system (for pyodbc)
 
-### Password encoding
-URL-encode special characters: `@` -> `%40`, `#` -> `%23`
+## Legacy Bash Scripts
+
+The original bash scripts remain in `scripts/` for reference. They are not used by the Python CLI.

@@ -3,6 +3,7 @@ migration_workspace/
 
 # Configuration with credentials
 scripts/config.env
+smt.yaml
 
 # Python
 __pycache__/
@@ -11,7 +12,17 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 ENV/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+src/*.egg-info/
+
+# Test
+.pytest_cache/
 
 # IDE
 .idea/
