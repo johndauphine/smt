@@ -17,7 +17,7 @@ smt migrate -c smt.yaml              # Interactive (prompts for confirmation)
 smt migrate -c smt.yaml --yes        # Non-interactive
 
 # Individual steps (must run in order on first use)
-smt generate -c smt.yaml             # Reflect source -> models.py
+smt generate -c smt.yaml             # Reflect source -> models/ package
 smt init -c smt.yaml                 # Init Alembic + create target schema
 smt create -c smt.yaml               # Autogenerate migration (removes empty ones)
 smt apply -c smt.yaml                # Generate DDL, apply, verify tables
@@ -68,11 +68,11 @@ workspace: ./migration_workspace
 cli.py          Click CLI entry point (group + subcommands)
 config.py       YAML loading, DatabaseConfig/SmtConfig dataclasses, URL building, validation
 database.py     DatabaseManager: engine creation, dialect-specific schema DDL, table listing
-models.py       ModelGenerator: SQLAlchemy inspect() -> model code generation (replaces sqlacodegen)
+models.py       ModelGenerator: SQLAlchemy inspect() -> per-table model generation (replaces sqlacodegen)
 migration.py    MigrationManager: Alembic programmatic API wrapper
 pipeline.py     Pipeline orchestrator (composes the above)
 templates/
-  env.py.mako   Alembic env.py template (imports Base from models.py)
+  env.py.mako   Alembic env.py template (imports Base from models package)
 ```
 
 ### Pipeline Flow
@@ -115,7 +115,7 @@ Target DB <- alembic upgrade <- migration file <- alembic autogenerate (diff mod
 
 - **No sqlacodegen dependency** — replaced with SQLAlchemy `inspect()` + custom code generator
 - **No subprocess calls** — Alembic and DB operations are all Python API
-- **No venv management** — tool is pip-installed; workspace only has models.py + alembic artifacts
+- **No venv management** — tool is pip-installed; workspace only has models/ package + alembic artifacts
 - **Idempotent pipeline** — running twice with no source changes reports "Already in sync"
 - **PascalCase Python attributes, lowercase DB identifiers** — `Users.DisplayName` -> column `displayname`
 - **env.py uses `include_schemas=True`** — required for multi-schema Alembic support

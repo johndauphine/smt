@@ -42,5 +42,5 @@ tables:
 # Working Directory
 # =============================================================================
 # Directory where migration artifacts are created
-# (models.py, alembic config, migration files, DDL exports)
+# (models/ package, alembic config, migration files, per-table DDL exports)
 workspace: ./migration_workspace
