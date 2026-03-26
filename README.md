@@ -1,256 +1,177 @@
-# PostgreSQL Schema Migration Scripts
+# SMT - Schema Migration Toolkit
 
-Automated scripts for migrating database schemas between PostgreSQL databases using SQLAlchemy and Alembic.
+Migrates database schemas between PostgreSQL and MSSQL databases using SQLAlchemy and Alembic. Installable Python CLI with YAML configuration.
 
-## Overview
+## Features
 
-This toolkit generates SQLAlchemy models from a source PostgreSQL database and creates Alembic migrations to replicate the schema in a target PostgreSQL database with a different schema naming convention.
-
-**Key Features:**
-- Automated model generation using sqlacodegen
-- Alembic-based schema migrations
-- Automatic detection of source schema changes
-- Lowercase table/column/constraint names in target
-- Foreign key relationships preserved and transformed
-- Configurable table selection
-- Incremental migrations (only changes are migrated)
-- Rollback support
+- **Multi-database**: PostgreSQL and MSSQL as source or target
+- **Automatic model generation**: Reflects source schema via SQLAlchemy `inspect()` (no sqlacodegen dependency)
+- **Incremental migrations**: Alembic detects and migrates only what changed
+- **Lowercase normalization**: All database identifiers lowercased in target
+- **Foreign key preservation**: FK relationships transformed to target schema
+- **Collation handling**: Source collations logged as warnings, not emitted in target
+- **DBA-friendly**: `--dry-run` generates DDL SQL for review without applying
+- **Idempotent**: Re-running reports "Already in sync" when nothing changed
+- **Rollback support**: Revert to any revision or drop the target schema entirely
 
 ## Quick Start
 
 ```bash
-# 1. Configure your databases
-cp scripts/config.env.example scripts/config.env
-vim scripts/config.env  # Edit with your settings
+# Install
+pip install -e ".[postgres]"       # for PostgreSQL
+pip install -e ".[mssql]"          # for MSSQL (requires ODBC Driver 18)
+pip install -e ".[postgres,mssql]" # for both
 
-# 2. Run full migration
-./scripts/migrate-all.sh
+# Configure
+cp config.example.yaml smt.yaml
+# Edit smt.yaml with your database credentials
 
-# 3. Rollback if needed
-./scripts/05-rollback.sh
+# Migrate
+smt -c smt.yaml migrate
 ```
+
+## CLI Commands
+
+```bash
+smt -c smt.yaml migrate [--yes]           # Full pipeline (generate -> init -> create -> apply)
+smt -c smt.yaml generate                  # Reflect source -> models.py
+smt -c smt.yaml init                      # Initialize Alembic + create target schema
+smt -c smt.yaml create [-m "message"]     # Autogenerate migration
+smt -c smt.yaml apply [--dry-run]         # Apply migration (or just generate DDL)
+smt -c smt.yaml rollback [-n 1]           # Rollback one revision
+smt -c smt.yaml rollback --drop-schema    # Rollback all + drop target schema
+smt -c smt.yaml status                    # Current revision + tables
+smt -c smt.yaml history                   # Migration history
+```
+
+Global options: `--log-level DEBUG|INFO|WARNING|ERROR` (DEBUG shows SQL queries).
 
 ## Configuration
 
-Edit `scripts/config.env`:
+```yaml
+source:
+  dialect: mssql                   # postgresql | mssql
+  host: localhost
+  port: 1433
+  user: sa
+  password: YourPassword           # or set SMT_SOURCE_PASSWORD env var
+  database: StackOverflow2010
+  schema: dbo
 
-```bash
-# Source Database (PostgreSQL)
-SOURCE_PG_HOST=localhost
-SOURCE_PG_PORT=5432
-SOURCE_PG_USER=postgres
-SOURCE_PG_PASSWORD=YourPassword
-SOURCE_PG_DATABASE=SourceDB
-SOURCE_PG_SCHEMA=dbo
+target:
+  dialect: postgresql
+  host: localhost
+  port: 5432
+  user: postgres
+  password: YourPassword           # or set SMT_TARGET_PASSWORD env var
+  database: stackoverflow
 
-# Target Database (PostgreSQL)
-TARGET_PG_HOST=localhost
-TARGET_PG_PORT=5432
-TARGET_PG_USER=postgres
-TARGET_PG_PASSWORD=YourPassword
-TARGET_PG_DATABASE=TargetDB
+tables:                            # list of tables, or "all"
+  - Users
+  - Posts
+  - Comments
 
-# Tables to migrate (comma-separated or "all")
-TABLES=Users,Posts,Comments
+workspace: ./migration_workspace   # where artifacts are generated
 ```
 
-**Target Schema Naming:**
-The target schema is automatically derived as: `dw__<source_database>__<source_schema>` (lowercase)
+**Target schema naming**: Automatically derived as `dw__<source_database>__<source_schema>` (lowercase).
+Example: `StackOverflow2010.dbo` becomes `dw__stackoverflow2010__dbo`.
 
-Example: Source `StackOverflow2010.dbo` becomes target schema `dw__stackoverflow2010__dbo`
+**Environment variables**: `SMT_SOURCE_PASSWORD` and `SMT_TARGET_PASSWORD` override YAML passwords for CI/CD.
 
-## Scripts
+## Identifier Transformations
 
-| Script | Description |
-|--------|-------------|
-| `migrate-all.sh` | Runs the full migration pipeline |
-| `01-generate-models.sh` | Generates SQLAlchemy models from source |
-| `02-init-alembic.sh` | Initializes Alembic for target database |
-| `03-create-migration.sh` | Creates Alembic migration |
-| `04-apply-migration.sh` | Applies migration and generates DDL |
-| `05-rollback.sh` | Rolls back migrations |
-
-### Running Individual Scripts
-
-```bash
-# Generate models only
-./scripts/01-generate-models.sh
-
-# Initialize Alembic
-./scripts/02-init-alembic.sh
-
-# Create migration (review before applying)
-./scripts/03-create-migration.sh
-
-# Apply migration
-./scripts/04-apply-migration.sh
-
-# Rollback options
-./scripts/05-rollback.sh              # Rollback all
-./scripts/05-rollback.sh -1           # Rollback one revision
-./scripts/05-rollback.sh base yes     # Rollback all and drop schema
-```
-
-## Generated Artifacts
-
-After running the migration, the `migration_workspace/` directory contains:
-
-```
-migration_workspace/
-├── venv/                    # Python virtual environment
-├── models.py                # Generated SQLAlchemy models (timestamped header)
-├── models_*.py.bak          # Backup of previous models
-├── migration_*.sql          # Generated DDL (timestamped)
-├── alembic.ini              # Alembic configuration
-└── alembic/
-    ├── env.py
-    └── versions/            # Migration files
-```
-
-### models.py Header
-
-Generated models include a header with generation metadata:
-
-```python
-# =============================================================================
-# Auto-generated SQLAlchemy models
-# Generated: 2026-01-26 17:34:43
-# Source: StackOverflow2010.dbo
-# Target: dw__stackoverflow2010__dbo
-# Tables: Users,Posts
-# =============================================================================
-```
-
-Previous versions are backed up as `models_<timestamp>.py.bak` before regeneration.
-
-## Example Output
-
-```
-Tables migrated to dw__stackoverflow2010__dbo:
-  - badges
-  - comments
-  - linktypes
-  - postlinks
-  - posts
-  - posttypes
-  - users
-  - votes
-  - votetypes
-```
-
-## Model Features
-
-Generated models use SQLAlchemy 2.0+ syntax:
-- `Mapped` type annotations
-- `DeclarativeBase` pattern
-- Identity columns properly mapped
-- Optional fields using `Optional[]` type hints
-- Foreign key constraints with proper schema references
-
-Example:
-```python
-class Users(Base):
-    __tablename__ = 'users'
-    __table_args__ = {'schema': 'dw__stackoverflow2010__dbo'}
-
-    Id: Mapped[int] = mapped_column('id', Integer, Identity(), primary_key=True)
-    DisplayName: Mapped[str] = mapped_column('displayname', VARCHAR(40), nullable=False)
-    Reputation: Mapped[int] = mapped_column('reputation', Integer, nullable=False)
-
-class Posts(Base):
-    __tablename__ = 'posts'
-    __table_args__ = (
-        ForeignKeyConstraint(['owneruserid'], ['dw__stackoverflow2010__dbo.users.id']),
-        {'schema': 'dw__stackoverflow2010__dbo'}
-    )
-```
-
-## Transformations
-
-The model generation script automatically transforms identifiers for the target database:
-
-| Source | Target |
-|--------|--------|
+| Source (MSSQL/PostgreSQL) | Target |
+|---------------------------|--------|
 | Schema `dbo` | Schema `dw__<database>__<schema>` |
 | Table `Users` | Table `users` |
 | Column `DisplayName` | Column `displayname` |
 | Constraint `PK_Users` | Constraint `pk_users` |
-| FK reference `dbo.Users.Id` | FK reference `dw__<db>__<schema>.users.id` |
+| FK `dbo.Users.Id` | FK `dw__<db>__<schema>.users.id` |
 
-Python attribute names are preserved as PascalCase for code readability while database identifiers use lowercase.
+Python attribute names preserve the original casing (e.g., `Users.DisplayName`) while all database identifiers are lowercase.
 
 ## Schema Change Detection
 
-The pipeline automatically detects and handles source schema changes:
-
 | Scenario | Behavior |
 |----------|----------|
-| **No changes** | Models regenerated, empty migration removed, "Already in sync" |
-| **New table** | Migration creates the new table |
-| **New column** | Migration adds the column |
-| **Dropped column** | Migration removes the column |
-| **Type change** | Migration alters the column type |
+| No changes | Models regenerated, empty migration removed, "Already in sync" |
+| New table | Migration creates the table |
+| New column | Migration adds the column |
+| Dropped column | Migration removes the column |
+| Type change | Migration alters the column type |
 
-Models are always regenerated from source to ensure changes are captured. Alembic then compares models against the target database and creates incremental migrations.
+Models are always regenerated from source. Alembic compares models against the target and creates incremental migrations.
+
+## Generated Artifacts
+
+After migration, the workspace contains:
+
+```
+migration_workspace/
+├── models.py              # SQLAlchemy 2.0 models (with metadata header)
+├── models_*.py.bak        # Backups of previous models
+├── migration_*.sql        # DDL snapshots for review
+├── alembic.ini            # Target DB connection
+└── alembic/
+    ├── env.py             # Imports Base from models.py
+    └── versions/          # Migration files
+```
+
+## Docker Setup (MSSQL to PostgreSQL)
 
 ```bash
-# Example: Add column to source, then migrate
-psql -d SourceDB -c "ALTER TABLE dbo.Users ADD COLUMN Email VARCHAR(100)"
-./scripts/migrate-all.sh  # Automatically detects and migrates the new column
+# Start databases
+docker run -d --name smt-mssql \
+  -e 'ACCEPT_EULA=Y' -e 'MSSQL_SA_PASSWORD=SmtTestPass1' \
+  -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest
+
+docker run -d --name smt-postgres \
+  -e 'POSTGRES_PASSWORD=SmtTestPass1' \
+  -p 5433:5432 postgres:15
+
+# Create target database
+docker exec smt-postgres psql -U postgres -c "CREATE DATABASE stackoverflow;"
+
+# Create smt.yaml pointing source at MSSQL:1433, target at PG:5433
+# Then run migration
+smt -c smt.yaml migrate --yes
+
+# Verify
+docker exec smt-postgres psql -U postgres -d stackoverflow \
+  -c "\dt dw__stackoverflow2010__dbo.*"
+
+# Cleanup
+docker stop smt-mssql smt-postgres && docker rm smt-mssql smt-postgres
 ```
 
 ## Prerequisites
 
-- Python 3.10+
-- PostgreSQL with psql client
-- Source and target PostgreSQL databases
+- Python 3.12+
+- PostgreSQL driver: `pip install smt[postgres]` (installs psycopg2-binary)
+- MSSQL driver: `pip install smt[mssql]` (installs pyodbc; requires [Microsoft ODBC Driver 18](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server) on the system)
 
-## Docker Setup (for testing)
-
-Quick setup using Docker for local testing:
+## Development
 
 ```bash
-# Start PostgreSQL container
-docker run -d --name postgres-migration \
-  -e POSTGRES_PASSWORD=PostgresPassword123 \
-  -p 5433:5432 \
-  postgres:15
+# Setup
+uv venv --python 3.12 .venv
+uv pip install -e ".[dev,postgres,mssql]"
 
-# Wait for PostgreSQL to be ready
-until pg_isready -h localhost -p 5433 -U postgres; do sleep 1; done
+# Test (no database required)
+.venv/bin/pytest tests/ -v
 
-# Create source and target databases
-PGPASSWORD=PostgresPassword123 psql -h localhost -p 5433 -U postgres <<EOF
-CREATE DATABASE "SourceDB";
-CREATE DATABASE "TargetDB";
-EOF
-
-# Create source schema and tables in SourceDB
-PGPASSWORD=PostgresPassword123 psql -h localhost -p 5433 -U postgres -d SourceDB <<EOF
-CREATE SCHEMA dbo;
-CREATE TABLE dbo."Users" (
-    "Id" SERIAL PRIMARY KEY,
-    "DisplayName" VARCHAR(40) NOT NULL
-);
-EOF
-
-# Update config.env with port 5433, then run migration
-./scripts/migrate-all.sh
-
-# Cleanup when done
-docker stop postgres-migration && docker rm postgres-migration
+# Lint
+.venv/bin/ruff check src/ tests/
 ```
 
-## Verification
+## Documentation
 
-```bash
-# Check migration status
-cd scripts/migration_workspace
-source venv/bin/activate
-alembic current
-alembic history --verbose
+- [Design](docs/DESIGN.md) - Architecture and design decisions
+- [Technical Specification](docs/TECH_SPEC.md) - Module API, type mappings, config schema
+- [Philosophy](docs/PHILOSOPHY.md) - Why this approach, guiding principles
+- [Schema Migration Guide](docs/SCHEMA_MIGRATION_GUIDE.md) - Conceptual guide to code-generation migrations
 
-# List tables in target
-psql -h localhost -p 5432 -U postgres -d TargetDB \
-  -c "\dt dw__stackoverflow2010__dbo.*"
-```
+## Legacy
+
+The original bash scripts remain in `scripts/` for reference. They are not used by the Python CLI.

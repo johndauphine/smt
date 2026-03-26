@@ -1,0 +1,46 @@
+# SMT - Schema Migration Toolkit Configuration
+# Copy this file and update with your actual values:
+#   cp config.example.yaml smt.yaml
+
+# =============================================================================
+# Source Database
+# =============================================================================
+source:
+  dialect: postgresql       # postgresql | mssql
+  # driver: psycopg2        # optional: defaults per dialect (psycopg2, pyodbc)
+  host: localhost
+  port: 5432
+  user: postgres
+  password: YourPassword    # or set SMT_SOURCE_PASSWORD env var
+  database: StackOverflow2010
+  schema: dbo
+
+# =============================================================================
+# Target Database
+# =============================================================================
+# Target schema is auto-derived as: dw__<source_database>__<source_schema> (lowercase)
+# Example: dw__stackoverflow2010__dbo
+target:
+  dialect: postgresql
+  # driver: psycopg2
+  host: localhost
+  port: 5432
+  user: postgres
+  password: YourPassword    # or set SMT_TARGET_PASSWORD env var
+  database: stackoverflow
+
+# =============================================================================
+# Tables to Migrate
+# =============================================================================
+# List of table names, or "all" to migrate every table in the source schema
+tables:
+  - Users
+  - Posts
+  - Comments
+
+# =============================================================================
+# Working Directory
+# =============================================================================
+# Directory where migration artifacts are created
+# (models.py, alembic config, migration files, DDL exports)
+workspace: ./migration_workspace
