@@ -34,7 +34,7 @@ smt -c smt.yaml migrate
 
 ```bash
 smt -c smt.yaml migrate [--yes]           # Full pipeline (generate -> init -> create -> apply)
-smt -c smt.yaml generate                  # Reflect source -> models.py
+smt -c smt.yaml generate                  # Reflect source -> models/ package
 smt -c smt.yaml init                      # Initialize Alembic + create target schema
 smt -c smt.yaml create [-m "message"]     # Autogenerate migration
 smt -c smt.yaml apply [--dry-run]         # Apply migration (or just generate DDL)
@@ -109,12 +109,19 @@ After migration, the workspace contains:
 
 ```
 migration_workspace/
-├── models.py              # SQLAlchemy 2.0 models (with metadata header)
-├── models_*.py.bak        # Backups of previous models
-├── migration_*.sql        # DDL snapshots for review
+├── models/                # SQLAlchemy 2.0 models package (one file per table)
+│   ├── __init__.py        # Re-exports Base and all model classes
+│   ├── base.py            # Base(DeclarativeBase) class
+│   ├── users.py           # Per-table model file
+│   └── posts.py           # Per-table model file
+├── models_*.bak/          # Backups of previous models package
+├── ddl/                   # Per-table DDL files
+│   ├── users.sql          # DDL for users table
+│   └── posts.sql          # DDL for posts table
+├── migration_*.sql        # Full DDL snapshot for review
 ├── alembic.ini            # Target DB connection
 └── alembic/
-    ├── env.py             # Imports Base from models.py
+    ├── env.py             # Imports Base from models package
     └── versions/          # Migration files
 ```
 

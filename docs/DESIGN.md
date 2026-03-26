@@ -19,8 +19,8 @@ Architecture decisions and the reasoning behind them.
    │  models.py  │ │migration.py │ │  database.py  │
    │             │ │             │ │               │
    │ Reflect src │ │ Alembic API │ │ Schema DDL    │
-   │ Generate .py│ │ init/create │ │ Table listing │
-   │             │ │ apply/roll  │ │ Connection    │
+   │ Gen models/ │ │ init/create │ │ Table listing │
+   │ (per-table) │ │ apply/roll  │ │ Connection    │
    └──────┬──────┘ └──────┬──────┘ └───────┬───────┘
           │                │                │
    ┌──────▼──────┐ ┌──────▼──────┐ ┌───────▼───────┐
@@ -124,14 +124,14 @@ No circular dependencies. Each module has a single responsibility.
 
 ### 6. Models Always Regenerated
 
-**Decision**: Every pipeline run reflects the source database and regenerates `models.py`, even if it hasn't changed.
+**Decision**: Every pipeline run reflects the source database and regenerates the `models/` package (one file per table), even if it hasn't changed.
 
 **Why**:
 - The source database is the single source of truth
 - Detecting "has the source changed?" requires reflecting anyway
 - Alembic is the diff engine — it compares models against the target database
 - If models haven't changed, Alembic produces an empty migration, which we detect and remove
-- Previous models are backed up automatically
+- Previous models are backed up automatically (entire `models/` directory)
 
 **Trade-off**: Marginally slower than caching, but eliminates an entire class of staleness bugs.
 
@@ -147,7 +147,7 @@ No circular dependencies. Each module has a single responsibility.
 
 ### 8. No Workspace venv Management
 
-**Decision**: The Python CLI is installed into the user's environment. The workspace directory only contains models.py, Alembic config, and migration files.
+**Decision**: The Python CLI is installed into the user's environment. The workspace directory only contains the `models/` package, Alembic config, migration files, and per-table DDL files.
 
 **Why**:
 - The bash scripts created a venv per workspace and installed sqlacodegen/alembic into it
@@ -173,10 +173,13 @@ No circular dependencies. Each module has a single responsibility.
    │   ├── Map column types (reflected → generic SA types)
    │   ├── Log collation warnings
    │   ├── Lowercase all DB identifiers
+   │   ├── Escape Python keywords (e.g. 'class' → 'class_')
    │   └── Rewrite FK references to target schema
-   ├── Generate imports, Base class, table classes
-   ├── Backup existing models.py
-   └── Write new models.py with header
+   ├── Backup existing models/ directory (or legacy models.py)
+   └── Write models/ package:
+       ├── base.py (DeclarativeBase)
+       ├── <table>.py per table (with per-file imports)
+       └── __init__.py (re-exports Base + all models)
 
 3. Initialize Alembic (Step 2)
    ├── Create workspace directory
@@ -196,6 +199,7 @@ No circular dependencies. Each module has a single responsibility.
 5. Apply migration (Step 4)
    ├── Check if already at head → skip if so
    ├── Generate DDL SQL file (offline mode)
+   ├── Split DDL into per-table files in ddl/ directory
    ├── alembic.command.upgrade("head")
    └── List tables in target schema for verification
 ```

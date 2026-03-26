@@ -7,6 +7,7 @@ SQLAlchemy 2.0 declarative model code with lowercase database identifiers.
 from __future__ import annotations
 
 import datetime
+import keyword
 import logging
 import shutil
 from dataclasses import dataclass
@@ -160,20 +161,63 @@ class ModelGenerator:
 
         return header + imports + base_class + "\n" + "\n\n".join(class_defs) + "\n"
 
-    def write(self, output_path: Path) -> None:
-        """Generate models and write to file, backing up any existing version."""
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    def write(self, output_dir: Path) -> None:
+        """Generate per-table model files in a models/ directory.
 
-        if output_path.exists():
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = output_path.with_name(f"models_{timestamp}.py.bak")
-            shutil.copy2(output_path, backup_path)
-            logger.info("Backed up existing models.py to %s", backup_path.name)
+        Creates:
+            output_dir/base.py       - DeclarativeBase class
+            output_dir/<table>.py    - One file per table model
+            output_dir/__init__.py   - Re-exports Base and all models
+        """
+        output_dir = Path(output_dir)
+        workspace = output_dir.parent
+        dir_name = output_dir.name
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        content = self.generate()
-        output_path.write_text(content)
-        logger.info("Generated models.py with %d table(s)", content.count("class ") - 1)
+        # Back up existing models/ directory
+        if output_dir.is_dir():
+            backup_dir = workspace / f"{dir_name}_{timestamp}.bak"
+            shutil.copytree(output_dir, backup_dir)
+            logger.info("Backed up existing %s/ to %s", dir_name, backup_dir.name)
+            shutil.rmtree(output_dir)
+        elif output_dir.exists():
+            # output_dir exists as a plain file — back up and remove
+            backup_path = workspace / f"{dir_name}_{timestamp}.file.bak"
+            shutil.copy2(output_dir, backup_path)
+            output_dir.unlink()
+            logger.info("Backed up existing file %s to %s", dir_name, backup_path.name)
+
+        # Back up and remove legacy models.py if present (only when writing models/)
+        if dir_name == "models":
+            legacy_file = workspace / "models.py"
+            if legacy_file.is_file():
+                backup_path = workspace / f"models_{timestamp}.py.bak"
+                shutil.copy2(legacy_file, backup_path)
+                legacy_file.unlink()
+                logger.info("Backed up legacy models.py to %s", backup_path.name)
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Reflect source tables
+        table_infos = self._reflect_tables()
+        if not table_infos:
+            raise RuntimeError(
+                f"No tables found in schema '{self.source_schema}'"
+                + (f" matching {self.tables}" if self.tables else "")
+            )
+
+        # Write base.py
+        (output_dir / "base.py").write_text(self._generate_base_file())
+
+        # Write per-table files
+        for table in table_infos:
+            filename = table.name.lower() + ".py"
+            (output_dir / filename).write_text(self._generate_table_file(table))
+
+        # Write __init__.py
+        (output_dir / "__init__.py").write_text(self._generate_init_file(table_infos))
+
+        logger.info("Generated %d model file(s) in models/", len(table_infos))
 
     # ------------------------------------------------------------------
     # Reflection
@@ -315,6 +359,106 @@ class ModelGenerator:
             "\n"
         )
 
+    def _generate_base_file(self) -> str:
+        """Generate base.py with DeclarativeBase."""
+        return (
+            '"""SQLAlchemy declarative base."""\n'
+            "\n"
+            "from sqlalchemy.orm import DeclarativeBase\n"
+            "\n"
+            "\n"
+            "class Base(DeclarativeBase):\n"
+            "    pass\n"
+        )
+
+    def _generate_table_file(self, table: TableInfo) -> str:
+        """Generate a complete Python file for a single table model."""
+        header = self._generate_table_header(table)
+        imports = self._generate_table_imports(table)
+        class_def = self._generate_table_class(table)
+        return header + imports + "\n\n" + class_def + "\n"
+
+    def _generate_table_header(self, table: TableInfo) -> str:
+        """Generate header comment for a single table file."""
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return (
+            "# =============================================================================\n"
+            f"# Auto-generated SQLAlchemy model: {table.name}\n"
+            f"# Generated: {now}\n"
+            f"# Source: {self.source_database}.{self.source_schema}\n"
+            f"# Target: {self.target_schema}\n"
+            "# =============================================================================\n"
+            "\n"
+        )
+
+    def _generate_table_imports(self, table: TableInfo) -> str:
+        """Generate import statements for a single table file."""
+        sa_types_used: set[str] = set()
+        hints_used: set[str] = set()
+        has_optional = False
+        has_fks = bool(table.foreign_keys)
+        has_pks = bool(table.pk_columns)
+        has_identity = False
+
+        for col in table.columns:
+            base_type = col.sa_type_code.split("(")[0]
+            sa_types_used.add(base_type)
+            hints_used.add(col.python_hint)
+            if col.nullable and not col.is_primary_key:
+                has_optional = True
+            if col.autoincrement and col.is_primary_key:
+                has_identity = True
+
+        lines = []
+
+        # Standard library imports
+        typing_imports = []
+        if has_optional:
+            typing_imports.append("Optional")
+        if typing_imports:
+            lines.append(f"from typing import {', '.join(sorted(typing_imports))}")
+
+        modules_needed = set()
+        for hint in hints_used:
+            mod = _HINT_MODULES.get(hint)
+            if mod:
+                modules_needed.add(mod)
+        for mod in sorted(modules_needed):
+            lines.append(f"import {mod}")
+
+        if lines:
+            lines.append("")
+
+        # SQLAlchemy imports
+        sa_imports = sorted(sa_types_used)
+        if has_identity:
+            sa_imports.append("Identity")
+        if has_fks:
+            sa_imports.append("ForeignKeyConstraint")
+        if has_pks:
+            sa_imports.append("PrimaryKeyConstraint")
+
+        sa_imports_sorted = sorted(set(sa_imports))
+        lines.append(f"from sqlalchemy import {', '.join(sa_imports_sorted)}")
+        lines.append("from sqlalchemy.orm import Mapped, mapped_column")
+        lines.append("")
+        lines.append("from .base import Base")
+
+        return "\n".join(lines) + "\n"
+
+    def _generate_init_file(self, tables: list[TableInfo]) -> str:
+        """Generate __init__.py that re-exports Base and all model classes."""
+        lines = ['"""Auto-generated models package."""']
+        lines.append("")
+        lines.append("from .base import Base  # noqa: F401")
+        lines.append("")
+        for table in sorted(tables, key=lambda t: t.name.lower()):
+            module_name = table.name.lower()
+            class_name = self._safe_class_name(table.name)
+            lines.append(f"from .{module_name} import {class_name}  # noqa: F401")
+        lines.append("")
+        return "\n".join(lines) + "\n"
+
     def _generate_imports(self, tables: list[TableInfo]) -> str:
         """Generate import statements based on types used across all tables."""
         # Collect all SA types and Python hints used
@@ -379,10 +523,17 @@ class ModelGenerator:
 
         return "\n".join(lines) + "\n"
 
+    @staticmethod
+    def _safe_class_name(name: str) -> str:
+        """Escape Python reserved keywords by appending underscore."""
+        if keyword.iskeyword(name) or keyword.iskeyword(name.lower()):
+            return name + "_"
+        return name
+
     def _generate_table_class(self, table: TableInfo) -> str:
         """Generate a single table class definition."""
-        # Class name: preserve original case from source
-        class_name = table.name
+        # Class name: preserve original case from source, escape keywords
+        class_name = self._safe_class_name(table.name)
         table_name_lower = table.name.lower()
 
         lines = [f"class {class_name}(Base):"]
@@ -454,6 +605,11 @@ class ModelGenerator:
         """Generate a single column definition line."""
         col_name_lower = col.name.lower()
 
+        # Escape Python reserved keywords by appending underscore
+        attr_name = col.name
+        if keyword.iskeyword(attr_name) or keyword.iskeyword(attr_name.lower()):
+            attr_name = attr_name + "_"
+
         # Python type hint
         if col.nullable and not col.is_primary_key:
             hint = f"Mapped[Optional[{col.python_hint}]]"
@@ -477,4 +633,4 @@ class ModelGenerator:
                 args.append("nullable=False")
 
         args_str = ", ".join(args)
-        return f"    {col.name}: {hint} = mapped_column({args_str})"
+        return f"    {attr_name}: {hint} = mapped_column({args_str})"

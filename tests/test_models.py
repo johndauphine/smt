@@ -164,8 +164,9 @@ class TestModelGenerator:
             },
         })
 
-        models_path = tmp_workspace / "models.py"
-        models_path.write_text("# old content")
+        models_dir = tmp_workspace / "models"
+        models_dir.mkdir()
+        (models_dir / "old_file.py").write_text("# old content")
 
         engine = MagicMock()
         gen = ModelGenerator(
@@ -174,15 +175,140 @@ class TestModelGenerator:
             source_schema="dbo",
             source_database="TestDB",
         )
-        gen.write(models_path)
+        gen.write(models_dir)
 
-        # Original should be regenerated
-        assert "class T(Base):" in models_path.read_text()
+        # New files should exist
+        assert (models_dir / "base.py").exists()
+        assert (models_dir / "t.py").exists()
+        assert (models_dir / "__init__.py").exists()
+
+        # Old file should be gone (directory was backed up and recreated)
+        assert not (models_dir / "old_file.py").exists()
+
+        # Backup directory should exist
+        backups = list(tmp_workspace.glob("models_*.bak"))
+        assert len(backups) == 1
+        assert (backups[0] / "old_file.py").read_text() == "# old content"
+
+    @patch("smt.models.sa_inspect")
+    def test_legacy_models_py_backup(self, mock_inspect, tmp_workspace: Path):
+        """Legacy models.py is backed up when writing models/ directory."""
+        mock_inspect.return_value = _mock_inspector({
+            "T": {
+                "columns": [
+                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
+                ],
+                "pk": {"constrained_columns": ["Id"], "name": "PK_T"},
+            },
+        })
+
+        # Create legacy models.py
+        legacy = tmp_workspace / "models.py"
+        legacy.write_text("# legacy models")
+
+        models_dir = tmp_workspace / "models"
+        engine = MagicMock()
+        gen = ModelGenerator(
+            source_engine=engine,
+            target_schema="dw__testdb__dbo",
+            source_schema="dbo",
+            source_database="TestDB",
+        )
+        gen.write(models_dir)
+
+        # Legacy file should be gone
+        assert not legacy.exists()
 
         # Backup should exist
         backups = list(tmp_workspace.glob("models_*.py.bak"))
         assert len(backups) == 1
-        assert backups[0].read_text() == "# old content"
+        assert backups[0].read_text() == "# legacy models"
+
+    @patch("smt.models.sa_inspect")
+    def test_per_table_files(self, mock_inspect, tmp_workspace: Path):
+        """write() produces per-table model files in a models/ directory."""
+        mock_inspect.return_value = _mock_inspector({
+            "Users": {
+                "columns": [
+                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
+                    {"name": "DisplayName", "type": String(40), "nullable": False, "autoincrement": False},
+                ],
+                "pk": {"constrained_columns": ["Id"], "name": "PK_Users"},
+                "fks": [],
+            },
+            "Posts": {
+                "columns": [
+                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
+                ],
+                "pk": {"constrained_columns": ["Id"], "name": "PK_Posts"},
+                "fks": [],
+            },
+        })
+
+        models_dir = tmp_workspace / "models"
+        engine = MagicMock()
+        gen = ModelGenerator(
+            source_engine=engine,
+            target_schema="dw__testdb__dbo",
+            source_schema="dbo",
+            source_database="TestDB",
+        )
+        gen.write(models_dir)
+
+        # Check directory structure
+        assert (models_dir / "base.py").exists()
+        assert (models_dir / "__init__.py").exists()
+        assert (models_dir / "users.py").exists()
+        assert (models_dir / "posts.py").exists()
+
+        # Check base.py content
+        base_content = (models_dir / "base.py").read_text()
+        assert "class Base(DeclarativeBase):" in base_content
+
+        # Check users.py content
+        users_content = (models_dir / "users.py").read_text()
+        assert "class Users(Base):" in users_content
+        assert "from .base import Base" in users_content
+        assert "__tablename__ = 'users'" in users_content
+        assert "PrimaryKeyConstraint('id', name='pk_users')" in users_content
+
+        # Check posts.py content
+        posts_content = (models_dir / "posts.py").read_text()
+        assert "class Posts(Base):" in posts_content
+
+        # Check __init__.py content
+        init_content = (models_dir / "__init__.py").read_text()
+        assert "from .base import Base" in init_content
+        assert "from .users import Users" in init_content
+        assert "from .posts import Posts" in init_content
+
+    @patch("smt.models.sa_inspect")
+    def test_keyword_escaping(self, mock_inspect):
+        """Python keywords in column/class names get underscore suffix."""
+        mock_inspect.return_value = _mock_inspector({
+            "Badges": {
+                "columns": [
+                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
+                    {"name": "Class", "type": Integer(), "nullable": False, "autoincrement": False},
+                ],
+                "pk": {"constrained_columns": ["Id"], "name": "PK_Badges"},
+                "fks": [],
+            },
+        })
+
+        engine = MagicMock()
+        gen = ModelGenerator(
+            source_engine=engine,
+            target_schema="dw__testdb__dbo",
+            source_schema="dbo",
+            source_database="TestDB",
+        )
+        output = gen.generate()
+
+        # 'Class' is a keyword — attribute should be escaped, DB column name preserved
+        assert "Class_: Mapped[int] = mapped_column('class', Integer, nullable=False)" in output
+        # Class name should not be affected (Badges is not a keyword)
+        assert "class Badges(Base):" in output
 
     @patch("smt.models.sa_inspect")
     def test_no_tables_found(self, mock_inspect):

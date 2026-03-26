@@ -292,7 +292,12 @@ class MigrationManager:
         return counts
 
     def _generate_ddl_file(self) -> Path:
-        """Generate DDL SQL file using Alembic offline mode."""
+        """Generate DDL SQL file(s) using Alembic offline mode.
+
+        Generates both:
+        - Full DDL file: migration_<timestamp>.sql
+        - Per-table DDL files: ddl/<table>.sql
+        """
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         ddl_path = self.workspace / f"migration_{timestamp}.sql"
 
@@ -301,5 +306,102 @@ class MigrationManager:
         config.output_buffer = output
         command.upgrade(config, "head", sql=True)
 
-        ddl_path.write_text(output.getvalue())
+        full_ddl = output.getvalue()
+        ddl_path.write_text(full_ddl)
+
+        # Generate per-table DDL files
+        self._generate_per_table_ddl(full_ddl)
+
         return ddl_path
+
+    def _generate_per_table_ddl(self, ddl_content: str) -> None:
+        """Split DDL into per-table files in ddl/ directory."""
+        table_ddls = self._split_ddl_by_table(ddl_content)
+        if not table_ddls:
+            return
+
+        ddl_dir = self.workspace / "ddl"
+        # Clear stale files from previous runs
+        if ddl_dir.exists():
+            for old_file in ddl_dir.glob("*.sql"):
+                old_file.unlink()
+        ddl_dir.mkdir(exist_ok=True)
+
+        for table_name, table_sql in table_ddls.items():
+            table_path = ddl_dir / f"{table_name}.sql"
+            table_path.write_text(table_sql)
+            logger.info("DDL for '%s': %s", table_name, table_path.name)
+
+    def _split_ddl_by_table(self, ddl_content: str) -> dict[str, str]:
+        """Split DDL SQL content into per-table statement groups."""
+        raw_statements = re.split(r";\s*\n", ddl_content)
+
+        table_ddl: dict[str, list[str]] = {}
+
+        for raw in raw_statements:
+            stmt = raw.strip()
+            if not stmt:
+                continue
+            # Skip Alembic bookkeeping
+            if "alembic_version" in stmt.lower():
+                continue
+            # Skip comment-only blocks
+            if all(
+                line.strip().startswith("--") or not line.strip()
+                for line in stmt.split("\n")
+            ):
+                continue
+
+            table_name = self._extract_table_from_ddl(stmt)
+            if table_name:
+                table_ddl.setdefault(table_name, []).append(stmt + ";")
+
+        return {name: "\n\n".join(stmts) + "\n" for name, stmts in table_ddl.items()}
+
+    @staticmethod
+    def _extract_table_from_ddl(statement: str) -> str | None:
+        """Extract the table name from a SQL DDL statement.
+
+        Handles unquoted, double-quoted, and bracket-quoted identifiers:
+            schema.table, "schema"."table", [schema].[table]
+        """
+        # Pattern for an identifier: [name], "name", or bare name
+        _ident = r'(?:\[(\w+)\]|"(\w+)"|(\w+))'
+        # Optional schema prefix: ident.
+        _opt_schema = r"(?:" + _ident + r"\s*\.\s*)?"
+
+        def _first_group(m: re.Match, start: int) -> str | None:
+            """Return the first non-None group starting at index."""
+            for i in range(start, start + 3):
+                if m.group(i):
+                    return m.group(i).lower()
+            return None
+
+        # CREATE TABLE [IF NOT EXISTS] [schema.]table
+        m = re.search(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?" + _opt_schema + _ident,
+            statement,
+            re.IGNORECASE,
+        )
+        if m:
+            return _first_group(m, 4)
+
+        # CREATE [UNIQUE] INDEX ... ON [schema.]table
+        m = re.search(
+            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+\S+\s+ON\s+" + _opt_schema + _ident,
+            statement,
+            re.IGNORECASE,
+        )
+        if m:
+            return _first_group(m, 4)
+
+        # ALTER TABLE [schema.]table
+        m = re.search(
+            r"ALTER\s+TABLE\s+" + _opt_schema + _ident,
+            statement,
+            re.IGNORECASE,
+        )
+        if m:
+            return _first_group(m, 4)
+
+        return None
