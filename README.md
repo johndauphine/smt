@@ -170,7 +170,6 @@ uv pip install -e ".[dev,postgres,mssql]"
 - [Design](docs/DESIGN.md) - Architecture and design decisions
 - [Technical Specification](docs/TECH_SPEC.md) - Module API, type mappings, config schema
 - [Philosophy](docs/PHILOSOPHY.md) - Why this approach, guiding principles
-- [Schema Migration Guide](docs/SCHEMA_MIGRATION_GUIDE.md) - Conceptual guide to code-generation migrations
 
 ## Legacy
 
