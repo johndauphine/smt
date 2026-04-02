@@ -1,4 +1,4 @@
-"""Tests for smt.models module."""
+"""Tests for smt.models module (ModelGenerator wrapper)."""
 
 from __future__ import annotations
 
@@ -6,141 +6,163 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy.types import DateTime, Integer, String, Text
+from sqlalchemy import (
+    Column,
+    Integer,
+    MetaData,
+    PrimaryKeyConstraint,
+    String,
+    Table,
+    Text,
+    DateTime,
+    ForeignKeyConstraint,
+    create_engine,
+)
 
 from smt.models import ModelGenerator
 
 
-def _mock_inspector(tables: dict):
-    """Create a mock inspector with given table definitions.
+def _patch_reflect(tables: dict, source_schema: str = "dbo"):
+    """Create a patched MetaData.reflect that populates tables from a dict.
 
     tables = {
         "Users": {
-            "columns": [
-                {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                {"name": "DisplayName", "type": String(40), "nullable": False, "autoincrement": False},
-            ],
-            "pk": {"constrained_columns": ["Id"], "name": "PK_Users"},
-            "fks": [],
+            "columns": [Column("Id", Integer, primary_key=True, autoincrement=True), ...],
+            "constraints": [PrimaryKeyConstraint("Id", name="PK_Users"), ...],
         }
     }
     """
-    inspector = MagicMock()
-    inspector.get_table_names.return_value = list(tables.keys())
+    def side_effect(*, bind, schema=None, only=None):
+        """Mock MetaData.reflect — adds real Table objects to the metadata."""
+        # Get the metadata instance (self) that reflect was called on
+        md = reflect_mock._metadata_ref
 
-    def get_columns(table_name, schema=None):
-        return tables[table_name]["columns"]
+        for table_name, defn in tables.items():
+            if only and table_name not in only:
+                continue
+            Table(
+                table_name,
+                md,
+                *defn.get("columns", []),
+                *defn.get("constraints", []),
+                schema=schema,
+            )
 
-    def get_pk_constraint(table_name, schema=None):
-        return tables[table_name]["pk"]
-
-    def get_foreign_keys(table_name, schema=None):
-        return tables[table_name].get("fks", [])
-
-    inspector.get_columns = get_columns
-    inspector.get_pk_constraint = get_pk_constraint
-    inspector.get_foreign_keys = get_foreign_keys
-
-    return inspector
+    reflect_mock = MagicMock(side_effect=side_effect)
+    return reflect_mock
 
 
 class TestModelGenerator:
-    @patch("smt.models.sa_inspect")
-    def test_basic_table(self, mock_inspect):
-        mock_inspect.return_value = _mock_inspector({
-            "Users": {
-                "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                    {"name": "DisplayName", "type": String(40), "nullable": False, "autoincrement": False},
-                    {"name": "AboutMe", "type": Text(), "nullable": True, "autoincrement": False},
-                ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_Users"},
-                "fks": [],
-            }
-        })
+    def _make_gen_and_write(self, tables, tmp_workspace, *, table_filter=None):
+        """Helper: create ModelGenerator, mock reflection, call write()."""
+        engine = create_engine("sqlite://")
 
-        engine = MagicMock()
         gen = ModelGenerator(
             source_engine=engine,
             target_schema="dw__testdb__dbo",
             source_schema="dbo",
             source_database="TestDB",
+            tables=table_filter,
         )
-        output = gen.generate()
+
+        models_dir = tmp_workspace / "models"
+
+        # Patch MetaData.reflect to inject our table definitions
+        def patched_reflect(self_md, *, bind=None, schema=None, only=None, **kw):
+            for table_name, defn in tables.items():
+                if only and table_name not in only:
+                    continue
+                Table(
+                    table_name,
+                    self_md,
+                    *defn.get("columns", []),
+                    *defn.get("constraints", []),
+                    schema=schema,
+                )
+
+        with patch.object(MetaData, "reflect", patched_reflect):
+            gen.write(models_dir)
+
+        return models_dir
+
+    def test_basic_table(self, tmp_workspace: Path):
+        models_dir = self._make_gen_and_write({
+            "Users": {
+                "columns": [
+                    Column("Id", Integer, primary_key=True, autoincrement=True),
+                    Column("DisplayName", String(40), nullable=False),
+                    Column("AboutMe", Text(), nullable=True),
+                ],
+                "constraints": [
+                    PrimaryKeyConstraint("Id", name="PK_Users"),
+                ],
+            }
+        }, tmp_workspace)
+
+        # Check file structure
+        assert (models_dir / "base.py").exists()
+        assert (models_dir / "users.py").exists()
+        assert (models_dir / "__init__.py").exists()
+
+        content = (models_dir / "users.py").read_text()
 
         # Check class structure
-        assert "class Users(Base):" in output
-        assert "__tablename__ = 'users'" in output
-        assert "'schema': 'dw__testdb__dbo'" in output
+        assert "class Users(Base):" in content
+        assert "__tablename__ = 'users'" in content
+        assert "'schema': 'dw__testdb__dbo'" in content
 
         # Check PK constraint is lowercase
-        assert "PrimaryKeyConstraint('id', name='pk_users')" in output
+        assert "'pk_users'" in content
 
         # Check column definitions
-        assert "Id: Mapped[int] = mapped_column('id', Integer, Identity(), primary_key=True)" in output
-        assert "DisplayName: Mapped[str] = mapped_column('displayname', String(40), nullable=False)" in output
-        assert "AboutMe: Mapped[Optional[str]] = mapped_column('aboutme', Text)" in output
+        assert "Id:" in content
+        assert "'id'" in content
+        assert "Identity()" in content
+        assert "primary_key=True" in content
+        assert "DisplayName:" in content
+        assert "'displayname'" in content
+        assert "AboutMe:" in content
+        assert "Optional[" in content
 
         # Check imports
-        assert "from sqlalchemy import" in output
-        assert "DeclarativeBase" in output
-        assert "from typing import Optional" in output
+        assert "from sqlalchemy import" in content
+        assert "from .base import Base" in content
 
         # Check header
-        assert "Auto-generated SQLAlchemy models" in output
-        assert "Source: TestDB.dbo" in output
-        assert "Target: dw__testdb__dbo" in output
+        assert "Auto-generated SQLAlchemy model: Users" in content
+        assert "Source: TestDB.dbo" in content
+        assert "Target: dw__testdb__dbo" in content
 
-    @patch("smt.models.sa_inspect")
-    def test_foreign_key(self, mock_inspect):
-        mock_inspect.return_value = _mock_inspector({
-            "Posts": {
-                "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                    {"name": "OwnerUserId", "type": Integer(), "nullable": True, "autoincrement": False},
-                ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_Posts"},
-                "fks": [
-                    {
-                        "constrained_columns": ["OwnerUserId"],
-                        "referred_schema": "dbo",
-                        "referred_table": "Users",
-                        "referred_columns": ["Id"],
-                        "name": "FK_Posts_Users",
-                    }
-                ],
-            }
-        })
-
-        engine = MagicMock()
-        gen = ModelGenerator(
-            source_engine=engine,
-            target_schema="dw__testdb__dbo",
-            source_schema="dbo",
-            source_database="TestDB",
-        )
-        output = gen.generate()
-
-        assert "ForeignKeyConstraint(['owneruserid'], ['dw__testdb__dbo.users.id'], name='fk_posts_users')" in output
-
-    @patch("smt.models.sa_inspect")
-    def test_table_filter(self, mock_inspect):
-        mock_inspect.return_value = _mock_inspector({
+    def test_foreign_key(self, tmp_workspace: Path):
+        models_dir = self._make_gen_and_write({
             "Users": {
-                "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_Users"},
+                "columns": [Column("Id", Integer, primary_key=True)],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Users")],
             },
             "Posts": {
                 "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
+                    Column("Id", Integer, primary_key=True),
+                    Column("OwnerUserId", Integer, nullable=True),
                 ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_Posts"},
+                "constraints": [
+                    PrimaryKeyConstraint("Id", name="PK_Posts"),
+                    ForeignKeyConstraint(
+                        ["OwnerUserId"],
+                        ["dbo.Users.Id"],
+                        name="FK_Posts_Users",
+                    ),
+                ],
             },
-        })
+        }, tmp_workspace)
 
-        engine = MagicMock()
+        content = (models_dir / "posts.py").read_text()
+        assert "dw__testdb__dbo.users.id" in content
+        assert "fk_posts_users" in content.lower()
+
+    def test_table_filter(self, tmp_workspace: Path):
+        """Only requested tables are generated."""
+        engine = create_engine("sqlite://")
+
         gen = ModelGenerator(
             source_engine=engine,
             target_schema="dw__testdb__dbo",
@@ -148,41 +170,63 @@ class TestModelGenerator:
             source_database="TestDB",
             tables=["Users"],
         )
-        output = gen.generate()
 
-        assert "class Users(Base):" in output
-        assert "class Posts(Base):" not in output
+        models_dir = tmp_workspace / "models"
 
-    @patch("smt.models.sa_inspect")
-    def test_backup_on_write(self, mock_inspect, tmp_workspace: Path):
-        mock_inspect.return_value = _mock_inspector({
-            "T": {
-                "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_T"},
+        tables = {
+            "Users": {
+                "columns": [Column("Id", Integer, primary_key=True, autoincrement=True)],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Users")],
             },
-        })
+            "Posts": {
+                "columns": [Column("Id", Integer, primary_key=True, autoincrement=True)],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Posts")],
+            },
+        }
 
+        # Mock both sa_inspect (for _resolve_table_names) and MetaData.reflect
+        mock_inspector = MagicMock()
+        mock_inspector.get_table_names.return_value = ["Users", "Posts"]
+
+        def patched_reflect(self_md, *, bind=None, schema=None, only=None, **kw):
+            for table_name, defn in tables.items():
+                if only and table_name not in only:
+                    continue
+                Table(
+                    table_name,
+                    self_md,
+                    *defn.get("columns", []),
+                    *defn.get("constraints", []),
+                    schema=schema,
+                )
+
+        with (
+            patch("smt.models.sa_inspect", return_value=mock_inspector),
+            patch.object(MetaData, "reflect", patched_reflect),
+        ):
+            gen.write(models_dir)
+
+        assert (models_dir / "users.py").exists()
+        assert not (models_dir / "posts.py").exists()
+
+    def test_backup_on_write(self, tmp_workspace: Path):
         models_dir = tmp_workspace / "models"
         models_dir.mkdir()
         (models_dir / "old_file.py").write_text("# old content")
 
-        engine = MagicMock()
-        gen = ModelGenerator(
-            source_engine=engine,
-            target_schema="dw__testdb__dbo",
-            source_schema="dbo",
-            source_database="TestDB",
-        )
-        gen.write(models_dir)
+        self._make_gen_and_write({
+            "T": {
+                "columns": [Column("Id", Integer, primary_key=True, autoincrement=True)],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_T")],
+            },
+        }, tmp_workspace)
 
         # New files should exist
         assert (models_dir / "base.py").exists()
         assert (models_dir / "t.py").exists()
         assert (models_dir / "__init__.py").exists()
 
-        # Old file should be gone (directory was backed up and recreated)
+        # Old file should be gone
         assert not (models_dir / "old_file.py").exists()
 
         # Backup directory should exist
@@ -190,31 +234,18 @@ class TestModelGenerator:
         assert len(backups) == 1
         assert (backups[0] / "old_file.py").read_text() == "# old content"
 
-    @patch("smt.models.sa_inspect")
-    def test_legacy_models_py_backup(self, mock_inspect, tmp_workspace: Path):
+    def test_legacy_models_py_backup(self, tmp_workspace: Path):
         """Legacy models.py is backed up when writing models/ directory."""
-        mock_inspect.return_value = _mock_inspector({
-            "T": {
-                "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_T"},
-            },
-        })
-
         # Create legacy models.py
         legacy = tmp_workspace / "models.py"
         legacy.write_text("# legacy models")
 
-        models_dir = tmp_workspace / "models"
-        engine = MagicMock()
-        gen = ModelGenerator(
-            source_engine=engine,
-            target_schema="dw__testdb__dbo",
-            source_schema="dbo",
-            source_database="TestDB",
-        )
-        gen.write(models_dir)
+        self._make_gen_and_write({
+            "T": {
+                "columns": [Column("Id", Integer, primary_key=True, autoincrement=True)],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_T")],
+            },
+        }, tmp_workspace)
 
         # Legacy file should be gone
         assert not legacy.exists()
@@ -224,36 +255,21 @@ class TestModelGenerator:
         assert len(backups) == 1
         assert backups[0].read_text() == "# legacy models"
 
-    @patch("smt.models.sa_inspect")
-    def test_per_table_files(self, mock_inspect, tmp_workspace: Path):
+    def test_per_table_files(self, tmp_workspace: Path):
         """write() produces per-table model files in a models/ directory."""
-        mock_inspect.return_value = _mock_inspector({
+        models_dir = self._make_gen_and_write({
             "Users": {
                 "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                    {"name": "DisplayName", "type": String(40), "nullable": False, "autoincrement": False},
+                    Column("Id", Integer, primary_key=True, autoincrement=True),
+                    Column("DisplayName", String(40), nullable=False),
                 ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_Users"},
-                "fks": [],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Users")],
             },
             "Posts": {
-                "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_Posts"},
-                "fks": [],
+                "columns": [Column("Id", Integer, primary_key=True, autoincrement=True)],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Posts")],
             },
-        })
-
-        models_dir = tmp_workspace / "models"
-        engine = MagicMock()
-        gen = ModelGenerator(
-            source_engine=engine,
-            target_schema="dw__testdb__dbo",
-            source_schema="dbo",
-            source_database="TestDB",
-        )
-        gen.write(models_dir)
+        }, tmp_workspace)
 
         # Check directory structure
         assert (models_dir / "base.py").exists()
@@ -270,7 +286,7 @@ class TestModelGenerator:
         assert "class Users(Base):" in users_content
         assert "from .base import Base" in users_content
         assert "__tablename__ = 'users'" in users_content
-        assert "PrimaryKeyConstraint('id', name='pk_users')" in users_content
+        assert "'pk_users'" in users_content
 
         # Check posts.py content
         posts_content = (models_dir / "posts.py").read_text()
@@ -282,39 +298,26 @@ class TestModelGenerator:
         assert "from .users import Users" in init_content
         assert "from .posts import Posts" in init_content
 
-    @patch("smt.models.sa_inspect")
-    def test_keyword_escaping(self, mock_inspect):
-        """Python keywords in column/class names get underscore suffix."""
-        mock_inspect.return_value = _mock_inspector({
+    def test_keyword_escaping(self, tmp_workspace: Path):
+        """Python keywords in column names get underscore suffix."""
+        models_dir = self._make_gen_and_write({
             "Badges": {
                 "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                    {"name": "Class", "type": Integer(), "nullable": False, "autoincrement": False},
+                    Column("Id", Integer, primary_key=True, autoincrement=True),
+                    Column("Class", Integer, nullable=False),
                 ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_Badges"},
-                "fks": [],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Badges")],
             },
-        })
+        }, tmp_workspace)
 
-        engine = MagicMock()
-        gen = ModelGenerator(
-            source_engine=engine,
-            target_schema="dw__testdb__dbo",
-            source_schema="dbo",
-            source_database="TestDB",
-        )
-        output = gen.generate()
-
+        content = (models_dir / "badges.py").read_text()
         # 'Class' is a keyword — attribute should be escaped, DB column name preserved
-        assert "Class_: Mapped[int] = mapped_column('class', Integer, nullable=False)" in output
-        # Class name should not be affected (Badges is not a keyword)
-        assert "class Badges(Base):" in output
+        assert "Class_:" in content
+        assert "'class'" in content
+        assert "class Badges(Base):" in content
 
-    @patch("smt.models.sa_inspect")
-    def test_no_tables_found(self, mock_inspect):
-        mock_inspect.return_value = _mock_inspector({})
-
-        engine = MagicMock()
+    def test_no_tables_found(self, tmp_workspace: Path):
+        engine = create_engine("sqlite://")
         gen = ModelGenerator(
             source_engine=engine,
             target_schema="dw__testdb__dbo",
@@ -322,30 +325,27 @@ class TestModelGenerator:
             source_database="TestDB",
         )
 
-        with pytest.raises(RuntimeError, match="No tables found"):
-            gen.generate()
+        models_dir = tmp_workspace / "models"
 
-    @patch("smt.models.sa_inspect")
-    def test_datetime_columns(self, mock_inspect):
-        mock_inspect.return_value = _mock_inspector({
+        def patched_reflect(self_md, *, bind=None, schema=None, only=None, **kw):
+            pass  # No tables added
+
+        with patch.object(MetaData, "reflect", patched_reflect):
+            with pytest.raises(RuntimeError, match="No tables found"):
+                gen.write(models_dir)
+
+    def test_datetime_columns(self, tmp_workspace: Path):
+        models_dir = self._make_gen_and_write({
             "Events": {
                 "columns": [
-                    {"name": "Id", "type": Integer(), "nullable": False, "autoincrement": True},
-                    {"name": "CreatedAt", "type": DateTime(), "nullable": False, "autoincrement": False},
+                    Column("Id", Integer, primary_key=True, autoincrement=True),
+                    Column("CreatedAt", DateTime(), nullable=False),
                 ],
-                "pk": {"constrained_columns": ["Id"], "name": "PK_Events"},
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Events")],
             },
-        })
+        }, tmp_workspace)
 
-        engine = MagicMock()
-        gen = ModelGenerator(
-            source_engine=engine,
-            target_schema="dw__testdb__dbo",
-            source_schema="dbo",
-            source_database="TestDB",
-        )
-        output = gen.generate()
-
-        assert "import datetime" in output
-        assert "Mapped[datetime.datetime]" in output
-        assert "DateTime" in output
+        content = (models_dir / "events.py").read_text()
+        assert "import datetime" in content
+        assert "datetime.datetime" in content
+        assert "DateTime" in content

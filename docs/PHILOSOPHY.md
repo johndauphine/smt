@@ -12,7 +12,7 @@ Manual DDL scripts are error-prone, pg_dump is all-or-nothing, and GUI tools are
 
 ### 1. Reflect, Don't Guess
 
-SMT reflects the source database at runtime using SQLAlchemy's `inspect()` API. It never asks you to hand-write models or maintain a separate schema definition. The source database is always the single source of truth.
+SMT reflects the source database at runtime using SQLAlchemy's `MetaData.reflect()` API, then generates models via `SmtGenerator` (a subclass of sqlacodegen's `DeclarativeGenerator`). It never asks you to hand-write models or maintain a separate schema definition. The source database is always the single source of truth.
 
 This means:
 - No schema drift between what you think exists and what actually exists
@@ -23,14 +23,14 @@ This means:
 
 The original bash implementation generated models with source naming, then applied 7 regex passes to lowercase everything and rewrite schema references. This was fragile — each regex assumed a specific code shape that could break with sqlacodegen version changes.
 
-SMT generates the correct output on the first pass. Lowercase names, target schema references, and collation omissions are baked into the code generator. There is no post-processing step.
+SMT generates the correct output on the first pass by overriding sqlacodegen's rendering methods. Lowercase names, target schema references, and collation omissions are baked into the `SmtGenerator` subclass. There is no post-processing step.
 
 ### 3. No External CLI Dependencies
 
 The bash scripts shelled out to `sqlacodegen`, `alembic`, `psql`, `sed`, and `grep`. Each was a potential failure point — wrong version, wrong PATH, wrong flags, macOS vs GNU incompatibilities.
 
 SMT uses only Python APIs:
-- `sqlalchemy.inspect()` replaces sqlacodegen
+- `SmtGenerator` subclasses sqlacodegen's `DeclarativeGenerator` (Python API, not CLI)
 - `alembic.command.*` replaces the alembic CLI
 - `sqlalchemy.text()` replaces psql for schema DDL
 - Python's `re` module replaces sed/grep
