@@ -287,6 +287,24 @@ class TestSmtGeneratorKeyword:
         # DB column name should still be lowercase
         assert "'class'" in content
 
+    def test_keyword_table_name_filename(self):
+        """Table named with a Python keyword gets escaped filename and imports."""
+        gen = _make_generator({
+            "Class": {
+                "columns": [Column("Id", Integer, primary_key=True)],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Class")],
+            },
+        })
+        files = gen.generate()
+
+        # Filename should be escaped (class_.py, not class.py)
+        assert "class_.py" in files
+        assert "class.py" not in files
+
+        # __init__.py should use escaped module name
+        init = files["__init__.py"]
+        assert "from .class_ import" in init
+
 
 class TestSmtGeneratorNoRelationships:
     def test_no_relationship_in_output(self):
@@ -389,7 +407,7 @@ class TestSmtGeneratorCollation:
         assert "SQL_Latin1" not in content
 
 
-class TestSmtGeneratorCompositFK:
+class TestSmtGeneratorCompositeFK:
     def test_composite_fk_target_schema(self):
         """Composite FK columns are all lowercased and reference target schema."""
         gen = _make_generator({

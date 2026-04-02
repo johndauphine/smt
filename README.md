@@ -5,7 +5,7 @@ Migrates database schemas between PostgreSQL and MSSQL databases using SQLAlchem
 ## Features
 
 - **Multi-database**: PostgreSQL and MSSQL as source or target
-- **Automatic model generation**: Reflects source schema via sqlacodegen fork (`SmtGenerator` subclass)
+- **Automatic model generation**: Reflects source schema using a sqlacodegen-based generator (`SmtGenerator` subclass)
 - **Incremental migrations**: Alembic detects and migrates only what changed
 - **Lowercase normalization**: All database identifiers lowercased in target
 - **Foreign key preservation**: FK relationships transformed to target schema

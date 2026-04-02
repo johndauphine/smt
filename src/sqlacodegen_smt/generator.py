@@ -138,7 +138,7 @@ class SmtGenerator(DeclarativeGenerator):
         # Per-table files
         model_classes = [m for m in models if isinstance(m, ModelClass)]
         for model in model_classes:
-            filename = model.table.name.lower() + ".py"
+            filename = self._get_table_module_name(model.table.name) + ".py"
             files[filename] = self._generate_table_file(model)
 
         # __init__.py
@@ -231,13 +231,20 @@ class SmtGenerator(DeclarativeGenerator):
                 self.add_literal_import("typing", "Optional")
                 break
 
+    def _get_table_module_name(self, table_name: str) -> str:
+        """Get a safe Python module name for a table (lowercase, keyword-escaped)."""
+        module_name = table_name.lower()
+        if iskeyword(module_name):
+            module_name += "_"
+        return module_name
+
     def _generate_init_file(self, models: list[ModelClass]) -> str:
         lines = ['"""Auto-generated models package."""']
         lines.append("")
         lines.append(f"from .base import {self.base_class_name}  # noqa: F401")
         lines.append("")
-        for model in sorted(models, key=lambda m: m.table.name.lower()):
-            module_name = model.table.name.lower()
+        for model in sorted(models, key=lambda m: self._get_table_module_name(m.table.name)):
+            module_name = self._get_table_module_name(model.table.name)
             lines.append(f"from .{module_name} import {model.name}  # noqa: F401")
         lines.append("")
         return "\n".join(lines)
@@ -278,6 +285,12 @@ class SmtGenerator(DeclarativeGenerator):
         name = column_attr.column.name  # preserve original case
         if iskeyword(name) or iskeyword(name.lower()):
             name = name + "_"
+        # Ensure uniqueness within the model (handles case-only collisions)
+        original = name
+        suffix = 1
+        while name in local_names or name in global_names:
+            name = f"{original}_{suffix}"
+            suffix += 1
         column_attr.name = name
 
     # ------------------------------------------------------------------
@@ -484,7 +497,6 @@ class SmtGenerator(DeclarativeGenerator):
 
         # If still dialect-specific after adaptation, fall back to String
         if result.__class__.__module__.startswith("sqlalchemy.dialects."):
-            # Skip UserDefinedType and TypeDecorator
             if isinstance(result, (UserDefinedType, TypeDecorator)):
                 logger.warning(
                     "Unmapped type '%s', falling back to String",

@@ -1,1 +1,1 @@
-"""sqlacodegen fork for SMT — generates per-table model packages with lowercase identifiers."""
+"""sqlacodegen extension package for SMT — subclasses upstream sqlacodegen to generate per-table model packages with lowercase identifiers."""

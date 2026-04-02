@@ -1,4 +1,4 @@
-"""Model code generator — delegates to sqlacodegen_smt fork.
+"""Model code generator — delegates to the sqlacodegen_smt extension package.
 
 Thin wrapper around SmtGenerator that handles reflection, backup, and file I/O.
 """
