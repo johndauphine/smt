@@ -17,53 +17,57 @@ Architecture decisions and the reasoning behind them.
           │                │                │
    ┌──────▼──────┐ ┌──────▼──────┐ ┌───────▼───────┐
    │  models.py  │ │migration.py │ │  database.py  │
-   │             │ │             │ │               │
+   │  (wrapper)  │ │             │ │               │
    │ Reflect src │ │ Alembic API │ │ Schema DDL    │
-   │ Gen models/ │ │ init/create │ │ Table listing │
-   │ (per-table) │ │ apply/roll  │ │ Connection    │
-   └──────┬──────┘ └──────┬──────┘ └───────┬───────┘
-          │                │                │
-   ┌──────▼──────┐ ┌──────▼──────┐ ┌───────▼───────┐
-   │  Source DB  │ │  Target DB  │ │  Target DB    │
-   │  (inspect)  │ │  (alembic)  │ │  (DDL/query)  │
-   └─────────────┘ └─────────────┘ └───────────────┘
+   │ Backup, I/O │ │ init/create │ │ Table listing │
+   └──────┬──────┘ │ apply/roll  │ │ Connection    │
+          │        └──────┬──────┘ └───────┬───────┘
+   ┌──────▼──────┐        │                │
+   │sqlacodegen  │ ┌──────▼──────┐ ┌───────▼───────┐
+   │  _smt/      │ │  Target DB  │ │  Target DB    │
+   │SmtGenerator │ │  (alembic)  │ │  (DDL/query)  │
+   │ Gen models/ │ └─────────────┘ └───────────────┘
+   └──────┬──────┘
+   ┌──────▼──────┐
+   │  Source DB  │
+   │  (reflect)  │
+   └─────────────┘
 ```
 
 ### Module Dependency Graph
 
 ```
 cli.py → config.py
-cli.py → pipeline.py → models.py → (SQLAlchemy inspect)
+cli.py → pipeline.py → models.py → sqlacodegen_smt.generator (SmtGenerator)
+                                  → (SQLAlchemy MetaData.reflect)
                       → migration.py → (Alembic command API)
                       → database.py → (SQLAlchemy engine + text)
 config.py → (PyYAML, SQLAlchemy URL)
+sqlacodegen_smt → sqlacodegen (DeclarativeGenerator)
 ```
 
 No circular dependencies. Each module has a single responsibility.
 
 ## Key Design Decisions
 
-### 1. SQLAlchemy inspect() Over sqlacodegen
+### 1. sqlacodegen Subclass Over Direct inspect()
 
-**Decision**: Replace sqlacodegen with direct use of `sqlalchemy.inspect()`.
+**Decision**: Subclass sqlacodegen's `DeclarativeGenerator` as `SmtGenerator` rather than using `sqlalchemy.inspect()` directly.
 
-**Alternatives considered**:
-- Keep sqlacodegen as a dependency and shell out to it
-- Use sqlacodegen's internal API (undocumented)
-- Use SQLAlchemy's `automap_base()` for runtime models
+**History**: SMT originally used a custom 637-line `ModelGenerator` that called `inspect()` directly with a hand-maintained type map. This was replaced with `SmtGenerator` (in `src/sqlacodegen_smt/generator.py`), which subclasses sqlacodegen's `DeclarativeGenerator` and overrides ~12 methods.
 
-**Why inspect()**:
-- sqlacodegen is CLI-only with no stable Python API
-- Calling it via subprocess reintroduces the shell dependency problem
-- `inspect()` returns raw metadata dicts that we can map directly to the output we need
-- We control the output format entirely, eliminating the 7-pass regex post-processing
-- Collations are never emitted (vs. generating them then stripping)
-- Type mapping is explicit and auditable (a dictionary, not implicit sqlacodegen behavior)
+**Why subclass (not direct fork)**:
+- sqlacodegen's `DeclarativeGenerator` has clean method boundaries — every SMT customization maps to an overridable method
+- No code duplication — we don't maintain a copy of sqlacodegen's ~2000-line `generators.py`
+- Upstream bug fixes and new SQLAlchemy version compatibility flow in automatically
+- ~350 lines of overrides vs. 637 lines of custom reflection + code generation
 
 **Why not automap**:
 - Alembic's autogenerate requires actual model files on disk to import `Base.metadata`
 - automap creates runtime classes, not files
 - We need generated Python source code, not runtime objects
+
+**Trade-off**: Coupling to sqlacodegen's internal API (method signatures, import/state management). Mitigated by pinning `>=4.0,<5.0` in pyproject.toml.
 
 ### 2. Alembic Python API Over CLI
 
@@ -124,7 +128,7 @@ No circular dependencies. Each module has a single responsibility.
 
 ### 6. Models Always Regenerated
 
-**Decision**: Every pipeline run reflects the source database and regenerates the `models/` package (one file per table), even if it hasn't changed.
+**Decision**: Every pipeline run reflects the source database via `MetaData.reflect()` and regenerates the `models/` package (one file per table) via `SmtGenerator`, even if it hasn't changed.
 
 **Why**:
 - The source database is the single source of truth
@@ -168,17 +172,17 @@ No circular dependencies. Each module has a single responsibility.
 
 2. Generate models (Step 1)
    ├── Connect to source database
-   ├── inspect() → get_table_names, get_columns, get_pk_constraint, get_foreign_keys
-   ├── For each table:
-   │   ├── Map column types (reflected → generic SA types)
-   │   ├── Log collation warnings
-   │   ├── Lowercase all DB identifiers
-   │   ├── Escape Python keywords (e.g. 'class' → 'class_')
-   │   └── Rewrite FK references to target schema
+   ├── MetaData.reflect() → populate Table/Column objects
    ├── Backup existing models/ directory (or legacy models.py)
+   ├── SmtGenerator.generate() → dict[filename, content]:
+   │   ├── fix_column_types() → adapt dialect types, strip collations
+   │   ├── get_adapted_type() → MSSQL overrides + String fallback
+   │   ├── generate_models() → ModelClass objects (no relationships)
+   │   ├── Per table: render with lowercase identifiers, target schema, Identity()
+   │   └── Per-file import tracking (save/restore self.imports)
    └── Write models/ package:
        ├── base.py (DeclarativeBase)
-       ├── <table>.py per table (with per-file imports)
+       ├── <table>.py per table (with per-file imports, headers)
        └── __init__.py (re-exports Base + all models)
 
 3. Initialize Alembic (Step 2)

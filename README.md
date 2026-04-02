@@ -5,7 +5,7 @@ Migrates database schemas between PostgreSQL and MSSQL databases using SQLAlchem
 ## Features
 
 - **Multi-database**: PostgreSQL and MSSQL as source or target
-- **Automatic model generation**: Reflects source schema via SQLAlchemy `inspect()` (no sqlacodegen dependency)
+- **Automatic model generation**: Reflects source schema using a sqlacodegen-based generator (`SmtGenerator` subclass)
 - **Incremental migrations**: Alembic detects and migrates only what changed
 - **Lowercase normalization**: All database identifiers lowercased in target
 - **Foreign key preservation**: FK relationships transformed to target schema
@@ -165,18 +165,33 @@ docker stop smt-mssql smt-postgres && docker rm smt-mssql smt-postgres
 uv venv --python 3.12 .venv
 uv pip install -e ".[dev,postgres,mssql]"
 
-# Test (no database required)
+# Test (no database required, ~86 tests)
 .venv/bin/pytest tests/ -v
 
 # Lint
 .venv/bin/ruff check src/ tests/
 ```
 
+## Architecture
+
+SMT delegates model generation to `sqlacodegen_smt`, a subclass of sqlacodegen's `DeclarativeGenerator`:
+
+```
+Source DB → MetaData.reflect() → SmtGenerator → models/ package
+                                                     ↓
+Target DB ← alembic upgrade ← migration ← alembic autogenerate (diff models vs target)
+```
+
+`SmtGenerator` overrides ~12 methods to produce SMT-compatible output (lowercase identifiers, target schema rewriting, per-table files, MSSQL type mapping, etc.). sqlacodegen is a pip dependency, not a fork — upstream fixes flow in automatically.
+
+See `src/sqlacodegen_smt/generator.py` for the implementation.
+
 ## Documentation
 
 - [Design](docs/DESIGN.md) - Architecture and design decisions
 - [Technical Specification](docs/TECH_SPEC.md) - Module API, type mappings, config schema
 - [Philosophy](docs/PHILOSOPHY.md) - Why this approach, guiding principles
+- [sqlacodegen Fork Spec](docs/SQLACODEGEN_FORK.md) - Original specification and implementation status
 
 ## Legacy
 

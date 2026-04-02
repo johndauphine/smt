@@ -33,10 +33,13 @@ smt status -c smt.yaml               # Current revision, tables
 smt history -c smt.yaml              # Migration history
 
 # Run tests
-.venv/bin/pytest tests/ -v
+.venv/bin/pytest tests/ -v                         # All tests (~86, no DB required)
+.venv/bin/pytest tests/test_models.py -v           # Single test file
+.venv/bin/pytest tests/test_config.py::test_name -v  # Single test function
 
 # Lint
-.venv/bin/ruff check src/ tests/
+.venv/bin/ruff check src/ tests/        # Check only
+.venv/bin/ruff check --fix src/ tests/  # Auto-fix
 ```
 
 ## Configuration
@@ -62,24 +65,31 @@ workspace: ./migration_workspace
 
 ## Architecture
 
-### Package Structure (`src/smt/`)
+### Package Structure (`src/smt/` + `src/sqlacodegen_smt/`)
 
 ```
-cli.py          Click CLI entry point (group + subcommands)
-config.py       YAML loading, DatabaseConfig/SmtConfig dataclasses, URL building, validation
-database.py     DatabaseManager: engine creation, dialect-specific schema DDL, table listing
-models.py       ModelGenerator: SQLAlchemy inspect() -> per-table model generation (replaces sqlacodegen)
-migration.py    MigrationManager: Alembic programmatic API wrapper
-pipeline.py     Pipeline orchestrator (composes the above)
-templates/
-  env.py.mako   Alembic env.py template (imports Base from models package)
+smt/
+  cli.py          Click CLI entry point (group + subcommands)
+  config.py       YAML loading, DatabaseConfig/SmtConfig dataclasses, URL building, validation
+  database.py     DatabaseManager: engine creation, dialect-specific schema DDL, table listing
+  models.py       ModelGenerator: thin wrapper around SmtGenerator (backup, reflection, file I/O)
+  migration.py    MigrationManager: Alembic programmatic API wrapper
+  pipeline.py     Pipeline orchestrator (composes the above)
+  templates/
+    env.py.mako   Alembic env.py template (imports Base from models package)
+
+sqlacodegen_smt/
+  __init__.py
+  generator.py    SmtGenerator(DeclarativeGenerator): sqlacodegen fork with SMT customizations
 ```
+
+Entry point: `smt = "smt.cli:cli"` (defined in pyproject.toml). Ruff config: line-length 100, target py312.
 
 ### Pipeline Flow
 
 ```
-Source DB -> inspect() -> ModelGenerator -> models/ package (one .py per table, lowercase transforms)
-                                                |
+Source DB -> MetaData.reflect() -> SmtGenerator -> models/ package (one .py per table, lowercase transforms)
+                                                        |
 Target DB <- alembic upgrade <- migration file <- alembic autogenerate (diff models vs target) <-+
                                     |
                               ddl/<table>.sql (per-table DDL snapshots)
@@ -87,76 +97,52 @@ Target DB <- alembic upgrade <- migration file <- alembic autogenerate (diff mod
 
 ### Key Module Details
 
-**`models.py`** (core module): Replaces sqlacodegen + regex post-processing. Uses `sqlalchemy.inspect()` to reflect columns, PKs, FKs per table. Generates **one Python file per table** in a `models/` package:
-- `models/base.py` — `Base(DeclarativeBase)` class
-- `models/<table>.py` — One file per table with its own imports
-- `models/__init__.py` — Re-exports `Base` and all model classes
-- `__tablename__` = lowercase, column DB names = lowercase, constraint names = lowercase
-- Python attribute names = original PascalCase from source
-- FK references rewritten to `target_schema.table.col`
-- Collations detected during reflection are logged as warnings and skipped
-- Unrecognized dialect-specific types fall back to `String` with a warning
-- Backs up previous `models/` directory as `models_<timestamp>.bak/`
-- Backs up legacy `models.py` as `models_<timestamp>.py.bak` if present
+**`models.py`** (wrapper): Thin wrapper around `SmtGenerator`. Handles `MetaData.reflect()`, backup of existing output, and file I/O. The `ModelGenerator` interface (`__init__` + `write()`) is unchanged from the pipeline's perspective.
 
-**`migration.py`**: Drives Alembic via `alembic.config.Config` + `alembic.command.*` (no subprocess). Handles:
-- Init: `command.init()`, writes env.py from template, updates alembic.ini URL
-- Create: applies pending migrations first, `command.revision(autogenerate=True)`, removes empty migrations, strips collation params
-- Apply: checks if at head, generates DDL SQL file + **per-table DDL files** in `ddl/`, `command.upgrade("head")`. Supports `--dry-run`.
-- Rollback: `command.downgrade(target)` where target is "base", "-N", or revision hash
+**`sqlacodegen_smt/generator.py`** (core): `SmtGenerator` subclasses sqlacodegen's `DeclarativeGenerator` with 11 customizations:
+- **Multi-file output**: `generate()` returns `dict[str, str]` (filename -> content) for a models/ package.
+- **Naming**: `__tablename__` = lowercase, column DB names = lowercase, constraint names = lowercase. Python attribute names preserve original PascalCase.
+- **Target schema rewriting**: `__table_args__` and FK refs use the derived target schema.
+- **Collation stripping**: Detected, warned, stripped from reflected types before rendering.
+- **Type fallback**: MSSQL types mapped via `_MSSQL_TYPE_OVERRIDES`; remaining dialect types fall back to `String`.
+- **Identity()**: Autoincrement PKs emit `Identity()`.
+- **Keyword escaping**: Python reserved words get `_` suffix in attribute names.
+- **No relationships**: `generate_relationships()` returns empty list.
+- **File headers**: Each table file has a metadata header (timestamp, source, target).
 
-**`database.py`**: Dialect-specific DDL dispatch for schema creation/drop. Schema names validated against `[A-Za-z0-9_]+` before DDL interpolation.
-- PostgreSQL: `CREATE SCHEMA IF NOT EXISTS` / `DROP SCHEMA IF EXISTS ... CASCADE`
-- MSSQL: `IF NOT EXISTS (SELECT FROM sys.schemas ...) EXEC('CREATE SCHEMA ...')` / `IF EXISTS ... EXEC('DROP SCHEMA ...')`
+**`migration.py`**: Drives Alembic via `alembic.config.Config` + `alembic.command.*` (no subprocess).
+- **Empty migration detection**: Regex `_OP_PATTERNS` searches for actual operations (create_table, add_column, etc.); empty migrations are auto-removed.
+- **DDL splitting**: `_split_ddl_by_table()` uses regex to extract table names from CREATE TABLE, CREATE INDEX, ALTER TABLE statements (handles unquoted, double-quoted, and bracket-quoted identifiers) to generate per-table `ddl/<table>.sql` files.
+- **DDL generation uses Alembic offline mode**: `command.upgrade(sql=True)` with `config.output_buffer = StringIO()` to capture SQL without applying.
 
-**`config.py`**: Loads YAML, applies env var overrides for passwords, validates schema name characters (`[A-Za-z0-9_]+`) and length against dialect limits, builds SQLAlchemy `URL.create()` (handles password encoding). MSSQL+pyodbc URLs automatically include ODBC Driver 18, TrustServerCertificate, and Encrypt params. `get_url_string()` renders the URL with password visible (for alembic.ini).
+**`database.py`**: Dialect-specific DDL dispatch for schema creation/drop. Schema names validated against `[A-Za-z0-9_]+` regex before DDL string interpolation (prevents injection).
+
+**`config.py`**: Loads YAML, validates, builds `URL.create()`. MSSQL+pyodbc URLs automatically include ODBC Driver 18, TrustServerCertificate, and Encrypt query params. `get_url_string()` renders URL with visible password (for alembic.ini).
+
+**`pipeline.py`**: Orchestrates generate->init->create->apply. `PipelineError` includes step number and suggests the recovery command (e.g., "resume from step 3 with `smt create`").
 
 ### Design Decisions
 
-- **No sqlacodegen dependency** — replaced with SQLAlchemy `inspect()` + custom code generator
+- **sqlacodegen fork** — `sqlacodegen_smt` subclasses `DeclarativeGenerator` (not a direct fork; upstream as dependency)
 - **No subprocess calls** — Alembic and DB operations are all Python API
 - **No venv management** — tool is pip-installed; workspace only has models/ package + alembic artifacts
 - **Idempotent pipeline** — running twice with no source changes reports "Already in sync"
-- **PascalCase Python attributes, lowercase DB identifiers** — `Users.DisplayName` -> column `displayname`
+- **Models always regenerated** — source DB is single source of truth; Alembic diffs handle the rest
 - **env.py uses `include_schemas=True`** — required for multi-schema Alembic support
 - **env.py rewritten on every init** — ensures template is current
-- **Identifier validation** — schema names checked against `[A-Za-z0-9_]+` before DDL interpolation
 - **Duplicate handler guard** — `_setup_logging()` checks `root.handlers` to avoid duplicate log output
-
-### Generated Artifacts (in workspace directory)
-
-- `models/` — SQLAlchemy 2.0 models package (one file per table)
-  - `base.py` — `Base(DeclarativeBase)` class
-  - `<table>.py` — Per-table model files
-  - `__init__.py` — Re-exports Base and all models
-- `models_*.bak/` — Backups of previous models package
-- `migration_*.sql` — Full DDL snapshots for review
-- `ddl/<table>.sql` — Per-table DDL files
-- `alembic/versions/` — Migration files
-- `alembic.ini` — Target DB URL (%-escaped)
 
 ## Testing
 
-```bash
-.venv/bin/pytest tests/ -v          # All tests (56 tests, no DB required)
-.venv/bin/pytest tests/test_config.py -v    # Config module only
-.venv/bin/pytest tests/test_models.py -v    # Model generator only
-```
+SmtGenerator tests use in-memory SQLite with real SQLAlchemy Table objects. ModelGenerator wrapper tests mock `MetaData.reflect()`. No external database connection needed.
 
-Tests use mocked SQLAlchemy inspectors — no database connection needed.
+**Key fixtures** (in `conftest.py`):
+- `tmp_workspace` — temp directory with `migration_workspace/` subdir
+- `sample_config_yaml` — writes a sample `smt.yaml` with 2 tables (Users, Posts)
 
-## Prerequisites
+**Test files map to source modules**: `test_config.py`, `test_models.py`, `test_migration.py`, `test_database.py`, `test_cli.py`, `test_sqlacodegen_smt.py`.
 
-- Python 3.12+
-- Database drivers: `pip install smt[postgres]` for PostgreSQL, `pip install smt[mssql]` for MSSQL
-- MSSQL requires Microsoft ODBC Driver for SQL Server installed on the system (for pyodbc)
-
-## Documentation
-
-- `docs/SETUP.md` — Installation, ODBC driver setup, Docker testing, troubleshooting
-- `docs/DESIGN.md` — Architecture, module dependencies, design decisions with rationale
-- `docs/TECH_SPEC.md` — Module API, config schema, type mappings, Alembic integration details
-- `docs/PHILOSOPHY.md` — Guiding principles, what SMT is and is not
+**Mocking pattern**: SmtGenerator tests create real `Table`/`Column` objects in a `MetaData` and pass to the generator with an in-memory SQLite engine. ModelGenerator wrapper tests patch `MetaData.reflect()` to inject table definitions. See `test_sqlacodegen_smt.py` and `test_models.py`.
 
 ## Legacy Bash Scripts
 
