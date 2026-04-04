@@ -480,26 +480,37 @@ class SmtGenerator(DeclarativeGenerator):
         rendered = render_callable("mapped_column", *args, kwargs=kwargs)
         return f"{column_attr.name}: Mapped[{rendered_python_type}] = {rendered}"
 
-    @staticmethod
-    def _render_identity_kwargs(identity: Identity) -> dict[str, Any]:
+    _identity_params: ClassVar[list[tuple[str, Any]] | None] = None
+
+    @classmethod
+    def _get_identity_params(cls) -> list[tuple[str, Any]]:
+        """Return cached (name, default) pairs for Identity.__init__ parameters."""
+        if cls._identity_params is None:
+            import inspect
+            from inspect import Parameter
+
+            cls._identity_params = [
+                (name, param.default)
+                for name, param in inspect.signature(Identity).parameters.items()
+                if name != "self"
+                and param.kind not in (Parameter.VAR_POSITIONAL, Parameter.VAR_KEYWORD)
+            ]
+        return cls._identity_params
+
+    @classmethod
+    def _render_identity_kwargs(cls, identity: Identity) -> dict[str, Any]:
         """Extract non-default kwargs from an Identity object."""
-        import inspect
         from decimal import Decimal
         from inspect import Parameter
 
         identity_kwargs: dict[str, Any] = {}
-        for name, param in inspect.signature(Identity).parameters.items():
-            if name == "self" or param.kind in (
-                Parameter.VAR_POSITIONAL,
-                Parameter.VAR_KEYWORD,
-            ):
-                continue
+        for name, default in cls._get_identity_params():
             value = getattr(identity, name, None)
             if value is None:
                 continue
             if isinstance(value, Decimal):
                 value = int(value)
-            if param.default is not Parameter.empty and value == param.default:
+            if default is not Parameter.empty and value == default:
                 continue
             identity_kwargs[name] = value
         return identity_kwargs
