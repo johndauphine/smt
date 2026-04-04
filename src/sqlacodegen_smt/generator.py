@@ -14,6 +14,7 @@ from keyword import iskeyword
 from typing import Any, ClassVar
 
 from sqlalchemy import (
+    Computed,
     Constraint,
     ForeignKey,
     ForeignKeyConstraint,
@@ -24,6 +25,8 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
 )
+from sqlalchemy.schema import DefaultClause
+from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.sql.type_api import UserDefinedType, TypeDecorator
 
@@ -218,11 +221,23 @@ class SmtGenerator(DeclarativeGenerator):
                 if len(constraint.columns) > 1 or not uses_default_name(constraint):
                     self.add_literal_import("sqlalchemy", "UniqueConstraint")
 
-        # Check if Identity is needed
+        # Check for server_default imports
         for column_attr in model.columns:
             col = column_attr.column
-            if col.primary_key and getattr(col, "autoincrement", False):
+            if isinstance(col.server_default, Identity):
                 self.add_literal_import("sqlalchemy", "Identity")
+            elif isinstance(col.server_default, Computed):
+                self.add_literal_import("sqlalchemy", "Computed")
+            elif col.primary_key and getattr(col, "autoincrement", False):
+                self.add_literal_import("sqlalchemy", "Identity")
+            elif isinstance(col.server_default, DefaultClause):
+                text_val = (
+                    col.server_default.arg.text
+                    if isinstance(col.server_default.arg, TextClause)
+                    else str(col.server_default.arg)
+                )
+                if not text_val.startswith("nextval("):
+                    self.add_literal_import("sqlalchemy", "text")
 
         # Add Optional if any nullable non-PK column
         for column_attr in model.columns:
@@ -429,12 +444,32 @@ class SmtGenerator(DeclarativeGenerator):
         # Column type
         args.append(self.render_column_type(column))
 
-        # Identity for autoincrement PK
-        if column.primary_key and getattr(column, "autoincrement", False):
-            # Only add Identity() if there isn't already one from server_default
-            if not isinstance(column.server_default, Identity):
-                args.append("Identity()")
-                self.add_literal_import("sqlalchemy", "Identity")
+        # server_default handling (Identity, Computed, DefaultClause)
+        if isinstance(column.server_default, Identity):
+            identity_kwargs = self._render_identity_kwargs(column.server_default)
+            args.append(render_callable("Identity", kwargs=identity_kwargs))
+            self.add_literal_import("sqlalchemy", "Identity")
+        elif isinstance(column.server_default, Computed):
+            expression = str(column.server_default.sqltext)
+            computed_kwargs: dict[str, Any] = {}
+            if column.server_default.persisted is not None:
+                computed_kwargs["persisted"] = column.server_default.persisted
+            args.append(render_callable("Computed", repr(expression), kwargs=computed_kwargs))
+            self.add_literal_import("sqlalchemy", "Computed")
+        elif column.primary_key and getattr(column, "autoincrement", False):
+            # Autoincrement PK without explicit Identity — emit Identity()
+            args.append("Identity()")
+            self.add_literal_import("sqlalchemy", "Identity")
+        elif isinstance(column.server_default, DefaultClause):
+            text_val = (
+                column.server_default.arg.text
+                if isinstance(column.server_default.arg, TextClause)
+                else str(column.server_default.arg)
+            )
+            # Skip sequence defaults (handled by Identity above for autoincrement PKs)
+            if not text_val.startswith("nextval("):
+                kwargs["server_default"] = render_callable("text", repr(text_val))
+                self.add_literal_import("sqlalchemy", "text")
 
         # Primary key
         if column.primary_key:
@@ -444,6 +479,30 @@ class SmtGenerator(DeclarativeGenerator):
 
         rendered = render_callable("mapped_column", *args, kwargs=kwargs)
         return f"{column_attr.name}: Mapped[{rendered_python_type}] = {rendered}"
+
+    @staticmethod
+    def _render_identity_kwargs(identity: Identity) -> dict[str, Any]:
+        """Extract non-default kwargs from an Identity object."""
+        import inspect
+        from decimal import Decimal
+        from inspect import Parameter
+
+        identity_kwargs: dict[str, Any] = {}
+        for name, param in inspect.signature(Identity).parameters.items():
+            if name == "self" or param.kind in (
+                Parameter.VAR_POSITIONAL,
+                Parameter.VAR_KEYWORD,
+            ):
+                continue
+            value = getattr(identity, name, None)
+            if value is None:
+                continue
+            if isinstance(value, Decimal):
+                value = int(value)
+            if param.default is not Parameter.empty and value == param.default:
+                continue
+            identity_kwargs[name] = value
+        return identity_kwargs
 
     # ------------------------------------------------------------------
     # Change 5: Collation stripping

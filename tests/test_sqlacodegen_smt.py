@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Column,
+    Computed,
     ForeignKeyConstraint,
+    Identity,
     Integer,
     MetaData,
     PrimaryKeyConstraint,
@@ -14,8 +16,8 @@ from sqlalchemy import (
     DateTime,
     UniqueConstraint,
     create_engine,
+    text,
 )
-
 from sqlacodegen_smt.generator import SmtGenerator
 
 
@@ -447,6 +449,117 @@ class TestSmtGeneratorCompositeFK:
         assert "dw__testdb__dbo.parents.parentid" in content
         # Constraint name lowercase
         assert "fk_children_parents" in content
+
+
+class TestSmtGeneratorServerDefault:
+    def test_default_clause_rendered(self):
+        """Non-sequence server_default values (e.g. DEFAULT 1) are emitted."""
+        gen = _make_generator({
+            "Users": {
+                "columns": [
+                    Column("Id", Integer, primary_key=True, autoincrement=True),
+                    Column(
+                        "Reputation",
+                        Integer,
+                        nullable=False,
+                        server_default=text("1"),
+                    ),
+                ],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Users")],
+            },
+        })
+        files = gen.generate()
+
+        content = files["users.py"]
+        assert "server_default=text('1')" in content
+        assert "from sqlalchemy" in content
+        assert "text" in content
+
+    def test_default_clause_zero(self):
+        """DEFAULT 0 is also rendered (not treated as falsy)."""
+        gen = _make_generator({
+            "Posts": {
+                "columns": [
+                    Column("Id", Integer, primary_key=True, autoincrement=True),
+                    Column(
+                        "Score",
+                        Integer,
+                        nullable=False,
+                        server_default=text("0"),
+                    ),
+                ],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Posts")],
+            },
+        })
+        files = gen.generate()
+
+        content = files["posts.py"]
+        assert "server_default=text('0')" in content
+
+    def test_identity_server_default_rendered(self):
+        """Columns with explicit Identity server_default emit Identity()."""
+        gen = _make_generator({
+            "Items": {
+                "columns": [
+                    Column(
+                        "Id",
+                        Integer,
+                        primary_key=True,
+                        server_default=Identity(),
+                    ),
+                ],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Items")],
+            },
+        })
+        files = gen.generate()
+
+        content = files["items.py"]
+        assert "Identity()" in content
+
+    def test_computed_column_rendered(self):
+        """Computed columns emit Computed() in the model."""
+        gen = _make_generator({
+            "Orders": {
+                "columns": [
+                    Column("Id", Integer, primary_key=True),
+                    Column("Qty", Integer, nullable=False),
+                    Column("Price", Integer, nullable=False),
+                    Column(
+                        "Total",
+                        Integer,
+                        Computed("Qty * Price"),
+                        nullable=False,
+                    ),
+                ],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Orders")],
+            },
+        })
+        files = gen.generate()
+
+        content = files["orders.py"]
+        assert "Computed(" in content
+        assert "Qty * Price" in content
+
+    def test_string_server_default(self):
+        """String column with a text default is rendered."""
+        gen = _make_generator({
+            "Settings": {
+                "columns": [
+                    Column("Id", Integer, primary_key=True),
+                    Column(
+                        "Status",
+                        String(20),
+                        nullable=False,
+                        server_default=text("'active'"),
+                    ),
+                ],
+                "constraints": [PrimaryKeyConstraint("Id", name="PK_Settings")],
+            },
+        })
+        files = gen.generate()
+
+        content = files["settings.py"]
+        assert "server_default=text(\"'active'\")" in content
 
 
 class TestSmtGeneratorUniqueConstraint:
