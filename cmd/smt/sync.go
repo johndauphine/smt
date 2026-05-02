@@ -239,7 +239,7 @@ func loadPreviousSnapshot(state *checkpoint.State, sourceType, schema string) (s
 	return snap, nil
 }
 
-// constraintLoader is the narrow slice of driver.Reader that
+// constraintLoader is the narrow subset of driver.Reader that
 // loadAllConstraints uses. Declaring it as an interface lets tests pass
 // a stub without standing up a full driver.
 type constraintLoader interface {
@@ -268,7 +268,7 @@ func loadAllConstraints(ctx context.Context, src constraintLoader, tables []driv
 	return nil
 }
 
-// sqlExecutor is the narrow slice of driver.Writer that applyPlan uses.
+// sqlExecutor is the narrow subset of driver.Writer that applyPlan uses.
 type sqlExecutor interface {
 	ExecRaw(ctx context.Context, query string, args ...any) (int64, error)
 }
