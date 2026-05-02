@@ -1,11 +1,44 @@
 package postgres
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"smt/internal/driver"
 )
+
+// TestLoadColumnsSQL_DetectsModernIdentity is a regression guard for the
+// PG → MSSQL/MySQL identity-column miss. The earlier query only flagged
+// columns with `column_default LIKE 'nextval%'` (old SERIAL form), so
+// modern PostgreSQL `GENERATED ... AS IDENTITY` columns came through with
+// IsIdentity=false and the AI then generated plain `INT NOT NULL` on the
+// target instead of `IDENTITY(1,1)` / `AUTO_INCREMENT`.
+//
+// We don't want to bring up a live database for a unit test, so instead
+// this asserts the loadColumns query source contains both detection
+// branches. If the SQL ever drops `is_identity = 'YES'`, the test fails
+// loud.
+func TestLoadColumnsSQL_DetectsModernIdentity(t *testing.T) {
+	_, thisFile, _, _ := runtime.Caller(0)
+	readerFile := filepath.Join(filepath.Dir(thisFile), "reader.go")
+	src, err := os.ReadFile(readerFile)
+	if err != nil {
+		t.Fatalf("read reader.go: %v", err)
+	}
+
+	body := string(src)
+	for _, needle := range []string{
+		"is_identity = 'YES'",            // covers GENERATED ... AS IDENTITY (PG 10+)
+		"column_default LIKE 'nextval%'", // covers SERIAL / BIGSERIAL legacy form
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("loadColumns query missing identity-detection branch %q", needle)
+		}
+	}
+}
 
 func TestDriverRegistration(t *testing.T) {
 	// The driver should be registered via init()

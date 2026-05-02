@@ -217,6 +217,12 @@ func (r *Reader) applyActualRowSizes(ctx context.Context, schema string, tables 
 }
 
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
+	// IsIdentity detection covers both the old SERIAL form (column_default
+	// LIKE 'nextval%' against an attached sequence) and the SQL-standard
+	// GENERATED ... AS IDENTITY form added in PostgreSQL 10. Without the
+	// is_identity branch, modern PG schemas read as having no identity
+	// columns at all, and the AI then emits plain INT NOT NULL on the
+	// target instead of IDENTITY(1,1) / AUTO_INCREMENT.
 	rows, err := r.sqlDB.QueryContext(ctx, `
 		SELECT
 			column_name,
@@ -225,7 +231,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			COALESCE(numeric_precision, 0),
 			COALESCE(numeric_scale, 0),
 			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
-			CASE WHEN column_default LIKE 'nextval%' THEN true ELSE false END,
+			CASE WHEN is_identity = 'YES' OR column_default LIKE 'nextval%' THEN true ELSE false END,
 			ordinal_position
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2
