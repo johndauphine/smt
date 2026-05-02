@@ -167,6 +167,13 @@ func runSync(c *cli.Context) error {
 		return driver.NormalizeIdentifier(cfg.Target.Type, name)
 	})
 
+	// Point every table in the diff at the target schema. The diff carries
+	// source-side metadata in Table.Schema (e.g. the MySQL database name),
+	// and the AI uses that for the ALTER TABLE qualifier unless we override
+	// it. Without this, MySQL→MSSQL produces ALTER TABLE [smt_src_test].[Posts]
+	// against an MSSQL target whose schema is dbo. See issue #4.
+	diff = diff.WithTargetSchema(cfg.Target.Schema)
+
 	fmt.Printf("Diff: %s\n", diff.Summary())
 
 	mapper, err := driver.NewAITypeMapperFromSecrets()

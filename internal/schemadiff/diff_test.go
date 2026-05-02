@@ -291,6 +291,45 @@ func TestDiff_NormalizeRewritesIdentifiers(t *testing.T) {
 	}
 }
 
+// TestDiff_WithTargetSchemaRewritesTableSchema is a regression guard for
+// issue #4. The structural diff carries source schema names in
+// Table.Schema (populated by source introspection); when the AI sees
+// those values in the prompt JSON it emits ALTER TABLE qualified to the
+// source schema, which fails on the target. WithTargetSchema must
+// rewrite Schema across added / removed / changed tables.
+func TestDiff_WithTargetSchemaRewritesTableSchema(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{
+		{Schema: "smt_src_test", Name: "kept", Columns: []driver.Column{col("Id", "int", false)}},
+		{Schema: "smt_src_test", Name: "dropped"},
+	}}
+	curr := Snapshot{Tables: []driver.Table{
+		{Schema: "smt_src_test", Name: "kept", Columns: []driver.Column{col("Id", "int", false), col("Email", "varchar", true)}},
+		{Schema: "smt_src_test", Name: "added"},
+	}}
+
+	d := Compute(prev, curr).WithTargetSchema("dbo")
+
+	check := func(label, got string) {
+		t.Helper()
+		if got != "dbo" {
+			t.Errorf("%s schema: got %q, want %q", label, got, "dbo")
+		}
+	}
+	if len(d.AddedTables) != 1 {
+		t.Fatalf("expected 1 added table, got %+v", d.AddedTables)
+	}
+	check("AddedTables[0]", d.AddedTables[0].Schema)
+	if len(d.RemovedTables) != 1 {
+		t.Fatalf("expected 1 removed table, got %+v", d.RemovedTables)
+	}
+	check("RemovedTables[0]", d.RemovedTables[0].Schema)
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %+v", d.ChangedTables)
+	}
+	check("ChangedTables[0]", d.ChangedTables[0].Schema)
+	check("ChangedTables[0].Curr", d.ChangedTables[0].Curr.Schema)
+}
+
 func TestPlan_FilterByRisk(t *testing.T) {
 	plan := Plan{Statements: []Statement{
 		{SQL: "ALTER 1", Risk: RiskSafe},
