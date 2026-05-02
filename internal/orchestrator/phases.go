@@ -8,13 +8,39 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"smt/internal/logging"
 	"smt/internal/source"
 )
+
+// defaultAIConcurrency is the number of concurrent AI calls used when
+// the user has not set Migration.AIConcurrency. Picked as a middle
+// ground: ~8× speedup vs serial against cloud providers (well under
+// rate limits), no harm against local providers (which serialize
+// through one GPU anyway). Override in config for warehouse-scale
+// schemas (try 16-32) or for local LM Studio / Ollama (set to 1).
+const defaultAIConcurrency = 8
+
+// runParallel calls fn concurrently for each item in items, with at
+// most n calls in flight at once. First non-nil return cancels the
+// rest via the shared context. Same error semantics as the previous
+// serial loop: first failure aborts and is propagated.
+func runParallel[T any](ctx context.Context, items []T, n int, fn func(context.Context, int, T) error) error {
+	if n <= 0 {
+		n = defaultAIConcurrency
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(n)
+	for i, item := range items {
+		g.Go(func() error { return fn(gctx, i, item) })
+	}
+	return g.Wait()
+}
 
 // TaskType names a single phase of a schema run. Stored in the run record
 // so a partial run reports which phase it reached before failing.
@@ -114,81 +140,94 @@ func (o *Orchestrator) CreateTargetSchema(ctx context.Context, runID string) err
 	return nil
 }
 
-// CreateTables issues a CREATE TABLE for each table in scope.
+// CreateTables issues a CREATE TABLE for each table in scope. Calls run
+// concurrently up to Migration.AIConcurrency in flight at once; logging
+// is per-completion (so output order may differ from source order, but
+// each line clearly identifies the table).
 func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateTables))
-	logging.Info("[%s] creating %d tables", TaskCreateTables, len(o.tables))
-	for i := range o.tables {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		t := &o.tables[i]
-		logging.Info("  [%d/%d] %s.%s", i+1, len(o.tables), o.config.Source.Schema, t.Name)
-		if err := o.target.CreateTable(ctx, t, o.config.Target.Schema); err != nil {
+	total := len(o.tables)
+	logging.Info("[%s] creating %d tables (concurrency=%d)", TaskCreateTables, total, o.aiConcurrency())
+	var done atomic.Int64
+	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
+		if err := o.target.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
 			return fmt.Errorf("creating table %s: %w", t.Name, err)
 		}
-	}
-	return nil
+		n := done.Add(1)
+		logging.Info("  ✓ [%d/%d] %s.%s", n, total, o.config.Source.Schema, t.Name)
+		return nil
+	})
 }
 
 // CreateIndexes loads each table's indexes from the source and creates
-// them on the target.
+// them on the target. Each table's load+create work runs in its own
+// goroutine; indexes within one table are still applied sequentially
+// (typically only a handful per table, and they share AI cache hits).
 func (o *Orchestrator) CreateIndexes(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateIndexes))
-	logging.Info("[%s] loading and creating indexes", TaskCreateIndexes)
-	for i := range o.tables {
-		t := &o.tables[i]
-		if err := o.source.LoadIndexes(ctx, t); err != nil {
+	logging.Info("[%s] loading and creating indexes (concurrency=%d)", TaskCreateIndexes, o.aiConcurrency())
+	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
+		if err := o.source.LoadIndexes(ctx, &t); err != nil {
 			return fmt.Errorf("loading indexes for %s: %w", t.Name, err)
 		}
 		for j := range t.Indexes {
 			idx := t.Indexes[j]
-			if err := o.target.CreateIndex(ctx, t, &idx, o.config.Target.Schema); err != nil {
+			if err := o.target.CreateIndex(ctx, &t, &idx, o.config.Target.Schema); err != nil {
 				return fmt.Errorf("creating index %s: %w", idx.Name, err)
 			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // CreateForeignKeys loads each table's foreign keys from the source and
-// creates them on the target.
+// creates them on the target. Same parallelism shape as CreateIndexes:
+// per-table goroutines, sequential FKs within a table.
 func (o *Orchestrator) CreateForeignKeys(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateFKs))
-	logging.Info("[%s] loading and creating foreign keys", TaskCreateFKs)
-	for i := range o.tables {
-		t := &o.tables[i]
-		if err := o.source.LoadForeignKeys(ctx, t); err != nil {
+	logging.Info("[%s] loading and creating foreign keys (concurrency=%d)", TaskCreateFKs, o.aiConcurrency())
+	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
+		if err := o.source.LoadForeignKeys(ctx, &t); err != nil {
 			return fmt.Errorf("loading FKs for %s: %w", t.Name, err)
 		}
 		for j := range t.ForeignKeys {
 			fk := t.ForeignKeys[j]
-			if err := o.target.CreateForeignKey(ctx, t, &fk, o.config.Target.Schema); err != nil {
+			if err := o.target.CreateForeignKey(ctx, &t, &fk, o.config.Target.Schema); err != nil {
 				return fmt.Errorf("creating FK %s: %w", fk.Name, err)
 			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // CreateCheckConstraints loads each table's check constraints from the
-// source and creates them on the target.
+// source and creates them on the target. Same parallelism shape as the
+// other constraint phases.
 func (o *Orchestrator) CreateCheckConstraints(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateChecks))
-	logging.Info("[%s] loading and creating check constraints", TaskCreateChecks)
-	for i := range o.tables {
-		t := &o.tables[i]
-		if err := o.source.LoadCheckConstraints(ctx, t); err != nil {
+	logging.Info("[%s] loading and creating check constraints (concurrency=%d)", TaskCreateChecks, o.aiConcurrency())
+	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
+		if err := o.source.LoadCheckConstraints(ctx, &t); err != nil {
 			return fmt.Errorf("loading checks for %s: %w", t.Name, err)
 		}
 		for j := range t.CheckConstraints {
 			chk := t.CheckConstraints[j]
-			if err := o.target.CreateCheckConstraint(ctx, t, &chk, o.config.Target.Schema); err != nil {
+			if err := o.target.CreateCheckConstraint(ctx, &t, &chk, o.config.Target.Schema); err != nil {
 				return fmt.Errorf("creating check %s: %w", chk.Name, err)
 			}
 		}
+		return nil
+	})
+}
+
+// aiConcurrency returns the configured per-phase concurrency limit, or
+// defaultAIConcurrency if unset.
+func (o *Orchestrator) aiConcurrency() int {
+	n := o.config.Migration.AIConcurrency
+	if n <= 0 {
+		n = defaultAIConcurrency
 	}
-	return nil
+	return n
 }
 
 // filterTables drops tables matching exclude_tables and (if include_tables

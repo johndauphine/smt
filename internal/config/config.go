@@ -237,6 +237,29 @@ type MigrationConfig struct {
 	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=10)
 	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
+
+	// AIConcurrency caps the number of concurrent AI calls during the
+	// create phases (CreateTables / CreateIndexes / CreateForeignKeys /
+	// CreateCheckConstraints). Each phase still runs sequentially relative
+	// to the others — only the per-table calls inside a phase parallelize.
+	//
+	// Cloud providers (Anthropic, OpenAI, Gemini): set 8-32. Throughput
+	// scales nearly linearly with concurrency until you hit the per-key
+	// rate limit; the existing 429 retry handles transient throttling.
+	// Live benchmark with Anthropic Haiku 4.5 on an 18-table schema:
+	// 1 → 61s, 8 → 10s (6.1×), 16 → 8s (7.6×).
+	//
+	// Local providers (LM Studio, Ollama): set to MATCH the server's
+	// own parallel-inference cap. LM Studio: "Max Concurrent Predictions".
+	// Ollama: OLLAMA_NUM_PARALLEL env var. Going higher than the server's
+	// cap just adds queue depth without more parallelism; going lower
+	// underutilizes the GPU. Live benchmark with LM Studio (MCP=8,
+	// gemma-4-e4b on M-series): 1 → 43s, matching 8 → 21s (2.0×).
+	//
+	// Default (0 → 8) is a sensible middle ground: 6× speedup on cloud
+	// with default tiers, 2× on local when the server allows ≥8 parallel
+	// predictions, no harm in either case.
+	AIConcurrency int `yaml:"ai_concurrency"`
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 	// AI-driven real-time parameter adjustment

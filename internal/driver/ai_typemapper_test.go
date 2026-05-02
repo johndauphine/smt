@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -298,6 +300,52 @@ func TestAITypeMapper_ExportCache(t *testing.T) {
 
 	if len(exported) != 2 {
 		t.Errorf("expected 2 exported entries, got %d", len(exported))
+	}
+}
+
+// TestAITypeMapper_SaveCacheConcurrent is a regression guard for the
+// race introduced when AIConcurrency >1 was added: the old saveCache
+// did a plain os.WriteFile with no synchronization, so two goroutines
+// could interleave a partial write and corrupt the JSON.
+//
+// Test fires N concurrent saves while N other goroutines mutate the
+// cache, then asserts the final on-disk file parses as valid JSON.
+// Run with `-race` to also catch data races on the cache map itself.
+func TestAITypeMapper_SaveCacheConcurrent(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	const writers = 16
+	const iters = 25
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				mapper.cache.Set(fmt.Sprintf("worker%d:key%d", id, j), "varchar(255)")
+				if err := mapper.saveCache(); err != nil {
+					t.Errorf("saveCache failed: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Final file on disk must parse as valid JSON. Without the
+	// mutex + atomic-rename fix, this would intermittently fail
+	// with "unexpected end of JSON input" or similar.
+	data, err := os.ReadFile(mapper.cacheFile)
+	if err != nil {
+		t.Fatalf("read cache file: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("on-disk cache is not valid JSON: %v\ncontents:\n%s", err, data)
+	}
+	if len(got) == 0 {
+		t.Errorf("expected cache to contain entries, got empty")
 	}
 }
 
