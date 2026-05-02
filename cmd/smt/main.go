@@ -17,6 +17,7 @@ import (
 
 	"smt/internal/exitcodes"
 	"smt/internal/logging"
+	"smt/internal/tui"
 	"smt/internal/version"
 )
 
@@ -87,8 +88,7 @@ func applyGlobalFlags(c *cli.Context) error {
 
 func topLevelAction(c *cli.Context) error {
 	if c.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "TUI not yet wired (added in phase 5). Run `smt --help` for available commands.")
-		return nil
+		return tui.Start()
 	}
 	return cli.ShowAppHelp(c)
 }
