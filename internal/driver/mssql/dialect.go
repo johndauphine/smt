@@ -236,9 +236,14 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 
 // AIPromptAugmentation returns SQL Server-specific instructions for AI DDL
 // generation. Mirrors the postgres dialect's augmentation: identity column
-// translation and the per-character length semantic that bites PG → MSSQL
-// in particular (an AI without this guidance has been observed doubling
-// nvarchar lengths or omitting IDENTITY entirely).
+// translation and per-character length / Unicode-vs-codepage semantics.
+// The IDENTITY guidance is corrective — without it, AI models routinely
+// emit plain `INT NOT NULL` for what was a PostgreSQL identity column,
+// breaking auto-increment on the target. The NVARCHAR length and
+// VARCHAR-vs-NVARCHAR guidance is preventive — both haiku and sonnet have
+// been observed translating lengths correctly in testing, but the older
+// "VARCHAR uses byte lengths" phrasing here previously left room for an
+// AI to scale by the byte/char ratio and we want to lock that down.
 func (d *Dialect) AIPromptAugmentation() string {
 	return `
 CRITICAL SQL Server IDENTITY column rules:
@@ -261,9 +266,11 @@ CRITICAL SQL Server NVARCHAR length rules:
 - Do NOT double, halve, or otherwise scale the length. ` + "`NVARCHAR(80)`" + ` for a source
   ` + "`varchar(40)`" + ` is wrong; both N values mean the same thing — max number of characters.
 - Use ` + "`NVARCHAR(MAX)`" + ` for unbounded source text (PostgreSQL ` + "`text`" + `, MySQL ` + "`TEXT`" + ` family).
-- Always prefer NVARCHAR over VARCHAR when migrating from PostgreSQL or MySQL — the
-  source columns hold Unicode and VARCHAR's single-byte semantics will corrupt
-  multi-byte characters silently.
+- Always prefer NVARCHAR over VARCHAR when migrating from PostgreSQL or MySQL.
+  SQL Server VARCHAR is non-Unicode and stores data in the column's collation
+  code page (1-2 bytes per character depending on collation). Inserting Unicode
+  text that has no mapping in the code page is silently lossy — characters
+  become ` + "`?`" + `. NVARCHAR uses UTF-16 and round-trips Unicode safely.
 `
 }
 

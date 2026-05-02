@@ -271,8 +271,15 @@ CRITICAL MySQL VARCHAR / charset rules:
 - Do NOT scale the length. Both N values mean the same thing — max number of characters.
 - Use ` + "`utf8mb4`" + ` charset and a ` + "`utf8mb4_*`" + ` collation for any column holding text from
   a Unicode-by-default source (PostgreSQL or SQL Server NVARCHAR).
-- For unbounded source text (PostgreSQL ` + "`text`" + `, SQL Server ` + "`NVARCHAR(MAX)`" + `), use MySQL
-  ` + "`TEXT`" + ` (or ` + "`MEDIUMTEXT`" + ` / ` + "`LONGTEXT`" + ` if you have signal the column may exceed 65k chars).
+- For unbounded source text (PostgreSQL ` + "`text`" + `, SQL Server ` + "`NVARCHAR(MAX)`" + `), pick the
+  smallest MySQL TEXT type that comfortably fits the data. The TEXT-family limits
+  are in BYTES, not characters, so with utf8mb4 (up to 4 bytes per character)
+  effective character capacity is at worst 1/4 of the byte limit:
+    ` + "`TEXT`" + `       — 65,535 bytes (~16k chars utf8mb4 worst case)
+    ` + "`MEDIUMTEXT`" + ` — 16,777,215 bytes (~4M chars utf8mb4 worst case)
+    ` + "`LONGTEXT`" + `   — 4,294,967,295 bytes (~1G chars utf8mb4 worst case)
+  When in doubt prefer the larger type — silent truncation on insert is much
+  worse than a few extra bytes of pointer overhead.
 `
 }
 

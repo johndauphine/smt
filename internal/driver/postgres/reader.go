@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +23,10 @@ type Reader struct {
 	config   *dbconfig.SourceConfig
 	maxConns int
 	dialect  *Dialect
+
+	// serverVersionOnce gates the lazy lookup of serverVersionNum.
+	serverVersionOnce sync.Once
+	serverVersionNum  int // 0 if lookup failed; integer like 160001 (PG 16.0.1)
 }
 
 // NewReader creates a new PostgreSQL reader.
@@ -216,14 +221,17 @@ func (r *Reader) applyActualRowSizes(ctx context.Context, schema string, tables 
 	}
 }
 
-func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
-	// IsIdentity detection covers both the old SERIAL form (column_default
-	// LIKE 'nextval%' against an attached sequence) and the SQL-standard
-	// GENERATED ... AS IDENTITY form added in PostgreSQL 10. Without the
-	// is_identity branch, modern PG schemas read as having no identity
-	// columns at all, and the AI then emits plain INT NOT NULL on the
-	// target instead of IDENTITY(1,1) / AUTO_INCREMENT.
-	rows, err := r.sqlDB.QueryContext(ctx, `
+// loadColumnsSQL returns the right column-introspection query for the
+// connected PostgreSQL server's version. Modern (PG 10+) servers expose
+// `is_identity` on `information_schema.columns`, which catches the SQL-
+// standard `GENERATED ... AS IDENTITY` form. Older (PG 9.x) servers do
+// not have that column — referencing it would error with `column
+// "is_identity" does not exist` — so we fall back to the legacy
+// `column_default LIKE 'nextval%'` heuristic that catches `SERIAL` /
+// `BIGSERIAL` / `SMALLSERIAL` columns. PG 9.x does not support
+// `GENERATED ... AS IDENTITY` so the legacy heuristic is exhaustive there.
+func (r *Reader) loadColumnsSQL(ctx context.Context) string {
+	const modern = `
 		SELECT
 			column_name,
 			udt_name,
@@ -235,8 +243,46 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			ordinal_position
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2
-		ORDER BY ordinal_position
-	`, t.Schema, t.Name)
+		ORDER BY ordinal_position`
+
+	const legacy = `
+		SELECT
+			column_name,
+			udt_name,
+			COALESCE(character_maximum_length, 0),
+			COALESCE(numeric_precision, 0),
+			COALESCE(numeric_scale, 0),
+			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
+			CASE WHEN column_default LIKE 'nextval%' THEN true ELSE false END,
+			ordinal_position
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2
+		ORDER BY ordinal_position`
+
+	if r.serverVersion(ctx) >= 100000 {
+		return modern
+	}
+	return legacy
+}
+
+// serverVersion reads server_version_num once and caches it. Returns 0
+// (which sorts as "very old", forcing the legacy query) if the lookup
+// fails — safer than picking the modern query and erroring on every
+// loadColumns call.
+func (r *Reader) serverVersion(ctx context.Context) int {
+	r.serverVersionOnce.Do(func() {
+		var v int
+		if err := r.sqlDB.QueryRowContext(ctx, "SHOW server_version_num").Scan(&v); err != nil {
+			logging.Debug("failed to read server_version_num: %v (assuming legacy PG)", err)
+			return
+		}
+		r.serverVersionNum = v
+	})
+	return r.serverVersionNum
+}
+
+func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
+	rows, err := r.sqlDB.QueryContext(ctx, r.loadColumnsSQL(ctx), t.Schema, t.Name)
 	if err != nil {
 		return fmt.Errorf("querying columns for %s: %w", t.Name, err)
 	}
