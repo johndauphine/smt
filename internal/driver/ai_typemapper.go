@@ -88,14 +88,21 @@ func NormalizeAIProvider(provider string) string {
 // AITypeMapper uses AI to map database types.
 // It implements the TypeMapper interface.
 type AITypeMapper struct {
-	providerName   string
-	provider       *secrets.Provider
-	client         *http.Client
-	cache          *TypeMappingCache
-	cacheFile      string
-	cacheMu        sync.RWMutex
-	requestsMu     sync.Mutex // Serialize API requests to avoid rate limiting
-	inflight       sync.Map   // Track in-flight requests to avoid duplicate API calls
+	providerName string
+	provider     *secrets.Provider
+	client       *http.Client
+	cache        *TypeMappingCache
+	cacheFile    string
+	cacheMu      sync.RWMutex
+	// requestsMu was previously held across CallAI/queryAI to serialize
+	// outbound HTTP, an inheritance from DMT's data-transfer workers
+	// where many goroutines could fire type-mapping calls in parallel.
+	// SMT controls concurrency at the orchestrator layer (via
+	// Migration.AIConcurrency in phases.go), so request serialization
+	// is now done at a single point with a known bound rather than at
+	// the per-request layer. The HTTP layer's 429 retry handles
+	// provider-side rate limits.
+	inflight       sync.Map // Track in-flight requests to avoid duplicate API calls
 	timeoutSeconds int
 }
 
@@ -287,10 +294,6 @@ func (m *AITypeMapper) Ask(ctx context.Context, prompt string) (string, error) {
 }
 
 func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
-	// Serialize API requests to avoid rate limiting
-	m.requestsMu.Lock()
-	defer m.requestsMu.Unlock()
-
 	prompt := m.buildPrompt(info)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.timeoutSeconds)*time.Second)
@@ -1195,9 +1198,11 @@ func (m *AITypeMapper) ExportCache(w io.Writer) error {
 
 // CallAI sends a prompt to the configured AI provider and returns the response.
 // This is a generic method for arbitrary prompts (not just type mapping).
+//
+// Concurrency: safe to call from multiple goroutines. Concurrency is
+// bounded by the orchestrator's Migration.AIConcurrency knob; the HTTP
+// layer's 429 retry handles provider-side rate limits.
 func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error) {
-	m.requestsMu.Lock()
-	defer m.requestsMu.Unlock()
 
 	if ctx == nil {
 		var cancel context.CancelFunc

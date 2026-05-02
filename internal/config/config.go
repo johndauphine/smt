@@ -237,6 +237,19 @@ type MigrationConfig struct {
 	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=10)
 	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
+
+	// AIConcurrency caps the number of concurrent AI calls during the
+	// create phases (CreateTables / CreateIndexes / CreateForeignKeys /
+	// CreateCheckConstraints). Each phase still runs sequentially relative
+	// to the others — only the per-table calls inside a phase parallelize.
+	//
+	// Set higher (16-32) for cloud providers with generous rate limits
+	// (Anthropic, OpenAI). Set to 1 for local single-GPU LM Studio /
+	// Ollama setups where requests serialize through one model.
+	//
+	// Default (0 → 8) is a reasonable middle ground: ~8× speedup vs
+	// serial on cloud, no harm if the provider serializes anyway.
+	AIConcurrency int `yaml:"ai_concurrency"`
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 	// AI-driven real-time parameter adjustment
