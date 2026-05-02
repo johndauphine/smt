@@ -291,6 +291,114 @@ func TestDiff_NormalizeRewritesIdentifiers(t *testing.T) {
 	}
 }
 
+// TestDiff_WithTargetSchemaRewritesTableSchema is a regression guard for
+// issue #4. The structural diff carries source schema names in
+// Table.Schema (populated by source introspection); when the AI sees
+// those values in the prompt JSON it emits ALTER TABLE qualified to the
+// source schema, which fails on the target. WithTargetSchema must
+// rewrite Schema across added / removed / changed tables.
+func TestDiff_WithTargetSchemaRewritesTableSchema(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{
+		{Schema: "smt_src_test", Name: "kept", Columns: []driver.Column{col("Id", "int", false)}},
+		{Schema: "smt_src_test", Name: "dropped"},
+	}}
+	curr := Snapshot{Tables: []driver.Table{
+		{Schema: "smt_src_test", Name: "kept", Columns: []driver.Column{col("Id", "int", false), col("Email", "varchar", true)}},
+		{Schema: "smt_src_test", Name: "added"},
+	}}
+
+	d := Compute(prev, curr).WithTargetSchema("dbo")
+
+	check := func(label, got string) {
+		t.Helper()
+		if got != "dbo" {
+			t.Errorf("%s schema: got %q, want %q", label, got, "dbo")
+		}
+	}
+	if len(d.AddedTables) != 1 {
+		t.Fatalf("expected 1 added table, got %+v", d.AddedTables)
+	}
+	check("AddedTables[0]", d.AddedTables[0].Schema)
+	if len(d.RemovedTables) != 1 {
+		t.Fatalf("expected 1 removed table, got %+v", d.RemovedTables)
+	}
+	check("RemovedTables[0]", d.RemovedTables[0].Schema)
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %+v", d.ChangedTables)
+	}
+	check("ChangedTables[0]", d.ChangedTables[0].Schema)
+	check("ChangedTables[0].Curr", d.ChangedTables[0].Curr.Schema)
+}
+
+// TestDiff_WithTargetSchemaRewritesForeignKeyRefSchema is the second
+// regression guard for #4: foreign keys serialize ref_schema into the
+// AI prompt, so a same-schema FK addition that lands in the diff would
+// otherwise carry the source schema name and cause the AI to render
+// `REFERENCES smt_src_test.parent` against an MSSQL `dbo` target. Cover
+// AddedTables.ForeignKeys, ChangedTables.Curr.ForeignKeys, and the
+// AddedForeignKeys / RemovedForeignKeys slices.
+func TestDiff_WithTargetSchemaRewritesForeignKeyRefSchema(t *testing.T) {
+	srcFK := driver.ForeignKey{
+		Name: "fk_child_parent", Columns: []string{"parent_id"},
+		RefSchema: "smt_src_test", RefTable: "parent", RefColumns: []string{"id"},
+	}
+	addedFK := driver.ForeignKey{
+		Name: "fk_new", Columns: []string{"other_id"},
+		RefSchema: "smt_src_test", RefTable: "other", RefColumns: []string{"id"},
+	}
+	removedFK := driver.ForeignKey{
+		Name: "fk_legacy", RefSchema: "smt_src_test", RefTable: "legacy",
+	}
+
+	prev := Snapshot{Tables: []driver.Table{
+		{Schema: "smt_src_test", Name: "child", ForeignKeys: []driver.ForeignKey{srcFK}, Columns: []driver.Column{col("Id", "int", false)}},
+	}}
+	curr := Snapshot{Tables: []driver.Table{
+		{Schema: "smt_src_test", Name: "child", ForeignKeys: []driver.ForeignKey{srcFK}, Columns: []driver.Column{col("Id", "int", false), col("New", "int", true)}},
+		{Schema: "smt_src_test", Name: "fresh", ForeignKeys: []driver.ForeignKey{srcFK}},
+	}}
+
+	d := Compute(prev, curr)
+	// Compute only fills in column-level deltas — added/removed FKs come
+	// from the diff caller's caller. Inject them so we can verify the
+	// retarget paths for AddedForeignKeys / RemovedForeignKeys too.
+	d.ChangedTables[0].AddedForeignKeys = []driver.ForeignKey{addedFK}
+	d.ChangedTables[0].RemovedForeignKeys = []driver.ForeignKey{removedFK}
+
+	d = d.WithTargetSchema("dbo")
+
+	check := func(label, got string) {
+		t.Helper()
+		if got != "dbo" {
+			t.Errorf("%s ref_schema: got %q, want %q", label, got, "dbo")
+		}
+	}
+
+	if len(d.AddedTables) != 1 || len(d.AddedTables[0].ForeignKeys) != 1 {
+		t.Fatalf("expected 1 added table with 1 FK, got %+v", d.AddedTables)
+	}
+	check("AddedTables[0].ForeignKeys[0].RefSchema", d.AddedTables[0].ForeignKeys[0].RefSchema)
+
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %+v", d.ChangedTables)
+	}
+	td := d.ChangedTables[0]
+	if len(td.Curr.ForeignKeys) != 1 {
+		t.Fatalf("expected Curr.ForeignKeys to be preserved, got %+v", td.Curr.ForeignKeys)
+	}
+	check("ChangedTables[0].Curr.ForeignKeys[0].RefSchema", td.Curr.ForeignKeys[0].RefSchema)
+
+	if len(td.AddedForeignKeys) != 1 {
+		t.Fatalf("expected 1 added FK, got %+v", td.AddedForeignKeys)
+	}
+	check("ChangedTables[0].AddedForeignKeys[0].RefSchema", td.AddedForeignKeys[0].RefSchema)
+
+	if len(td.RemovedForeignKeys) != 1 {
+		t.Fatalf("expected 1 removed FK, got %+v", td.RemovedForeignKeys)
+	}
+	check("ChangedTables[0].RemovedForeignKeys[0].RefSchema", td.RemovedForeignKeys[0].RefSchema)
+}
+
 func TestPlan_FilterByRisk(t *testing.T) {
 	plan := Plan{Statements: []Statement{
 		{SQL: "ALTER 1", Risk: RiskSafe},
