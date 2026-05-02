@@ -1,11 +1,49 @@
 package postgres
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"smt/internal/driver"
 )
+
+// TestLoadColumnsSQL_DetectsModernIdentity is a regression guard for the
+// PG → MSSQL/MySQL identity-column miss. The previous query only flagged
+// columns with `column_default LIKE 'nextval%'` (old SERIAL form), so
+// modern PostgreSQL `GENERATED ... AS IDENTITY` columns came through with
+// IsIdentity=false and the AI then generated plain `INT NOT NULL` on the
+// target instead of `IDENTITY(1,1)` / `AUTO_INCREMENT`.
+//
+// reader.go now picks one of two SQL strings based on the server version
+// (the modern PG 10+ query references is_identity, which doesn't exist
+// on PG 9.x). This test reads reader.go's source and asserts BOTH
+// branches are present so the modern query keeps the new is_identity
+// check and the legacy query stays as a safety net.
+func TestLoadColumnsSQL_DetectsModernIdentity(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed; cannot locate reader.go")
+	}
+	readerFile := filepath.Join(filepath.Dir(thisFile), "reader.go")
+	src, err := os.ReadFile(readerFile)
+	if err != nil {
+		t.Fatalf("read reader.go: %v", err)
+	}
+
+	body := string(src)
+	for _, needle := range []string{
+		"is_identity = 'YES'",            // modern (PG 10+) covers GENERATED ... AS IDENTITY
+		"column_default LIKE 'nextval%'", // legacy (PG 9.x) covers SERIAL / BIGSERIAL
+		"server_version_num",             // version detection that picks between the two
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("loadColumns code missing required marker %q", needle)
+		}
+	}
+}
 
 func TestDriverRegistration(t *testing.T) {
 	// The driver should be registered via init()
