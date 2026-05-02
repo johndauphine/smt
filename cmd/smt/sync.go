@@ -239,11 +239,20 @@ func loadPreviousSnapshot(state *checkpoint.State, sourceType, schema string) (s
 	return snap, nil
 }
 
+// constraintLoader is the narrow slice of driver.Reader that
+// loadAllConstraints uses. Declaring it as an interface lets tests pass
+// a stub without standing up a full driver.
+type constraintLoader interface {
+	LoadIndexes(ctx context.Context, t *driver.Table) error
+	LoadForeignKeys(ctx context.Context, t *driver.Table) error
+	LoadCheckConstraints(ctx context.Context, t *driver.Table) error
+}
+
 // loadAllConstraints fills in the per-table indexes/FKs/checks. The
 // driver's ExtractSchema returns just columns + PK; the constraint
 // loaders are separate calls so the orchestrator can skip them when not
 // needed. For snapshot/sync we always want the full picture.
-func loadAllConstraints(ctx context.Context, src driver.Reader, tables []driver.Table) error {
+func loadAllConstraints(ctx context.Context, src constraintLoader, tables []driver.Table) error {
 	for i := range tables {
 		t := &tables[i]
 		if err := src.LoadIndexes(ctx, t); err != nil {
@@ -259,10 +268,15 @@ func loadAllConstraints(ctx context.Context, src driver.Reader, tables []driver.
 	return nil
 }
 
+// sqlExecutor is the narrow slice of driver.Writer that applyPlan uses.
+type sqlExecutor interface {
+	ExecRaw(ctx context.Context, query string, args ...any) (int64, error)
+}
+
 // applyPlan executes each statement against the target writer in order.
 // Stops at the first failure so the operator can investigate and re-run
 // (idempotent statements are the AI's responsibility, not ours).
-func applyPlan(ctx context.Context, tgt driver.Writer, plan schemadiff.Plan) error {
+func applyPlan(ctx context.Context, tgt sqlExecutor, plan schemadiff.Plan) error {
 	for i, s := range plan.Statements {
 		logging.Info("[%d/%d] %s (risk=%s)", i+1, len(plan.Statements), s.Description, s.Risk)
 		if _, err := tgt.ExecRaw(ctx, s.SQL); err != nil {
