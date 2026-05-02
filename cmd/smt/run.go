@@ -154,34 +154,16 @@ func runHistory(c *cli.Context) error {
 	return orch.ShowHistory()
 }
 
-// syncCommand, validateCommand, snapshotCommand, and analyzeCommand are
-// stubbed here; sync + validate + snapshot land in Phase 6 (schema diff)
-// and analyze will return when the AI repurposing happens (also Phase 6).
-func syncCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "sync",
-		Usage: "Diff source schema against last snapshot and apply ALTER statements",
-		Flags: []cli.Flag{
-			&cli.BoolFlag{Name: "apply", Usage: "Execute ALTERs against the target (default: emit SQL for review)"},
-			&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Value: "migration.sql", Usage: "Output file when not applying"},
-		},
-		Action: notImplemented("sync"),
-	}
-}
-
+// validateCommand and analyzeCommand remain stubs for now. validate
+// (compare source vs target schema) reuses the schema-diff engine — it
+// just compares against the target's introspection rather than a stored
+// snapshot — and is a small follow-up. analyze gets the AI-driven
+// schema-relevant recommendations.
 func validateCommand() *cli.Command {
 	return &cli.Command{
 		Name:   "validate",
 		Usage:  "Compare source vs target schema and report drift",
 		Action: notImplemented("validate"),
-	}
-}
-
-func snapshotCommand() *cli.Command {
-	return &cli.Command{
-		Name:   "snapshot",
-		Usage:  "Capture the current source schema for future diffing",
-		Action: notImplemented("snapshot"),
 	}
 }
 

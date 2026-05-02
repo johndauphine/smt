@@ -249,6 +249,9 @@ func (s *State) migrate() error {
 	if err := s.ensureTuningResultColumns(); err != nil {
 		return err
 	}
+	if err := s.ensureSnapshotsTable(); err != nil {
+		return err
+	}
 
 	// One-time migration: sanitize any passwords stored in config column
 	return s.sanitizeStoredConfigs()

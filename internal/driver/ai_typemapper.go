@@ -278,6 +278,14 @@ func (m *AITypeMapper) cacheKey(info TypeInfo) string {
 		info.MaxLength, info.Precision, info.Scale)
 }
 
+// Ask is a generic free-form prompt entrypoint for callers outside this
+// package (e.g. schemadiff's AI SQL renderer) that need to use the same
+// multi-provider HTTP plumbing as the type mapper. It does not consult
+// the type-mapping cache. Caller supplies its own context with timeout.
+func (m *AITypeMapper) Ask(ctx context.Context, prompt string) (string, error) {
+	return m.dispatch(ctx, prompt)
+}
+
 func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 	// Serialize API requests to avoid rate limiting
 	m.requestsMu.Lock()
@@ -288,41 +296,46 @@ func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.timeoutSeconds)*time.Second)
 	defer cancel()
 
-	var result string
-	var err error
-
-	switch AIProvider(m.providerName) {
-	case ProviderAnthropic:
-		result, err = m.queryAnthropicAPI(ctx, prompt)
-	case ProviderOpenAI:
-		result, err = m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
-	case ProviderGemini:
-		result, err = m.queryGeminiAPI(ctx, prompt)
-	case ProviderOllama:
-		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
-		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
-	case ProviderLMStudio:
-		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
-		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
-	default:
-		// Try OpenAI-compatible API for unknown providers with base_url
-		if m.provider.BaseURL != "" {
-			result, err = m.queryOpenAICompatAPI(ctx, prompt, m.provider.BaseURL+"/v1/chat/completions")
-		} else {
-			return "", fmt.Errorf("unsupported AI provider: %s", m.providerName)
-		}
-	}
-
+	result, err := m.dispatch(ctx, prompt)
 	if err != nil {
 		return "", err
 	}
 
-	// Clean up the result (remove quotes, whitespace)
+	// Type-mapping responses are short type names; lowercase them so the
+	// cache key normalizes consistently.
 	result = strings.TrimSpace(result)
 	result = strings.Trim(result, "\"'`")
 	result = strings.ToLower(result)
 
 	return result, nil
+}
+
+// dispatch sends a prompt to the configured provider and returns the raw
+// response text. It is shared by queryAI (cached type mapping) and Ask
+// (free-form callers like schemadiff). Both share the multi-provider HTTP
+// implementations in this file so adding a new provider is a one-place edit.
+func (m *AITypeMapper) dispatch(ctx context.Context, prompt string) (string, error) {
+	switch AIProvider(m.providerName) {
+	case ProviderAnthropic:
+		return m.queryAnthropicAPI(ctx, prompt)
+	case ProviderOpenAI:
+		return m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
+	case ProviderGemini:
+		return m.queryGeminiAPI(ctx, prompt)
+	case ProviderOllama:
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		return m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
+	case ProviderLMStudio:
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		return m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
+	default:
+		// Unknown providers can ride the OpenAI-compatible endpoint if
+		// they configured a base_url (covers vLLM, llama.cpp server, etc.).
+		if m.provider.BaseURL != "" {
+			return m.queryOpenAICompatAPI(ctx, prompt, m.provider.BaseURL+"/v1/chat/completions")
+		}
+		return "", fmt.Errorf("unsupported AI provider: %s", m.providerName)
+	}
 }
 
 // maxSampleValueLen is the maximum length of a single sample value in prompts.
