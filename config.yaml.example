@@ -1,0 +1,53 @@
+# smt — Schema Migration Tool configuration
+#
+# SMT extracts the source schema and creates matching DDL on the target.
+# Unlike DMT, it does not transfer rows. There are no workers, chunks,
+# read-ahead buffers, or throughput knobs — just a source, a target, and
+# a list of which schema objects to create.
+
+source:
+  type: mssql                           # mssql | postgres | mysql
+  host: localhost
+  port: 1433
+  database: StackOverflow2010
+  user: sa
+  password: ${MSSQL_PASSWORD}           # ${env:VAR}, ${file:/path}, or literal
+  schema: dbo
+
+target:
+  type: postgres                        # mssql | postgres | mysql
+  host: localhost
+  port: 5432
+  database: stackoverflow
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+
+profile:
+  name: example
+  description: |
+    Example profile, stored encrypted in SQLite.
+    Edit this description for your environment.
+
+migration:
+  # Tables to include / exclude (glob patterns)
+  exclude_tables:
+    - __*
+    - temp_*
+  # include_tables: []                  # if set, only matching tables are scoped
+
+  # Which schema objects to create on the target
+  create_indexes: true
+  create_foreign_keys: true
+  create_check_constraints: true
+
+  # Where SMT keeps its state DB (run history, snapshots, encrypted profiles)
+  data_dir: ~/.smt
+
+# Slack notifications (optional). AI provider keys live in the secrets file
+# at ~/.secrets/smt-config.yaml — never put them here.
+slack:
+  enabled: false
+  webhook_url: ${SLACK_WEBHOOK_URL}
+  channel: "#data-engineering"
+  username: smt

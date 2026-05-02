@@ -1,0 +1,67 @@
+package pool
+
+import (
+	"fmt"
+
+	"smt/internal/config"
+	"smt/internal/dbconfig"
+	"smt/internal/driver"
+
+	// Import driver packages to trigger init() registration
+	_ "smt/internal/driver/mssql"
+	_ "smt/internal/driver/mysql"
+	_ "smt/internal/driver/postgres"
+)
+
+// NewSourcePool creates a source pool based on the configuration type.
+// Uses the driver registry to create the appropriate Reader implementation.
+// Adding a new database driver requires no changes to this function.
+func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
+	// Normalize empty type to default
+	dbType := cfg.Type
+	if dbType == "" {
+		dbType = "mssql" // Default to MSSQL for backward compatibility
+	}
+
+	// Get the driver from the registry
+	d, err := driver.Get(dbType)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported source type: %s (available: %v)", dbType, driver.Available())
+	}
+
+	// Create the reader using the driver's factory method
+	// This is truly pluggable - no switch statement needed
+	return d.NewReader((*dbconfig.SourceConfig)(cfg), maxConns)
+}
+
+// NewTargetPool creates a target pool based on the configuration type.
+// Uses the driver registry to create the appropriate Writer implementation.
+// Adding a new database driver requires no changes to this function.
+//
+// Parameters:
+//   - cfg: Target database configuration (includes chunk_size for batch operations)
+//   - maxConns: Maximum number of connections in the pool
+//   - sourceType: Source database type for cross-engine type handling
+//   - typeMapper: AI type mapper for database type conversions (required)
+func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, typeMapper driver.TypeMapper) (TargetPool, error) {
+	// Normalize empty type to default
+	dbType := cfg.Type
+	if dbType == "" {
+		dbType = "postgres" // Default to PostgreSQL for backward compatibility
+	}
+
+	// Get the driver from the registry
+	d, err := driver.Get(dbType)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported target type: %s (available: %v)", dbType, driver.Available())
+	}
+
+	// Create the writer using the driver's factory method
+	// This is truly pluggable - no switch statement needed
+	opts := driver.WriterOptions{
+		BatchSize:  cfg.ChunkSize,
+		SourceType: sourceType,
+		TypeMapper: typeMapper,
+	}
+	return d.NewWriter((*dbconfig.TargetConfig)(cfg), maxConns, opts)
+}
