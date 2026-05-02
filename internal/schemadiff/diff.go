@@ -123,14 +123,19 @@ func (d Diff) Normalize(norm func(string) string) Diff {
 	return out
 }
 
-// WithTargetSchema rewrites the Schema field on every Table inside the
-// diff to the supplied name. This is required before handing the diff to
-// the AI renderer because the structural diff carries the SOURCE schema
-// in Table.Schema (populated by the source driver's introspection), and
-// the AI tends to honor that field when emitting qualified ALTER TABLE
-// statements — producing ALTERs against the source schema name on the
-// target, which usually fails (e.g. MySQL source schema "smt_src_test"
-// against MSSQL target schema "dbo": "Cannot find the object …").
+// WithTargetSchema rewrites every schema reference inside the diff to
+// the supplied target schema name. The structural diff carries SOURCE
+// schema names in two places that the AI renderer reads: Table.Schema
+// (the table's own qualifier) and ForeignKey.RefSchema (the referenced
+// table's qualifier in inline REFERENCES clauses). The AI honors both
+// when emitting qualified DDL — leaving either one as the source value
+// produces statements that fail on the target (e.g. MySQL source schema
+// "smt_src_test" against MSSQL target schema "dbo": "Cannot find the
+// object …", or "REFERENCES smt_src_test.parent" inside a target ADD FK).
+//
+// SMT migrates source.X to target.Y; we don't preserve cross-schema
+// relationships across engines, so every schema reference in the diff
+// resolves to the target schema after rewriting.
 //
 // Parallels Normalize: structural-only transformation, leaves all other
 // fields alone. Call after Normalize and before Render.
@@ -140,19 +145,37 @@ func (d Diff) WithTargetSchema(targetSchema string) Diff {
 		CurrCapturedAt: d.CurrCapturedAt,
 	}
 	for _, t := range d.AddedTables {
-		t.Schema = targetSchema
+		retargetTable(&t, targetSchema)
 		out.AddedTables = append(out.AddedTables, t)
 	}
 	for _, t := range d.RemovedTables {
-		t.Schema = targetSchema
+		retargetTable(&t, targetSchema)
 		out.RemovedTables = append(out.RemovedTables, t)
 	}
 	for _, td := range d.ChangedTables {
 		td.Schema = targetSchema
-		td.Curr.Schema = targetSchema
+		retargetTable(&td.Curr, targetSchema)
+		retargetForeignKeys(td.AddedForeignKeys, targetSchema)
+		retargetForeignKeys(td.RemovedForeignKeys, targetSchema)
 		out.ChangedTables = append(out.ChangedTables, td)
 	}
 	return out
+}
+
+// retargetTable rewrites the table's own Schema and the RefSchema on
+// every inline foreign key. Operates in place on the supplied pointer.
+func retargetTable(t *driver.Table, targetSchema string) {
+	t.Schema = targetSchema
+	retargetForeignKeys(t.ForeignKeys, targetSchema)
+}
+
+// retargetForeignKeys rewrites RefSchema on every entry in the supplied
+// slice. Slice elements are mutated directly (FKs are values, not
+// pointers, so a `for _, fk := range` loop would not stick).
+func retargetForeignKeys(fks []driver.ForeignKey, targetSchema string) {
+	for i := range fks {
+		fks[i].RefSchema = targetSchema
+	}
 }
 
 func normalizeTable(t driver.Table, norm func(string) string) driver.Table {
