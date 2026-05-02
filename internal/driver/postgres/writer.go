@@ -502,13 +502,21 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
 
-	// Create copies with sanitized (lowercase) names for PostgreSQL
+	// Create copies with sanitized (lowercase) names for PostgreSQL.
+	// RefSchema is overridden to the target schema rather than copied from
+	// the source FK metadata: SMT migrates source.X to target.Y, so every
+	// schema reference in the generated DDL must resolve to the target.
+	// Without this override, the AI emits `REFERENCES dbo.SomeTable` (the
+	// source schema) on a PG target where the actual schema is `public`,
+	// causing CREATE FOREIGN KEY to fail with `schema "dbo" does not exist`.
+	// Same root cause as #4 / PR #5, applied to the create path instead
+	// of the sync path.
 	sanitizedTableName := sanitizePGIdentifier(t.Name)
 	sanitizedTable := &driver.Table{Name: sanitizedTableName}
 	sanitizedFK := &driver.ForeignKey{
 		Name:       sanitizePGIdentifier(fk.Name),
 		Columns:    make([]string, len(fk.Columns)),
-		RefSchema:  fk.RefSchema,
+		RefSchema:  targetSchema,
 		RefTable:   sanitizePGIdentifier(fk.RefTable),
 		RefColumns: make([]string, len(fk.RefColumns)),
 		OnDelete:   fk.OnDelete,

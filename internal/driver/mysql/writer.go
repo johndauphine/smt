@@ -517,12 +517,21 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
 
+	// Override RefSchema with the target schema. The source FK metadata
+	// carries the source's schema name (e.g. "public" from PG, "dbo"
+	// from MSSQL), and the AI honors that field when emitting the
+	// REFERENCES clause — producing FKs that reference a schema that
+	// does not exist on the MySQL target (where schema = database name).
+	// Same root cause as #4 / PR #5, applied to the create path.
+	fkForTarget := *fk
+	fkForTarget.RefSchema = targetSchema
+
 	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
 		Type:          driver.DDLTypeForeignKey,
 		SourceDBType:  w.sourceType,
 		TargetDBType:  "mysql",
 		Table:         t,
-		ForeignKey:    fk,
+		ForeignKey:    &fkForTarget,
 		TargetSchema:  targetSchema,
 		TargetContext: w.dbContext,
 	})
