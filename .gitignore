@@ -1,0 +1,40 @@
+# Binaries
+/smt
+/smt-*
+*.exe
+
+# Config with secrets
+*.yaml
+*.yml
+!config.yaml.example
+
+# State database
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+/dist/
+
+# Logs
+*.log
+
+# Dev artifacts
+*.bak
+*.png
+*.jpg
+
+# Generated migration scripts
+migrations/
+*.sql
