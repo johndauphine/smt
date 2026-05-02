@@ -2,6 +2,8 @@ package schemadiff
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,6 +158,119 @@ func TestRender_StripsCodeFences(t *testing.T) {
 	}
 	if len(plan.Statements) != 1 {
 		t.Fatalf("expected 1 stmt, got %d", len(plan.Statements))
+	}
+}
+
+// failingAsker always returns the configured error. Used to simulate AI
+// provider outages / timeouts.
+type failingAsker struct{ err error }
+
+func (f *failingAsker) Ask(_ context.Context, _ string) (string, error) {
+	return "", f.err
+}
+
+func TestRender_NilAskerReturnsError(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false), col("Email", "varchar", true))}}
+	d := Compute(prev, curr)
+
+	_, err := Render(context.Background(), nil, d, "public", "postgres")
+	if err == nil {
+		t.Fatal("expected error when ai is nil")
+	}
+	if !strings.Contains(err.Error(), "AI provider") {
+		t.Errorf("error should explain AI is required, got: %v", err)
+	}
+}
+
+func TestRender_AIErrorPropagates(t *testing.T) {
+	asker := &failingAsker{err: errors.New("anthropic 429: rate limit")}
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false), col("Email", "varchar", true))}}
+	d := Compute(prev, curr)
+
+	_, err := Render(context.Background(), asker, d, "public", "postgres")
+	if err == nil {
+		t.Fatal("expected propagated AI error")
+	}
+	if !strings.Contains(err.Error(), "rate limit") {
+		t.Errorf("underlying error should be wrapped, got: %v", err)
+	}
+}
+
+func TestRender_NonJSONResponseSurfacesRawText(t *testing.T) {
+	// Some local providers (Ollama with the wrong model) return prose
+	// instead of JSON. The error must include the raw text so the operator
+	// can see what the model said.
+	asker := &stubAsker{Response: "I cannot help with that request."}
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false), col("Email", "varchar", true))}}
+	d := Compute(prev, curr)
+
+	_, err := Render(context.Background(), asker, d, "public", "postgres")
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), "I cannot help") {
+		t.Errorf("error should include raw response for diagnosis, got: %v", err)
+	}
+}
+
+func TestRender_EmptyStatementsListReturnsEmptyPlan(t *testing.T) {
+	asker := &stubAsker{Response: `{"statements":[]}`}
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false), col("Email", "varchar", true))}}
+	d := Compute(prev, curr)
+
+	plan, err := Render(context.Background(), asker, d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !plan.IsEmpty() {
+		t.Errorf("expected empty plan from empty statements list, got %+v", plan)
+	}
+}
+
+func TestRender_ResponseWithExtraTextStillParses(t *testing.T) {
+	// Models sometimes prefix the JSON with "Here is the migration plan:".
+	// The renderer must extract the JSON object regardless.
+	asker := &stubAsker{Response: `Here is your migration plan:
+{"statements":[{"sql":"ALTER TABLE foo","description":"d","risk":"safe"}]}
+Hope this helps!`}
+
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false), col("Email", "varchar", true))}}
+	d := Compute(prev, curr)
+
+	plan, err := Render(context.Background(), asker, d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("expected JSON to parse despite surrounding prose, got %v", err)
+	}
+	if len(plan.Statements) != 1 {
+		t.Errorf("expected 1 statement, got %d", len(plan.Statements))
+	}
+}
+
+func TestRender_PromptIncludesTargetDialectAndSchema(t *testing.T) {
+	asker := &stubAsker{Response: `{"statements":[]}`}
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false), col("Email", "varchar", true))}}
+	d := Compute(prev, curr)
+
+	if _, err := Render(context.Background(), asker, d, "my_schema", "mysql"); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(asker.GotPrompt, "mysql") {
+		t.Errorf("prompt should mention target dialect, got: %s", asker.GotPrompt)
+	}
+	if !strings.Contains(asker.GotPrompt, "my_schema") {
+		t.Errorf("prompt should mention target schema, got: %s", asker.GotPrompt)
 	}
 }
 
