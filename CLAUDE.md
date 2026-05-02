@@ -58,7 +58,8 @@ Optional phases (indexes, FKs, checks) are gated by `cfg.Migration.Create*` bool
 SMT's job is to give the AI the context it needs and execute what comes back. Translation, generation, and judgment belong to the AI:
 
 - **type mapping** (source dialect → target dialect): AI, via `MapType`
-- **DDL generation** for new schemas: target — currently hand-coded in `internal/driver/{postgres,mssql,mysql}/writer.go` (inherited from DMT); should migrate to AI rendering for consistency with `sync`
+- **DDL generation** for new schemas: AI, via `tableMapper.GenerateTableDDL` (CREATE TABLE) and `finalizationMapper.GenerateFinalizationDDL` (indexes, FKs, checks) inside each driver's Writer
+- **Identifier naming convention** for the target: `driver.NormalizeIdentifier(targetType, name)` — single source of truth shared by `create`'s pre-sanitization and `sync`'s `Diff.Normalize`
 - **ALTER generation** in `sync`: AI, via `Render` in `schemadiff/render.go`
 - **Risk judgment** for ALTERs (safe / blocking / rebuild / data-loss-risk): AI, in the same prompt
 - **Error diagnosis** when DDL fails: AI, via `internal/driver/ai_errordiag.go`
@@ -127,10 +128,13 @@ Some files preserve DMT's original code shape unchanged (verbatim copy with modu
 
 ## Open follow-ups
 
-- `smt create` still uses DMT's hand-coded `Writer.CreateTable` per dialect (`internal/driver/{postgres,mssql,mysql}/writer.go`, ~1000 lines each). For consistency with `sync`, this should be reworked so the orchestrator hands the AI a Table struct + target dialect and gets back CREATE TABLE / CREATE INDEX / CREATE FK / CREATE CHECK statements — same shape as `schemadiff.Render`. The hand-coded path stays as a fallback for offline use.
 - `smt validate` and `smt analyze` are stubs. validate is a small reuse of `schemadiff.Compute` against the target's introspection rather than a stored snapshot. analyze reuses the AI plumbing for schema-relevant suggestions (risky type mappings, tables to exclude, missing indexes).
 - TUI `/sync` and `/snapshot` print "lands in a later phase" instead of dispatching to the new commands; wire them to call the same handlers as the CLI.
 - `MigrationDefaults` in `internal/secrets/secrets.go` carries unused workers/chunk_size/buffer fields. Safe to drop once we're confident no DMT secrets file in the wild needs them.
+
+### Resolved (kept here as decision log)
+
+- `create` and `sync` now agree on identifier naming. Both go through `driver.NormalizeIdentifier(targetType, name)` — a single source of truth that matches PostgreSQL's case-folding (lowercases + slugs non-alphanumeric) and passes MSSQL/MySQL through. Earlier I misread the codebase and thought `create` was hand-coding ~3000 lines of DDL string assembly per driver; in fact the per-driver `Writer.CreateTable` / `CreateIndex` / `CreateForeignKey` / `CreateCheckConstraint` already use AI rendering (via `tableMapper.GenerateTableDDL` and `finalizationMapper.GenerateFinalizationDDL`). The actual divergence was a small per-driver pre-sanitization step that `sync` skipped. See `internal/driver/identifiers.go` and the `Diff.Normalize` call in `cmd/smt/sync.go`.
 
 ## Common gotchas
 

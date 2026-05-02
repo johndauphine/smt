@@ -159,6 +159,23 @@ func TestRender_StripsCodeFences(t *testing.T) {
 	}
 }
 
+func TestDiff_NormalizeRewritesIdentifiers(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false), col("Email", "varchar", true))}}
+	d := Compute(prev, curr).Normalize(func(s string) string {
+		return "lc_" + s
+	})
+
+	if len(d.ChangedTables) != 1 || d.ChangedTables[0].Name != "lc_Users" {
+		t.Fatalf("expected normalized table name lc_Users, got %+v", d.ChangedTables)
+	}
+	added := d.ChangedTables[0].AddedColumns
+	if len(added) != 1 || added[0].Name != "lc_Email" {
+		t.Fatalf("expected normalized column name lc_Email, got %+v", added)
+	}
+}
+
 func TestPlan_FilterByRisk(t *testing.T) {
 	plan := Plan{Statements: []Statement{
 		{SQL: "ALTER 1", Risk: RiskSafe},

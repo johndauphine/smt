@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,31 +20,12 @@ import (
 	"smt/internal/stats"
 )
 
-// sanitizePGIdentifier converts an identifier to PostgreSQL-friendly lowercase format.
-// Simply lowercases and replaces special chars with underscores.
-// Example: VoteTypes -> votetypes, UserId -> userid, User-Id -> user_id
+// sanitizePGIdentifier delegates to driver.NormalizeIdentifier so the
+// `smt create` path and the `smt sync` path use the same naming rules.
+// The shared implementation is in internal/driver/identifiers.go; this
+// alias is kept so the rest of this file reads unchanged.
 func sanitizePGIdentifier(ident string) string {
-	if ident == "" {
-		return "col_"
-	}
-	s := strings.ToLower(ident)
-	var sb strings.Builder
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteRune('_')
-		}
-	}
-	s = sb.String()
-	// Prefix with col_ if starts with digit
-	if len(s) > 0 && unicode.IsDigit(rune(s[0])) {
-		s = "col_" + s
-	}
-	if s == "" {
-		return "col_"
-	}
-	return s
+	return driver.NormalizeIdentifier("postgres", ident)
 }
 
 // sanitizePGTableName is an alias for sanitizePGIdentifier for table names.

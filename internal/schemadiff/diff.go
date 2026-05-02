@@ -97,6 +97,122 @@ func (d Diff) Summary() string {
 	return strings.TrimSuffix(strings.TrimSpace(b.String()), ",")
 }
 
+// Normalize rewrites every identifier in the diff (table names, column
+// names, index names, FK names + ref columns, check names) through the
+// supplied function. Callers use this to align source-original names
+// (e.g. MSSQL "Posts") with the target's on-disk convention (e.g.
+// PostgreSQL "posts") before handing the diff to the AI renderer, so
+// the generated ALTERs hit tables that actually exist on the target.
+//
+// The transformation is purely structural; data types and other column
+// attributes are left alone.
+func (d Diff) Normalize(norm func(string) string) Diff {
+	out := Diff{
+		PrevCapturedAt: d.PrevCapturedAt,
+		CurrCapturedAt: d.CurrCapturedAt,
+	}
+	for _, t := range d.AddedTables {
+		out.AddedTables = append(out.AddedTables, normalizeTable(t, norm))
+	}
+	for _, t := range d.RemovedTables {
+		out.RemovedTables = append(out.RemovedTables, normalizeTable(t, norm))
+	}
+	for _, td := range d.ChangedTables {
+		out.ChangedTables = append(out.ChangedTables, normalizeTableDiff(td, norm))
+	}
+	return out
+}
+
+func normalizeTable(t driver.Table, norm func(string) string) driver.Table {
+	t.Name = norm(t.Name)
+	for i := range t.Columns {
+		t.Columns[i].Name = norm(t.Columns[i].Name)
+	}
+	for i := range t.PrimaryKey {
+		t.PrimaryKey[i] = norm(t.PrimaryKey[i])
+	}
+	for i := range t.Indexes {
+		t.Indexes[i].Name = norm(t.Indexes[i].Name)
+		for j := range t.Indexes[i].Columns {
+			t.Indexes[i].Columns[j] = norm(t.Indexes[i].Columns[j])
+		}
+		for j := range t.Indexes[i].IncludeCols {
+			t.Indexes[i].IncludeCols[j] = norm(t.Indexes[i].IncludeCols[j])
+		}
+	}
+	for i := range t.ForeignKeys {
+		t.ForeignKeys[i].Name = norm(t.ForeignKeys[i].Name)
+		t.ForeignKeys[i].RefTable = norm(t.ForeignKeys[i].RefTable)
+		for j := range t.ForeignKeys[i].Columns {
+			t.ForeignKeys[i].Columns[j] = norm(t.ForeignKeys[i].Columns[j])
+		}
+		for j := range t.ForeignKeys[i].RefColumns {
+			t.ForeignKeys[i].RefColumns[j] = norm(t.ForeignKeys[i].RefColumns[j])
+		}
+	}
+	for i := range t.CheckConstraints {
+		t.CheckConstraints[i].Name = norm(t.CheckConstraints[i].Name)
+	}
+	return t
+}
+
+func normalizeTableDiff(td TableDiff, norm func(string) string) TableDiff {
+	out := TableDiff{
+		Schema: td.Schema,
+		Name:   norm(td.Name),
+		Curr:   normalizeTable(td.Curr, norm),
+	}
+	for _, c := range td.AddedColumns {
+		c.Name = norm(c.Name)
+		out.AddedColumns = append(out.AddedColumns, c)
+	}
+	for _, c := range td.RemovedColumns {
+		c.Name = norm(c.Name)
+		out.RemovedColumns = append(out.RemovedColumns, c)
+	}
+	for _, cc := range td.ChangedColumns {
+		cc.Name = norm(cc.Name)
+		cc.Old.Name = norm(cc.Old.Name)
+		cc.New.Name = norm(cc.New.Name)
+		out.ChangedColumns = append(out.ChangedColumns, cc)
+	}
+	for _, idx := range td.AddedIndexes {
+		idx.Name = norm(idx.Name)
+		for j := range idx.Columns {
+			idx.Columns[j] = norm(idx.Columns[j])
+		}
+		out.AddedIndexes = append(out.AddedIndexes, idx)
+	}
+	for _, idx := range td.RemovedIndexes {
+		idx.Name = norm(idx.Name)
+		out.RemovedIndexes = append(out.RemovedIndexes, idx)
+	}
+	for _, fk := range td.AddedForeignKeys {
+		fk.Name = norm(fk.Name)
+		fk.RefTable = norm(fk.RefTable)
+		for j := range fk.Columns {
+			fk.Columns[j] = norm(fk.Columns[j])
+		}
+		for j := range fk.RefColumns {
+			fk.RefColumns[j] = norm(fk.RefColumns[j])
+		}
+		out.AddedForeignKeys = append(out.AddedForeignKeys, fk)
+	}
+	for _, fk := range td.RemovedForeignKeys {
+		fk.Name = norm(fk.Name)
+		out.RemovedForeignKeys = append(out.RemovedForeignKeys, fk)
+	}
+	for _, c := range td.AddedChecks {
+		c.Name = norm(c.Name)
+		out.AddedChecks = append(out.AddedChecks, c)
+	}
+	for _, c := range td.RemovedChecks {
+		c.Name = norm(c.Name)
+		out.RemovedChecks = append(out.RemovedChecks, c)
+	}
+	return out
+}
+
 // Compute compares two snapshots and returns the delta. Tables, columns,
 // indexes, FKs, and checks are matched by name; differences in attributes
 // (column type/nullability, etc.) become ChangedColumns entries.

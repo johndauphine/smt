@@ -158,6 +158,15 @@ func runSync(c *cli.Context) error {
 		fmt.Println("No schema changes since last snapshot.")
 		return nil
 	}
+
+	// Re-write source-original identifiers (e.g. MSSQL "Posts") to whatever
+	// the target dialect actually uses on disk (PG lowercases to "posts").
+	// Without this the AI emits ALTERs against names the target doesn't have.
+	// See driver.NormalizeIdentifier for the per-dialect rules.
+	diff = diff.Normalize(func(name string) string {
+		return driver.NormalizeIdentifier(cfg.Target.Type, name)
+	})
+
 	fmt.Printf("Diff: %s\n", diff.Summary())
 
 	mapper, err := driver.NewAITypeMapperFromSecrets()
