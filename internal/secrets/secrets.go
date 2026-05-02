@@ -1,0 +1,598 @@
+// Package secrets provides secure configuration loading for API keys and encryption keys.
+package secrets
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	// DefaultSecretsDir is the default directory for secrets
+	DefaultSecretsDir = ".secrets"
+	// DefaultSecretsFile is the default filename for secrets
+	DefaultSecretsFile = "smt-config.yaml"
+	// SecretsFileEnvVar allows overriding the secrets file location
+	SecretsFileEnvVar = "SMT_SECRETS_FILE"
+	// SecureDirMode is the permission mode for the secrets directory
+	SecureDirMode = 0700
+	// SecureFileMode is the permission mode for the secrets file
+	SecureFileMode = 0600
+)
+
+// Config represents the complete secrets configuration
+type Config struct {
+	AI                AIConfig            `yaml:"ai"`
+	Encryption        EncryptionConfig    `yaml:"encryption"`
+	Notifications     NotificationsConfig `yaml:"notifications"`
+	MigrationDefaults MigrationDefaults   `yaml:"migration_defaults"`
+}
+
+// MigrationDefaults holds global default settings for migrations.
+// These can be overridden in individual migration config files.
+type MigrationDefaults struct {
+	// Performance settings (machine-dependent)
+	Workers              int   `yaml:"workers,omitempty"`                // Number of parallel workers (default: auto based on CPU)
+	MaxSourceConnections int   `yaml:"max_source_connections,omitempty"` // Max source DB connections
+	MaxTargetConnections int   `yaml:"max_target_connections,omitempty"` // Max target DB connections
+	MaxMemoryMB          int64 `yaml:"max_memory_mb,omitempty"`          // Max memory usage in MB
+	ReadAheadBuffers     int   `yaml:"read_ahead_buffers,omitempty"`     // Chunks to buffer ahead
+	WriteAheadWriters    int   `yaml:"write_ahead_writers,omitempty"`    // Parallel writers per job
+	ParallelReaders      int   `yaml:"parallel_readers,omitempty"`       // Parallel readers per job
+
+	// Schema creation defaults (use *bool to distinguish "not set" from "false")
+	CreateIndexes          *bool `yaml:"create_indexes,omitempty"`           // Create non-PK indexes (default: true)
+	CreateForeignKeys      *bool `yaml:"create_foreign_keys,omitempty"`      // Create FK constraints (default: true)
+	CreateCheckConstraints *bool `yaml:"create_check_constraints,omitempty"` // Create CHECK constraints (default: false)
+
+	// Consistency and validation
+	StrictConsistency *bool `yaml:"strict_consistency,omitempty"` // Use table locks instead of NOLOCK
+	SampleValidation  *bool `yaml:"sample_validation,omitempty"`  // Enable sample data validation
+	SampleSize        int   `yaml:"sample_size,omitempty"`        // Rows to sample for validation
+
+	// Checkpoint and recovery
+	CheckpointFrequency  int `yaml:"checkpoint_frequency,omitempty"`   // Save progress every N chunks
+	MaxRetries           int `yaml:"max_retries,omitempty"`            // Retry failed tables N times
+	HistoryRetentionDays int `yaml:"history_retention_days,omitempty"` // Keep run history for N days
+
+	// AI features (enabled by default when AI provider is configured)
+	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"`          // Enable AI-driven parameter adjustment (default: true)
+	AIAdjustInterval string `yaml:"ai_adjust_interval,omitempty"` // How often AI evaluates metrics (default: 30s)
+
+	// Data directory
+	DataDir string `yaml:"data_dir,omitempty"` // Directory for state/checkpoint files
+}
+
+// AIConfig holds AI provider configuration
+type AIConfig struct {
+	DefaultProvider string               `yaml:"default_provider"`
+	Providers       map[string]*Provider `yaml:"providers"`
+}
+
+// Provider represents an AI provider configuration
+type Provider struct {
+	APIKey         string `yaml:"api_key,omitempty"`         // Required for cloud providers
+	BaseURL        string `yaml:"base_url,omitempty"`        // Required for local providers, optional for cloud
+	Model          string `yaml:"model,omitempty"`           // Optional, uses smart defaults
+	ContextWindow  int    `yaml:"context_window,omitempty"`  // Optional, context window size in tokens (for Ollama/local providers)
+	MaxTokens      int    `yaml:"max_tokens,omitempty"`      // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
+	TimeoutSeconds int    `yaml:"timeout_seconds,omitempty"` // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
+}
+
+// EncryptionConfig holds encryption-related secrets
+type EncryptionConfig struct {
+	MasterKey string `yaml:"master_key"`
+}
+
+// NotificationsConfig holds notification service credentials
+type NotificationsConfig struct {
+	Slack SlackConfig `yaml:"slack"`
+}
+
+// SlackConfig holds Slack webhook configuration
+type SlackConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+// ProviderType categorizes providers by their API style
+type ProviderType int
+
+const (
+	ProviderTypeCloud ProviderType = iota // Requires API key
+	ProviderTypeLocal                     // Uses local base_url, no API key
+)
+
+// KnownProviders maps provider names to their types and default base URLs
+var KnownProviders = map[string]struct {
+	Type       ProviderType
+	DefaultURL string
+}{
+	"anthropic": {ProviderTypeCloud, "https://api.anthropic.com"},
+	"openai":    {ProviderTypeCloud, "https://api.openai.com"},
+	"gemini":    {ProviderTypeCloud, "https://generativelanguage.googleapis.com"},
+	"ollama":    {ProviderTypeLocal, "http://localhost:11434"},
+	"lmstudio":  {ProviderTypeLocal, "http://localhost:1234"},
+}
+
+// DefaultModels maps providers to their default models
+var DefaultModels = map[string]string{
+	"anthropic": "claude-haiku-4-5-20251001",
+	"openai":    "gpt-4o",
+	"gemini":    "gemini-2.0-flash",
+	"ollama":    "llama3",
+	"lmstudio":  "local-model",
+}
+
+var (
+	globalConfig *Config
+	configOnce   sync.Once
+	configErr    error
+)
+
+// Load loads the secrets configuration from the default or override location.
+// It caches the result and returns the same config on subsequent calls.
+func Load() (*Config, error) {
+	configOnce.Do(func() {
+		globalConfig, configErr = loadFromFile()
+	})
+	return globalConfig, configErr
+}
+
+// Reset clears the cached config (useful for testing)
+func Reset() {
+	configOnce = sync.Once{}
+	globalConfig = nil
+	configErr = nil
+}
+
+// GetSecretsPath returns the path to the secrets file
+func GetSecretsPath() string {
+	if envPath := os.Getenv(SecretsFileEnvVar); envPath != "" {
+		return envPath
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", DefaultSecretsDir, DefaultSecretsFile)
+	}
+	return filepath.Join(homeDir, DefaultSecretsDir, DefaultSecretsFile)
+}
+
+// EnsureSecretsDir creates the secrets directory with secure permissions if it doesn't exist
+func EnsureSecretsDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("getting home directory: %w", err)
+	}
+
+	secretsDir := filepath.Join(homeDir, DefaultSecretsDir)
+
+	// Check if directory exists
+	info, err := os.Stat(secretsDir)
+	if os.IsNotExist(err) {
+		// Create directory with secure permissions
+		if err := os.MkdirAll(secretsDir, SecureDirMode); err != nil {
+			return "", fmt.Errorf("creating secrets directory: %w", err)
+		}
+		return secretsDir, nil
+	} else if err != nil {
+		return "", fmt.Errorf("checking secrets directory: %w", err)
+	}
+
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s exists but is not a directory", secretsDir)
+	}
+
+	return secretsDir, nil
+}
+
+func loadFromFile() (*Config, error) {
+	path := GetSecretsPath()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, &SecretsNotFoundError{Path: path}
+		}
+		return nil, fmt.Errorf("reading secrets file: %w", err)
+	}
+
+	// Check file permissions - reject if too permissive (security requirement)
+	info, err := os.Stat(path)
+	if err == nil {
+		mode := info.Mode().Perm()
+		if mode&0077 != 0 {
+			return nil, fmt.Errorf("secrets file %s has insecure permissions (%04o). "+
+				"Other users can read your API keys. Run: chmod 600 %s", path, mode, path)
+		}
+	}
+
+	var config Config
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("parsing secrets file: %w", err)
+	}
+
+	// Validate configuration
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// Save writes the config to the secrets file, preserving existing fields.
+// It loads the current file first to preserve any fields not in the new config.
+func Save(updates *Config) error {
+	path := GetSecretsPath()
+
+	// Load existing config if it exists
+	existing := &Config{}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		_ = yaml.Unmarshal(data, existing)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reading existing secrets file: %w", err)
+	}
+
+	// Merge updates into existing config
+	mergeConfig(existing, updates)
+
+	// Marshal the merged config
+	newData, err := yaml.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+
+	// Ensure the directory exists
+	if _, err := EnsureSecretsDir(); err != nil {
+		return err
+	}
+
+	// Write with secure permissions
+	if err := os.WriteFile(path, newData, SecureFileMode); err != nil {
+		return fmt.Errorf("writing secrets file: %w", err)
+	}
+
+	// Reset the cached config so next Load() picks up changes
+	Reset()
+
+	return nil
+}
+
+// mergeConfig merges updates into existing config, only overwriting non-zero values.
+func mergeConfig(existing, updates *Config) {
+	mergeAIConfig(&existing.AI, &updates.AI)
+	mergeMigrationDefaults(&existing.MigrationDefaults, &updates.MigrationDefaults)
+}
+
+// mergeAIConfig merges AI configuration updates into existing config.
+func mergeAIConfig(existing, updates *AIConfig) {
+	if updates.DefaultProvider != "" {
+		existing.DefaultProvider = updates.DefaultProvider
+	}
+	if len(updates.Providers) > 0 {
+		if existing.Providers == nil {
+			existing.Providers = make(map[string]*Provider)
+		}
+		for name, provider := range updates.Providers {
+			existing.Providers[name] = provider
+		}
+	}
+}
+
+// mergeMigrationDefaults merges non-zero migration defaults.
+func mergeMigrationDefaults(existing, updates *MigrationDefaults) {
+	if updates.Workers > 0 {
+		existing.Workers = updates.Workers
+	}
+	if updates.MaxSourceConnections > 0 {
+		existing.MaxSourceConnections = updates.MaxSourceConnections
+	}
+	if updates.MaxTargetConnections > 0 {
+		existing.MaxTargetConnections = updates.MaxTargetConnections
+	}
+	if updates.MaxMemoryMB > 0 {
+		existing.MaxMemoryMB = updates.MaxMemoryMB
+	}
+	if updates.ReadAheadBuffers > 0 {
+		existing.ReadAheadBuffers = updates.ReadAheadBuffers
+	}
+	if updates.WriteAheadWriters > 0 {
+		existing.WriteAheadWriters = updates.WriteAheadWriters
+	}
+	if updates.ParallelReaders > 0 {
+		existing.ParallelReaders = updates.ParallelReaders
+	}
+	if updates.CheckpointFrequency > 0 {
+		existing.CheckpointFrequency = updates.CheckpointFrequency
+	}
+	if updates.MaxRetries > 0 {
+		existing.MaxRetries = updates.MaxRetries
+	}
+	if updates.SampleSize > 0 {
+		existing.SampleSize = updates.SampleSize
+	}
+	if updates.HistoryRetentionDays > 0 {
+		existing.HistoryRetentionDays = updates.HistoryRetentionDays
+	}
+	if updates.DataDir != "" {
+		existing.DataDir = updates.DataDir
+	}
+	if updates.AIAdjustInterval != "" {
+		existing.AIAdjustInterval = updates.AIAdjustInterval
+	}
+	// Boolean pointers - only update if explicitly set
+	if updates.CreateIndexes != nil {
+		existing.CreateIndexes = updates.CreateIndexes
+	}
+	if updates.CreateForeignKeys != nil {
+		existing.CreateForeignKeys = updates.CreateForeignKeys
+	}
+	if updates.CreateCheckConstraints != nil {
+		existing.CreateCheckConstraints = updates.CreateCheckConstraints
+	}
+	if updates.StrictConsistency != nil {
+		existing.StrictConsistency = updates.StrictConsistency
+	}
+	if updates.SampleValidation != nil {
+		existing.SampleValidation = updates.SampleValidation
+	}
+	if updates.AIAdjust != nil {
+		existing.AIAdjust = updates.AIAdjust
+	}
+}
+
+// Validate checks that the configuration is valid
+func (c *Config) Validate() error {
+	// AI settings are optional - only validate if configured
+	if c.AI.DefaultProvider != "" {
+		// Check that default provider exists
+		provider, ok := c.AI.Providers[c.AI.DefaultProvider]
+		if !ok {
+			return fmt.Errorf("default provider %q not found in providers", c.AI.DefaultProvider)
+		}
+
+		// Validate the default provider has required fields
+		if err := validateProvider(c.AI.DefaultProvider, provider); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateProvider(name string, p *Provider) error {
+	known, isKnown := KnownProviders[name]
+
+	if isKnown {
+		if known.Type == ProviderTypeCloud && p.APIKey == "" {
+			return fmt.Errorf("provider %q requires api_key", name)
+		}
+		if known.Type == ProviderTypeLocal && p.BaseURL == "" {
+			// Use default URL for known local providers
+			p.BaseURL = known.DefaultURL
+		}
+	} else {
+		// Unknown provider - must have either API key or base URL
+		if p.APIKey == "" && p.BaseURL == "" {
+			return fmt.Errorf("provider %q requires either api_key or base_url", name)
+		}
+	}
+
+	return nil
+}
+
+// GetDefaultProvider returns the configured default AI provider
+func (c *Config) GetDefaultProvider() (*Provider, string, error) {
+	if c.AI.DefaultProvider == "" {
+		return nil, "", fmt.Errorf("no default provider configured")
+	}
+
+	provider, ok := c.AI.Providers[c.AI.DefaultProvider]
+	if !ok {
+		return nil, "", fmt.Errorf("default provider %q not found", c.AI.DefaultProvider)
+	}
+
+	return provider, c.AI.DefaultProvider, nil
+}
+
+// GetProvider returns a specific AI provider by name
+func (c *Config) GetProvider(name string) (*Provider, error) {
+	provider, ok := c.AI.Providers[name]
+	if !ok {
+		return nil, fmt.Errorf("provider %q not found", name)
+	}
+	return provider, nil
+}
+
+// GetMasterKey returns the encryption master key
+func (c *Config) GetMasterKey() string {
+	return c.Encryption.MasterKey
+}
+
+// GetMigrationDefaults returns the global migration defaults with smart defaults applied.
+// AI adjust is enabled by default when an AI provider is configured.
+func (c *Config) GetMigrationDefaults() *MigrationDefaults {
+	defaults := c.MigrationDefaults
+
+	// Apply smart defaults for AI adjust:
+	// If ai_adjust wasn't explicitly set (nil pointer),
+	// enable it by default when an AI provider is configured
+	if defaults.AIAdjust == nil && defaults.AIAdjustInterval == "" {
+		// Neither ai_adjust nor ai_adjust_interval was set - apply default
+		if provider, _, err := c.GetDefaultProvider(); err == nil && provider != nil {
+			if provider.APIKey != "" || provider.BaseURL != "" {
+				aiAdjust := true
+				defaults.AIAdjust = &aiAdjust
+				defaults.AIAdjustInterval = "30s"
+			}
+		}
+	}
+
+	return &defaults
+}
+
+// GetEffectiveBaseURL returns the base URL for a provider, using defaults if not specified
+func (p *Provider) GetEffectiveBaseURL(providerName string) string {
+	if p.BaseURL != "" {
+		return p.BaseURL
+	}
+	if known, ok := KnownProviders[providerName]; ok {
+		return known.DefaultURL
+	}
+	return ""
+}
+
+// GetEffectiveModel returns the model for a provider, using defaults if not specified
+func (p *Provider) GetEffectiveModel(providerName string) string {
+	if p.Model != "" {
+		return p.Model
+	}
+	if defaultModel, ok := DefaultModels[providerName]; ok {
+		return defaultModel
+	}
+	return ""
+}
+
+// GetEffectiveContextWindow returns the context window size for a provider.
+// Returns the configured value if set, otherwise returns a conservative default of 8192 tokens.
+// Users should configure this based on their specific model's capabilities:
+// - llama3:8b, llama3.2: 8192 tokens
+// - llama3:70b, llama3.1: 131072 tokens (128K)
+// - qwen2.5, deepseek: 32768 tokens (32K)
+// - mistral, mixtral: 8192-32768 tokens (varies by version)
+func (p *Provider) GetEffectiveContextWindow() int {
+	if p.ContextWindow > 0 {
+		return p.ContextWindow
+	}
+	// Conservative default that works with most models
+	return 8192
+}
+
+// GetEffectiveMaxTokens returns the max output tokens for a provider.
+// Returns the configured value if set, otherwise returns a default based on provider type.
+// Local providers default to 16000 (reasoning models need headroom for thinking + output).
+// Cloud providers default to 4000.
+func (p *Provider) GetEffectiveMaxTokens(providerName string) int {
+	if p.MaxTokens > 0 {
+		return p.MaxTokens
+	}
+	// Treat as local if it's a known local provider OR has a base_url without an API key
+	// (custom OpenAI-compatible local providers)
+	if IsLocalProvider(providerName) || (p.BaseURL != "" && p.APIKey == "") {
+		return 16000
+	}
+	return 4000
+}
+
+// IsLocalProvider returns true if the provider is a local provider (no API key needed)
+func IsLocalProvider(name string) bool {
+	if known, ok := KnownProviders[name]; ok {
+		return known.Type == ProviderTypeLocal
+	}
+	return false
+}
+
+// SecretsNotFoundError is returned when the secrets file doesn't exist
+type SecretsNotFoundError struct {
+	Path string
+}
+
+func (e *SecretsNotFoundError) Error() string {
+	return fmt.Sprintf(`secrets file not found: %s
+
+To create a secrets file, run:
+  smt init-secrets
+
+Or create %s manually with:
+
+ai:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: "your-api-key"
+
+encryption:
+  master_key: "your-master-key"
+`, e.Path, e.Path)
+}
+
+// GenerateTemplate returns a template secrets file content
+func GenerateTemplate() string {
+	return `# SMT Secrets Configuration
+# This file contains sensitive configuration that should not be committed to version control.
+# Permissions should be restricted: chmod 600 ~/.secrets/smt-config.yaml
+
+ai:
+  default_provider: anthropic  # Which provider to use by default
+
+  providers:
+    # Cloud providers (require API key)
+    anthropic:
+      api_key: ""  # Get from https://console.anthropic.com/
+      model: "claude-haiku-4-5-20251001"  # optional
+
+    openai:
+      api_key: ""  # Get from https://platform.openai.com/
+      model: "gpt-4o"  # optional
+
+    gemini:
+      api_key: ""  # Get from https://makersuite.google.com/
+      model: "gemini-2.0-flash"  # optional
+
+    # Local providers (no API key needed)
+    ollama:
+      base_url: "http://localhost:11434"
+      model: "llama3"
+      # context_window: 8192  # optional, defaults to 8192 (conservative)
+      # max_tokens: 16000     # optional, max output tokens (default: 16000 for local, 4000 for cloud)
+      # Common context_window values:
+      # - llama3:8b, llama3.2: 8192
+      # - llama3:70b, llama3.1: 131072 (128K)
+      # - qwen2.5, deepseek: 32768 (32K)
+      # - mistral, mixtral: 8192-32768 (varies)
+
+    lmstudio:
+      base_url: "http://localhost:1234"
+      model: "local-model"
+      # context_window: 8192  # optional, configure based on your model
+      # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
+
+encryption:
+  master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32
+
+notifications:
+  slack:
+    webhook_url: ""  # Slack webhook URL for migration notifications
+
+# Global migration defaults (can be overridden per-migration)
+migration_defaults:
+  # Performance settings (auto-tuned if not set)
+  # workers: 4                    # Parallel workers (default: based on CPU cores)
+  # max_memory_mb: 0              # Max memory in MB (default: 70% of available)
+  # read_ahead_buffers: 8         # Chunks to buffer ahead
+  # write_ahead_writers: 2        # Parallel writers per job
+  # parallel_readers: 2           # Parallel readers per job
+
+  # Schema creation defaults
+  create_indexes: true            # Create non-PK indexes
+  create_foreign_keys: true       # Create FK constraints
+  create_check_constraints: false # Create CHECK constraints
+
+  # Consistency and validation
+  strict_consistency: false       # Use table locks instead of NOLOCK/MVCC
+  sample_validation: false        # Validate sample data after migration
+  sample_size: 100                # Rows to sample for validation
+
+  # Checkpoint and recovery
+  checkpoint_frequency: 10        # Save progress every N chunks
+  max_retries: 3                  # Retry failed tables N times
+  history_retention_days: 30      # Keep run history for N days
+
+  # AI features (enabled by default when AI provider is configured)
+  ai_adjust: true                 # Enable AI-driven parameter adjustment
+  ai_adjust_interval: "30s"       # How often AI evaluates metrics
+`
+}
