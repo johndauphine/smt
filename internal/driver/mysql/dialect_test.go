@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -99,11 +101,7 @@ func TestAIPromptAugmentation_FractionalSecondPrecision(t *testing.T) {
 // TestReaderDatabaseContext_Populated is the mysql side of the issue #13
 // regression guard. Mirrors the postgres test.
 func TestReaderDatabaseContext_Populated(t *testing.T) {
-	src, err := os.ReadFile("reader.go")
-	if err != nil {
-		t.Fatalf("read reader.go: %v", err)
-	}
-	body := string(src)
+	body := readReaderSource(t)
 	for _, needle := range []string{
 		"func (r *Reader) DatabaseContext()",
 		"dbContextOnce.Do",
@@ -113,4 +111,20 @@ func TestReaderDatabaseContext_Populated(t *testing.T) {
 			t.Errorf("reader.go missing required marker %q", needle)
 		}
 	}
+}
+
+// readReaderSource returns the contents of reader.go as a string. Uses
+// runtime.Caller to locate the file by absolute path so the test doesn't
+// depend on the working directory.
+func readReaderSource(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed; cannot locate reader.go")
+	}
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "reader.go"))
+	if err != nil {
+		t.Fatalf("read reader.go: %v", err)
+	}
+	return string(src)
 }

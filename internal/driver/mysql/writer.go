@@ -124,7 +124,7 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 }
 
 // gatherDatabaseContext queries a live MySQL/MariaDB connection for metadata
-// the AI prompt's =/== SOURCE/TARGET DATABASE ==/=/= block consumes (charset,
+// the AI prompt's SOURCE DATABASE / TARGET DATABASE block consumes (charset,
 // collation, identifier case, storage engine, version-gated feature list).
 // Used by both the Writer (target context) and the Reader (source context,
 // plumbed through TableOptions.SourceContext via the orchestrator). Failures

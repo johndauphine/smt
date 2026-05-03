@@ -119,7 +119,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 }
 
 // gatherDatabaseContext queries a live SQL Server connection for metadata the
-// AI prompt's =/== SOURCE/TARGET DATABASE ==/=/= block consumes (version,
+// AI prompt's SOURCE DATABASE / TARGET DATABASE block consumes (version,
 // collation, code page, charset, compat-level-gated feature list). Used by
 // both the Writer (target context) and the Reader (source context, plumbed
 // through TableOptions.SourceContext via the orchestrator). Failures on

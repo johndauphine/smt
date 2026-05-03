@@ -124,7 +124,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 }
 
 // gatherDatabaseContext queries a live PostgreSQL connection for metadata
-// the AI prompt's =/== SOURCE/TARGET DATABASE ==/=/= block consumes (version,
+// the AI prompt's SOURCE DATABASE / TARGET DATABASE block consumes (version,
 // encoding, collation, identifier case, varchar semantics, version-gated
 // feature list). Used by both the Writer (for target context) and the Reader
 // (for source context, plumbed through TableOptions.SourceContext via the
