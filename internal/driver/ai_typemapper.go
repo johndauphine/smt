@@ -1346,9 +1346,9 @@ func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 		req.SourceDBType, req.TargetDBType, req.TargetSchema, req.SourceTable.Schema, req.SourceTable.Name))
 
 	for _, col := range req.SourceTable.Columns {
-		sb.WriteString(fmt.Sprintf("%s:%s:%d:%d:%d:%v:%v:%s:%v:%s;",
+		sb.WriteString(fmt.Sprintf("%s:%s:%d:%d:%d:%v:%v:%s:%v:%s:%v;",
 			col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, col.IsNullable,
-			col.IsIdentity, col.DefaultExpression, col.IsComputed, col.ComputedExpression))
+			col.IsIdentity, col.DefaultExpression, col.IsComputed, col.ComputedExpression, col.ComputedPersisted))
 	}
 
 	// Add PK info
@@ -1576,10 +1576,11 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	sb.WriteString("  * NEWID() (MSSQL) -> gen_random_uuid() (postgres) -> UUID() (mysql)\n")
 	sb.WriteString("  * Strip outer parentheses MSSQL adds around literal defaults: ((0)) -> 0, ((1)) -> 1, ('pending') -> 'pending'\n")
 	sb.WriteString("  * Cast literals if the target type requires it (e.g. PG bit -> boolean: ((1)) -> true)\n")
-	sb.WriteString("- Computed columns appear in the source DDL as `AS (expression) PERSISTED` (MSSQL) or just `AS (expression)`. Translate to the target's generated-column syntax:\n")
-	sb.WriteString("  * postgres: <type> GENERATED ALWAYS AS (expression) STORED  (you must infer the column type from the expression and source data types)\n")
-	sb.WriteString("  * mysql:    <type> GENERATED ALWAYS AS (expression) STORED\n")
-	sb.WriteString("  * mssql:    AS (expression) PERSISTED\n")
+	sb.WriteString("- Computed columns appear in the source DDL as `<type> AS (expression) STORED` (persisted/computed result is materialized) or `<type> AS (expression) VIRTUAL` (computed on read; MySQL only). Translate to the target's generated-column syntax:\n")
+	sb.WriteString("  * postgres: <type> GENERATED ALWAYS AS (expression) STORED  (PG only supports STORED; if source is VIRTUAL, emit STORED)\n")
+	sb.WriteString("  * mysql:    <type> GENERATED ALWAYS AS (expression) STORED  (or VIRTUAL — preserve the source storage hint)\n")
+	sb.WriteString("  * mssql:    AS (expression) PERSISTED  (MSSQL infers type; persisted = STORED)\n")
+	sb.WriteString("  * If the source column shows no explicit type (MSSQL computed columns may omit it), infer the type from the expression and source columns.\n")
 	sb.WriteString("  * Translate dialect-specific functions inside the expression too (e.g. CAST(x AS VARCHAR(10)) is portable; ISNULL(a,b) (MSSQL) -> COALESCE(a,b))\n")
 }
 
@@ -1737,6 +1738,30 @@ func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
 	return m.buildSourceDDLWithTarget(t, sourceDBType, "")
 }
 
+// computedTypeStr returns the source-dialect type string for a computed column.
+// MSSQL stores the resolved type in DataType for computed columns (often
+// inferred — may be empty if introspection didn't surface it); PG and MySQL
+// always carry an explicit declared type. Returns "" if no type info is
+// available, in which case the prompt omits the type and lets the AI infer.
+func computedTypeStr(col Column) string {
+	if col.DataType == "" {
+		return ""
+	}
+	if col.MaxLength > 0 {
+		return fmt.Sprintf("%s(%d)", col.DataType, col.MaxLength)
+	}
+	if col.MaxLength == -1 {
+		return fmt.Sprintf("%s(MAX)", col.DataType)
+	}
+	if col.Precision > 0 {
+		if col.Scale > 0 {
+			return fmt.Sprintf("%s(%d,%d)", col.DataType, col.Precision, col.Scale)
+		}
+		return fmt.Sprintf("%s(%d)", col.DataType, col.Precision)
+	}
+	return col.DataType
+}
+
 // buildSourceDDLWithTarget creates a DDL-like representation of the source table
 // with required target column names annotated inline.
 func (m *AITypeMapper) buildSourceDDLWithTarget(t *Table, sourceDBType, targetDBType string) string {
@@ -1754,14 +1779,21 @@ func (m *AITypeMapper) buildSourceDDLWithTarget(t *Table, sourceDBType, targetDB
 		sb.WriteString(col.Name)
 		sb.WriteString(" ")
 
-		// Computed columns: emit only the generation expression, not a base type.
-		// The AI must translate to the target's generated-column syntax.
+		// Computed columns: include the column's declared type (PG/MySQL syntax
+		// requires it; MSSQL infers it but the type is still useful AI context),
+		// the generation expression, and a STORED-vs-VIRTUAL hint. The AI
+		// translates to the target's generated-column syntax.
 		if col.IsComputed && col.ComputedExpression != "" {
-			persistedKW := ""
+			typeStr := computedTypeStr(col)
+			storageKW := " VIRTUAL"
 			if col.ComputedPersisted {
-				persistedKW = " PERSISTED"
+				storageKW = " STORED" // also rendered as PERSISTED in MSSQL output
 			}
-			sb.WriteString(fmt.Sprintf("AS (%s)%s", col.ComputedExpression, persistedKW))
+			if typeStr != "" {
+				sb.WriteString(fmt.Sprintf("%s AS (%s)%s", typeStr, col.ComputedExpression, storageKW))
+			} else {
+				sb.WriteString(fmt.Sprintf("AS (%s)%s", col.ComputedExpression, storageKW))
+			}
 		} else {
 			// Build type with length/precision
 			typeStr := col.DataType

@@ -228,6 +228,9 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 		col.IsIdentity = isIdentity == 1
 		t.Columns = append(t.Columns, col)
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating columns: %w", err)
+	}
 
 	if err := r.loadComputedColumns(ctx, t); err != nil {
 		return fmt.Errorf("loading computed columns: %w", err)
@@ -266,6 +269,9 @@ func (r *Reader) loadComputedColumns(ctx context.Context, t *driver.Table) error
 			def       string
 			persisted bool
 		}{def, persisted}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating computed columns: %w", err)
 	}
 
 	for i := range t.Columns {
