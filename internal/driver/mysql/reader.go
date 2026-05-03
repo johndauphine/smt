@@ -193,6 +193,31 @@ func (r *Reader) applyActualRowSizes(ctx context.Context, dbName string, tables 
 	}
 }
 
+// parseGeneratedColumnExtra inspects the value of information_schema.COLUMNS.EXTRA
+// and reports whether the column is a true generated/computed column (and, if so,
+// whether it is STORED).
+//
+// MySQL 8.0.13+ writes a few different markers to EXTRA:
+//
+//   - "VIRTUAL GENERATED"   — generated column, computed on read
+//   - "STORED GENERATED"    — generated column, materialized on write
+//   - "DEFAULT_GENERATED"   — *not* a generated column; just a marker that the
+//     column has an expression default (e.g. "DEFAULT CURRENT_TIMESTAMP" or
+//     any function default introduced in 8.0.13). Easy to misread because it
+//     also contains the substring "GENERATED".
+//
+// A naïve substring check on "GENERATED" misclassifies the third case as a
+// generated column and wipes its real default — see issue #18.
+func parseGeneratedColumnExtra(extra string) (computed, persisted bool) {
+	switch {
+	case strings.Contains(extra, "STORED GENERATED"):
+		return true, true
+	case strings.Contains(extra, "VIRTUAL GENERATED"):
+		return true, false
+	}
+	return false, false
+}
+
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT
@@ -224,12 +249,13 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			&c.DefaultExpression, &extra, &generationExpr); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
-		// MySQL signals generated columns via EXTRA: "VIRTUAL GENERATED" or "STORED GENERATED".
-		if strings.Contains(extra, "GENERATED") {
+		if computed, persisted := parseGeneratedColumnExtra(extra); computed {
 			c.IsComputed = true
 			c.ComputedExpression = generationExpr
-			c.ComputedPersisted = strings.Contains(extra, "STORED")
-			// generated columns can't have a regular DEFAULT
+			c.ComputedPersisted = persisted
+			// Generated columns don't carry a regular DEFAULT clause; clear
+			// any value information_schema reports here so the downstream
+			// prompt doesn't double-emit.
 			c.DefaultExpression = ""
 		}
 		t.Columns = append(t.Columns, c)
