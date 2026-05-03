@@ -148,7 +148,8 @@ func (o *Orchestrator) CreateTargetSchema(ctx context.Context, runID string) err
 func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateTables))
 	total := len(o.tables)
-	logging.Info("[%s] creating %d tables (concurrency=%d)", TaskCreateTables, total, o.aiConcurrency())
+	maxRetries := o.aiMaxRetries()
+	logging.Info("[%s] creating %d tables (concurrency=%d, max_retries=%d)", TaskCreateTables, total, o.aiConcurrency(), maxRetries)
 	var done atomic.Int64
 	// Gather source DB context once up front (Reader caches; this primes the
 	// cache so the per-table goroutines all read the same value without racing
@@ -156,7 +157,10 @@ func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 	// AI prompt's SOURCE DATABASE block — see issue #13.
 	sourceCtx := o.source.DatabaseContext()
 	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
-		opts := driver.TableOptions{SourceContext: sourceCtx}
+		opts := driver.TableOptions{
+			SourceContext: sourceCtx,
+			MaxRetries:    maxRetries,
+		}
 		if err := o.target.CreateTableWithOptions(ctx, &t, o.config.Target.Schema, opts); err != nil {
 			return fmt.Errorf("creating table %s: %w", t.Name, err)
 		}
@@ -164,6 +168,17 @@ func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 		logging.Info("  ✓ [%d/%d] %s.%s", n, total, o.config.Source.Schema, t.Name)
 		return nil
 	})
+}
+
+// aiMaxRetries returns the configured Migration.AIMaxRetries value clamped to
+// [0, ∞). Negative values are treated as 0 (no retries) — silently sanitizing
+// rather than erroring keeps the default-zero / no-config case working without
+// a validation layer the callers don't need.
+func (o *Orchestrator) aiMaxRetries() int {
+	if o.config.Migration.AIMaxRetries < 0 {
+		return 0
+	}
+	return o.config.Migration.AIMaxRetries
 }
 
 // CreateIndexes loads each table's indexes from the source and creates
