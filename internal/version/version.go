@@ -2,7 +2,7 @@ package version
 
 // Version is the current version of smt.
 // Can be overridden at build time with -ldflags "-X ...version.Version=..."
-var Version = "0.1.0"
+var Version = "0.9.0"
 
 // Name is the application name.
 const Name = "smt"
