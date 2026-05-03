@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/microsoft/go-mssqldb"
@@ -17,10 +18,25 @@ import (
 
 // Reader implements driver.Reader for SQL Server.
 type Reader struct {
-	db       *sql.DB
-	config   *dbconfig.SourceConfig
-	maxConns int
-	dialect  *Dialect
+	db          *sql.DB
+	config      *dbconfig.SourceConfig
+	maxConns    int
+	dialect     *Dialect
+	compatLevel int
+
+	// dbContextOnce gates the (single) lookup of dbContext for the source side.
+	dbContextOnce sync.Once
+	dbContext     *driver.DatabaseContext
+}
+
+// DatabaseContext returns metadata about this source database for the AI prompt
+// (version, collation, code page, charset, compat-level-gated feature list).
+// Cached after first call.
+func (r *Reader) DatabaseContext() *driver.DatabaseContext {
+	r.dbContextOnce.Do(func() {
+		r.dbContext = gatherDatabaseContext(r.db, r.config.Database, r.config.Host, r.compatLevel)
+	})
+	return r.dbContext
 }
 
 // NewReader creates a new SQL Server reader.
@@ -58,10 +74,11 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	logging.Debug("Connected to MSSQL source: %s:%d/%s (compat level %d)", cfg.Host, cfg.Port, cfg.Database, compatLevel)
 
 	return &Reader{
-		db:       db,
-		config:   cfg,
-		maxConns: maxConns,
-		dialect:  dialect,
+		db:          db,
+		config:      cfg,
+		maxConns:    maxConns,
+		dialect:     dialect,
+		compatLevel: compatLevel,
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -91,6 +92,25 @@ func TestAIPromptAugmentation_FractionalSecondPrecision(t *testing.T) {
 	} {
 		if !strings.Contains(aug, needle) {
 			t.Errorf("prompt missing required phrase %q", needle)
+		}
+	}
+}
+
+// TestReaderDatabaseContext_Populated is the mysql side of the issue #13
+// regression guard. Mirrors the postgres test.
+func TestReaderDatabaseContext_Populated(t *testing.T) {
+	src, err := os.ReadFile("reader.go")
+	if err != nil {
+		t.Fatalf("read reader.go: %v", err)
+	}
+	body := string(src)
+	for _, needle := range []string{
+		"func (r *Reader) DatabaseContext()",
+		"dbContextOnce.Do",
+		"gatherDatabaseContext(",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("reader.go missing required marker %q", needle)
 		}
 	}
 }

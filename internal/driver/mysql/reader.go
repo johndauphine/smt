@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // MySQL driver
@@ -16,10 +17,26 @@ import (
 
 // Reader implements driver.Reader for MySQL/MariaDB.
 type Reader struct {
-	db       *sql.DB
-	config   *dbconfig.SourceConfig
-	maxConns int
-	dialect  *Dialect
+	db        *sql.DB
+	config    *dbconfig.SourceConfig
+	maxConns  int
+	dialect   *Dialect
+	version   string // raw VERSION() string from connect-time probe
+	isMariaDB bool
+
+	// dbContextOnce gates the (single) lookup of dbContext for the source side.
+	dbContextOnce sync.Once
+	dbContext     *driver.DatabaseContext
+}
+
+// DatabaseContext returns metadata about this source database for the AI prompt
+// (charset, collation, identifier case, storage engine, version-gated feature
+// list). Cached after first call.
+func (r *Reader) DatabaseContext() *driver.DatabaseContext {
+	r.dbContextOnce.Do(func() {
+		r.dbContext = gatherDatabaseContext(r.db, r.config.Database, r.config.Host, r.version, r.isMariaDB)
+	})
+	return r.dbContext
 }
 
 // NewReader creates a new MySQL reader.
@@ -47,18 +64,21 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	// Detect MySQL vs MariaDB
 	var version string
 	db.QueryRow("SELECT VERSION()").Scan(&version)
+	isMariaDB := strings.Contains(strings.ToLower(version), "mariadb")
 	dbType := "MySQL"
-	if strings.Contains(strings.ToLower(version), "mariadb") {
+	if isMariaDB {
 		dbType = "MariaDB"
 	}
 
 	logging.Debug("Connected to %s source: %s:%d/%s", dbType, cfg.Host, cfg.Port, cfg.Database)
 
 	return &Reader{
-		db:       db,
-		config:   cfg,
-		maxConns: maxConns,
-		dialect:  dialect,
+		db:        db,
+		config:    cfg,
+		maxConns:  maxConns,
+		dialect:   dialect,
+		version:   version,
+		isMariaDB: isMariaDB,
 	}, nil
 }
 

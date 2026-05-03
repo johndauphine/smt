@@ -112,10 +112,23 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 }
 
 // gatherDatabaseContext collects SQL Server database metadata for AI context.
+// Thin wrapper that calls the package-level helper so the Reader and Writer
+// can share the same query logic — see issue #13.
 func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
+	return gatherDatabaseContext(w.db, w.config.Database, w.config.Host, w.compatLevel)
+}
+
+// gatherDatabaseContext queries a live SQL Server connection for metadata the
+// AI prompt's =/== SOURCE/TARGET DATABASE ==/=/= block consumes (version,
+// collation, code page, charset, compat-level-gated feature list). Used by
+// both the Writer (target context) and the Reader (source context, plumbed
+// through TableOptions.SourceContext via the orchestrator). Failures on
+// individual queries are non-fatal — the function returns whatever it could
+// collect.
+func gatherDatabaseContext(db *sql.DB, dbName, host string, compatLevel int) *driver.DatabaseContext {
 	ctx := &driver.DatabaseContext{
-		DatabaseName:             w.config.Database,
-		ServerName:               w.config.Host,
+		DatabaseName:             dbName,
+		ServerName:               host,
 		IdentifierCase:           "insensitive",
 		CaseSensitiveIdentifiers: false,
 		MaxIdentifierLength:      128,
@@ -126,7 +139,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 
 	// Query server version
 	var version string
-	if w.db.QueryRow("SELECT @@VERSION").Scan(&version) == nil {
+	if db.QueryRow("SELECT @@VERSION").Scan(&version) == nil {
 		ctx.Version = version
 		// Parse major version using regex
 		// @@VERSION returns something like "Microsoft SQL Server 2022 (RTM) - 16.0.1000.6"
@@ -167,7 +180,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 
 	// Query database collation
 	var collation sql.NullString
-	if w.db.QueryRow("SELECT DATABASEPROPERTYEX(DB_NAME(), 'Collation')").Scan(&collation) == nil && collation.Valid {
+	if db.QueryRow("SELECT DATABASEPROPERTYEX(DB_NAME(), 'Collation')").Scan(&collation) == nil && collation.Valid {
 		ctx.Collation = collation.String
 		// Parse collation for case sensitivity
 		upperCollation := strings.ToUpper(collation.String)
@@ -184,7 +197,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 
 	// Query code page from collation
 	var codePage sql.NullInt64
-	if w.db.QueryRow(`
+	if db.QueryRow(`
 		SELECT COLLATIONPROPERTY(DATABASEPROPERTYEX(DB_NAME(), 'Collation'), 'CodePage')
 	`).Scan(&codePage) == nil && codePage.Valid {
 		ctx.CodePage = int(codePage.Int64)
@@ -212,15 +225,15 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 
 	// Features based on compatibility level
 	ctx.Features = []string{"NVARCHAR", "VARCHAR_MAX", "DATETIME2", "JSON"}
-	if w.compatLevel >= 130 { // SQL Server 2016+
+	if compatLevel >= 130 { // SQL Server 2016+
 		ctx.Features = append(ctx.Features, "JSON_FUNCTIONS", "TEMPORAL_TABLES")
 	}
-	if w.compatLevel >= 150 { // SQL Server 2019+
+	if compatLevel >= 150 { // SQL Server 2019+
 		ctx.Features = append(ctx.Features, "UTF8_SUPPORT")
 	}
 
 	logging.Debug("MSSQL context: collation=%s, code_page=%d, compat_level=%d",
-		ctx.Collation, ctx.CodePage, w.compatLevel)
+		ctx.Collation, ctx.CodePage, compatLevel)
 
 	return ctx
 }

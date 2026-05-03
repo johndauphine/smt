@@ -117,12 +117,23 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 }
 
 // gatherDatabaseContext collects PostgreSQL database metadata for AI context.
+// Thin wrapper that calls the package-level helper so the Reader and Writer
+// can share the same query logic — see issue #13.
 func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
-	ctx := context.Background()
+	return gatherDatabaseContext(context.Background(), w.pool, w.config.Database, w.config.Host)
+}
 
+// gatherDatabaseContext queries a live PostgreSQL connection for metadata
+// the AI prompt's =/== SOURCE/TARGET DATABASE ==/=/= block consumes (version,
+// encoding, collation, identifier case, varchar semantics, version-gated
+// feature list). Used by both the Writer (for target context) and the Reader
+// (for source context, plumbed through TableOptions.SourceContext via the
+// orchestrator). Failures on individual queries are non-fatal — the function
+// returns whatever it could collect.
+func gatherDatabaseContext(ctx context.Context, pool *pgxpool.Pool, dbName, host string) *driver.DatabaseContext {
 	dbCtx := &driver.DatabaseContext{
-		DatabaseName:             w.config.Database,
-		ServerName:               w.config.Host,
+		DatabaseName:             dbName,
+		ServerName:               host,
 		IdentifierCase:           "lower",
 		CaseSensitiveIdentifiers: true, // PostgreSQL preserves case in quotes
 		CaseSensitiveData:        true, // Default is case-sensitive
@@ -134,7 +145,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 
 	// Query server version
 	var version string
-	if w.pool.QueryRow(ctx, "SELECT version()").Scan(&version) == nil {
+	if pool.QueryRow(ctx, "SELECT version()").Scan(&version) == nil {
 		dbCtx.Version = version
 		// Parse major version using regex to handle any version format
 		// Matches patterns like "PostgreSQL 16.1", "PostgreSQL 17", etc.
@@ -148,7 +159,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 
 	// Query encoding
 	var encoding string
-	if w.pool.QueryRow(ctx, "SHOW server_encoding").Scan(&encoding) == nil {
+	if pool.QueryRow(ctx, "SHOW server_encoding").Scan(&encoding) == nil {
 		dbCtx.Charset = encoding
 		dbCtx.Encoding = encoding
 		if encoding == "UTF8" {
@@ -160,7 +171,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 
 	// Query collation
 	var collation sql.NullString
-	if w.pool.QueryRow(ctx, `
+	if pool.QueryRow(ctx, `
 		SELECT datcollate FROM pg_database WHERE datname = current_database()
 	`).Scan(&collation) == nil && collation.Valid {
 		dbCtx.Collation = collation.String
@@ -168,7 +179,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 
 	// Query LC_CTYPE for character classification
 	var lcCtype sql.NullString
-	if w.pool.QueryRow(ctx, `
+	if pool.QueryRow(ctx, `
 		SELECT datctype FROM pg_database WHERE datname = current_database()
 	`).Scan(&lcCtype) == nil && lcCtype.Valid {
 		if dbCtx.Notes != "" {

@@ -238,3 +238,23 @@ func TestAIPromptAugmentation(t *testing.T) {
 		}
 	}
 }
+
+// TestReaderDatabaseContext_Populated is the regression guard for issue #13.
+// The orchestrator passes Reader.DatabaseContext() into TableOptions.SourceContext;
+// returning nil here would silently produce one-sided AI prompts (full TARGET
+// block, empty SOURCE block) and fire the "No source context available" lie in
+// MIGRATION RULES. This test asserts the symbol is present in reader.go so
+// accidental refactors that drop it surface at test time, not in a debug-prompt
+// dump weeks later.
+func TestReaderDatabaseContext_Populated(t *testing.T) {
+	body := readReaderSource(t)
+	for _, needle := range []string{
+		"func (r *Reader) DatabaseContext()",
+		"dbContextOnce.Do",
+		"gatherDatabaseContext(", // shared helper called by Reader and Writer
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("reader.go missing required marker %q", needle)
+		}
+	}
+}
