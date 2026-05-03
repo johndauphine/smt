@@ -30,6 +30,10 @@ Pre-commit hook (`make setup-hooks`) runs `gofmt -l` and `go test ./... -short` 
 
 Go 1.25 required. CGO is off; SQLite uses the `modernc.org/sqlite` pure-Go driver.
 
+### End-to-end test fixtures
+
+`testdata/crm/` holds three native-dialect 3NF CRM source schemas (`crm_mssql.sql`, `crm_postgres.sql`, `crm_mysql.sql`) — same logical 14-table shape across all three but each in its own dialect (MSSQL: IDENTITY+DATETIMEOFFSET+UNIQUEIDENTIFIER+PERSISTED; PG: GENERATED IDENTITY+TIMESTAMPTZ+JSONB+arrays+STORED; MySQL: AUTO_INCREMENT+ENUM+SET+JSON+VIRTUAL/STORED). Use these to drive any source × target permutation; they're the canonical test surface for column-metadata fidelity (NOT NULL, defaults, computed columns, FK actions). See `testdata/crm/README.md` for load commands.
+
 ## Architecture
 
 ### Pluggable driver model (preserved verbatim from DMT)
@@ -80,6 +84,8 @@ The full multi-provider HTTP plumbing (Anthropic / OpenAI / Gemini / Ollama / LM
 - `MapType` / `MapTypeWithError` — cached type-mapping API, used by every driver's `CreateTable` for source-to-target type inference
 - `Ask(ctx, prompt)` — generic free-form prompt entrypoint, used by `internal/schemadiff/render.go` for SQL rendering
 - `dispatch` — single switch over providers; adding a new provider is a one-place edit
+
+The table-DDL prompt (`buildTableDDLPrompt` → `buildSourceIntrospectionBlock`) hands the AI **raw introspection facts** (data_type, max_length, precision, scale, nullable, default_expression, computed/computed_expression/computed_storage), not a synthesized source DDL string. Earlier versions assembled a per-dialect CREATE TABLE in Go and asked the AI to translate it; PR #16 dropped that intermediate step because Go-side synthesis was duplicating work the AI already does well and was hiding metadata behind dialect quoting. If you need to give the AI more source context, extend the introspection block — don't rebuild the source-DDL synthesizer.
 
 `internal/driver/ai_errordiag.go` diagnoses DDL failures. All AI prompts are in-source string builders, not template files. Provider config and API keys live in `~/.secrets/smt-config.yaml` (env var override: `SMT_SECRETS_FILE`).
 
@@ -157,8 +163,10 @@ Default model is `claude-sonnet-4-6`. Haiku was tried and reverted because it re
 
 ## Common gotchas
 
-- `*.yaml` is in `.gitignore`. Whitelist new config files explicitly (e.g. `!config.yaml.example`).
+- `*.yaml` is in `.gitignore`. Whitelist new config files explicitly (e.g. `!config.yaml.example`). `testdata/**/*.sql` is whitelisted similarly so the CRM fixtures stay tracked even though `*.sql` is gitignored.
 - The `smt` binary line in `.gitignore` is anchored to `/smt` so it doesn't shadow `cmd/smt/`.
 - `gofmt` re-sorts imports after the module-path rewrite. The pre-commit hook will catch any drift.
 - The driver registry depends on blank imports in `internal/pool/factory.go`. If a new driver isn't being found, that's the file to check.
 - Tests under `internal/driver/{postgres,mssql,mysql}/` include integration tests behind build tags that need live databases (`make test-dbs-up`); `-short` skips them.
+- OpenAI reasoning models (o-series, gpt-5.x) reject the default `temperature: 0` with HTTP 400. SMT's `Provider.ModelTemperature` (yaml `model_temperature`) lets the user override per provider — set `model_temperature: 1` in the openai block of the secrets file to use them. There is no model-name list in code (intentional; see PR #11).
+- AI prompts are sensitive to wording — small phrasing changes can flip whether the AI preserves NOT NULL / DEFAULT / generated columns. PR #9 fixed a regression where the prompt's `OUTPUT REQUIREMENTS` section had a DMT-era line telling the AI to drop NOT NULL "for data migration flexibility." When editing prompts, re-run the OLTP3NF/CRM fixtures end-to-end and verify the column-attribute counts match (tables/fks/checks/identity/computed/notnull/defaults).
