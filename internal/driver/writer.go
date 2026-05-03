@@ -71,6 +71,18 @@ type TableOptions struct {
 	// This is passed to AI type mapper for better DDL generation.
 	SourceContext *DatabaseContext
 
+	// MaxRetries caps the number of validate-and-retry attempts when the AI's
+	// DDL is rejected by the database with a syntactically-suspect error
+	// (parser error, missing type, etc. — see each driver's
+	// isRetryableDDLError). On a retryable error the writer regenerates the
+	// DDL with the failed attempt + database error fed back into the prompt,
+	// then retries up to this many times before surfacing the final failure.
+	// Zero means "no retries" (current behavior); set in the orchestrator
+	// from migration.ai_max_retries (which defaults to 3 when configured).
+	// Non-retryable errors (FK violations, permission errors, real schema
+	// conflicts) bypass the loop and surface immediately. See #29.
+	MaxRetries int
+
 	// Note: Indexes and CHECK constraints are always created separately in Finalize,
 	// not included in the initial CREATE TABLE DDL.
 }

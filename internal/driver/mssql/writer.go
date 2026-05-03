@@ -295,8 +295,9 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 }
 
 // CreateTableWithOptions creates a table with options using AI-generated DDL.
+// On retryable errors, regenerates with the prior failed DDL + error fed back
+// into the prompt up to opts.MaxRetries times. See #29 / postgres equivalent.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	// Use table-level AI DDL generation with full database context
 	req := driver.TableDDLRequest{
 		SourceDBType:  w.sourceType,
 		TargetDBType:  "mssql",
@@ -306,24 +307,45 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		TargetContext: w.dbContext,
 	}
 
-	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
-	if err != nil {
-		return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
+	var (
+		lastDDL string
+		lastErr error
+	)
+	for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
+		if attempt > 0 {
+			req.PreviousAttempt = &driver.TableDDLAttempt{
+				DDL:   lastDDL,
+				Error: lastErr.Error(),
+			}
+			logging.Info("retry attempt %d/%d for table %s after retryable DDL error: %v",
+				attempt, opts.MaxRetries, t.FullName(), lastErr)
+		}
+
+		resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
+		if err != nil {
+			return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
+		}
+		ddl := resp.CreateTableDDL
+		logging.Debug("AI generated DDL for %s (attempt %d):\n%s", t.FullName(), attempt+1, ddl)
+		for colName, colType := range resp.ColumnTypes {
+			logging.Debug("  Column %s -> %s", colName, colType)
+		}
+
+		if _, err = w.db.ExecContext(ctx, ddl); err == nil {
+			if attempt > 0 {
+				w.tableMapper.CacheTableDDL(req, ddl)
+				logging.Info("table %s succeeded on retry attempt %d/%d", t.FullName(), attempt, opts.MaxRetries)
+			}
+			return nil
+		}
+
+		lastDDL = ddl
+		lastErr = err
+		if !isRetryableDDLError(err) {
+			break
+		}
 	}
-
-	logging.Debug("AI generated DDL for %s:\n%s", t.FullName(), resp.CreateTableDDL)
-
-	// Log column type mappings
-	for colName, colType := range resp.ColumnTypes {
-		logging.Debug("  Column %s -> %s", colName, colType)
-	}
-
-	_, err = w.db.ExecContext(ctx, resp.CreateTableDDL)
-	if err != nil {
-		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, resp.CreateTableDDL)
-	}
-
-	return nil
+	return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), lastErr, lastDDL)
 }
 
 // DropTable drops a table.

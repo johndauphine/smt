@@ -267,8 +267,15 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 }
 
 // CreateTableWithOptions creates a table with options using AI-generated DDL.
+//
+// On retryable database errors (parser-class — see isRetryableDDLError) the
+// AI is re-called up to opts.MaxRetries times with the prior failed DDL plus
+// the database error fed back into the prompt, giving the AI a chance to
+// correct the specific defect. Non-retryable errors (object exists, FK
+// violations, etc.) bypass the loop. After a retry succeeds, the validated
+// DDL is re-cached so future first-try calls for the same table-shape get
+// the good DDL instead of the cached failure. See #29 for the full design.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	// Use table-level AI DDL generation with full database context
 	req := driver.TableDDLRequest{
 		SourceDBType:  w.sourceType,
 		TargetDBType:  "postgres",
@@ -278,30 +285,52 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		TargetContext: w.dbContext,
 	}
 
-	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
-	if err != nil {
-		return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
+	var (
+		lastDDL string
+		lastErr error
+	)
+	for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
+		if attempt > 0 {
+			req.PreviousAttempt = &driver.TableDDLAttempt{
+				DDL:   lastDDL,
+				Error: lastErr.Error(),
+			}
+			logging.Info("retry attempt %d/%d for table %s after retryable DDL error: %v",
+				attempt, opts.MaxRetries, t.FullName(), lastErr)
+		}
+
+		resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
+		if err != nil {
+			return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
+		}
+
+		ddl := resp.CreateTableDDL
+		if opts.Unlogged && !strings.Contains(strings.ToUpper(ddl), "UNLOGGED") {
+			ddl = strings.Replace(ddl, "CREATE TABLE", "CREATE UNLOGGED TABLE", 1)
+		}
+		logging.Debug("AI generated DDL for %s (attempt %d):\n%s", t.FullName(), attempt+1, ddl)
+		for colName, colType := range resp.ColumnTypes {
+			logging.Debug("  Column %s -> %s", colName, colType)
+		}
+
+		if _, err = w.pool.Exec(ctx, ddl); err == nil {
+			// Success. If this was a retry, re-prime the AI cache so future
+			// first-try calls for this table-shape get the validated DDL
+			// instead of whatever bad DDL the first attempt cached.
+			if attempt > 0 {
+				w.tableMapper.CacheTableDDL(req, ddl)
+				logging.Info("table %s succeeded on retry attempt %d/%d", t.FullName(), attempt, opts.MaxRetries)
+			}
+			return nil
+		}
+
+		lastDDL = ddl
+		lastErr = err
+		if !isRetryableDDLError(err) {
+			break
+		}
 	}
-
-	ddl := resp.CreateTableDDL
-
-	// Handle unlogged option - modify the DDL if needed
-	if opts.Unlogged && !strings.Contains(strings.ToUpper(ddl), "UNLOGGED") {
-		ddl = strings.Replace(ddl, "CREATE TABLE", "CREATE UNLOGGED TABLE", 1)
-	}
-
-	logging.Debug("AI generated DDL for %s:\n%s", t.FullName(), ddl)
-
-	// Log column type mappings
-	for colName, colType := range resp.ColumnTypes {
-		logging.Debug("  Column %s -> %s", colName, colType)
-	}
-
-	_, err = w.pool.Exec(ctx, ddl)
-	if err != nil {
-		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, ddl)
-	}
-	return nil
+	return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), lastErr, lastDDL)
 }
 
 // DropTable drops a table.

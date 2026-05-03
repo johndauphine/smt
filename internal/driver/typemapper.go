@@ -31,6 +31,19 @@ type TableTypeMapper interface {
 
 	// CanMap returns true if this mapper can handle the given conversion.
 	CanMap(sourceDBType, targetDBType string) bool
+
+	// CacheTableDDL stores a known-good DDL for the request, replacing any prior
+	// cached value. Called by the writer after a CREATE TABLE has successfully
+	// executed against the target database — turns a runtime-validated DDL into
+	// the entry future GenerateTableDDL calls (without PreviousAttempt) will hit.
+	//
+	// Without this method, a first-try call that produces bad DDL caches the bad
+	// DDL; a subsequent retry with PreviousAttempt produces good DDL but bypasses
+	// the cache for both lookup and store, so the bad cached DDL remains and a
+	// future migration of the same table-shape would fail again. CacheTableDDL
+	// closes that loop by letting the writer re-prime the cache once the database
+	// has confirmed the DDL is correct.
+	CacheTableDDL(req TableDDLRequest, ddl string)
 }
 
 // DatabaseContext contains metadata about a database for AI context.
@@ -120,8 +133,31 @@ type TableDDLRequest struct {
 	// TargetContext contains metadata about the target database.
 	TargetContext *DatabaseContext
 
+	// PreviousAttempt is set on retry calls to feed the AI the prior attempt's
+	// DDL plus the database error it produced. Lets the AI see exactly what was
+	// rejected and why so it can correct on the next try. When non-nil:
+	//   - the prompt builder appends a "PRIOR ATTEMPT FAILED" section
+	//   - the cache lookup is skipped (we need a fresh AI call, not the cached
+	//     bad answer from the prior attempt)
+	//   - the cache store is skipped (the writer is responsible for re-priming
+	//     the cache via CacheTableDDL after the retry's DDL successfully executes)
+	// Nil on first-try calls — the original cache-and-call path is unchanged.
+	PreviousAttempt *TableDDLAttempt
+
 	// Note: Indexes and CHECK constraints are always created separately in Finalize,
 	// not included in the initial CREATE TABLE DDL.
+}
+
+// TableDDLAttempt records a previous CREATE TABLE attempt that the database
+// rejected. Used to give the AI the exact text of its prior wrong answer plus
+// the database's complaint about it, in the hope that the next attempt corrects
+// the specific defect rather than rerolling at random.
+type TableDDLAttempt struct {
+	// DDL is the verbatim CREATE TABLE the AI emitted on the prior attempt.
+	DDL string
+
+	// Error is the verbatim text of the database error that rejected the DDL.
+	Error string
 }
 
 // TableDDLResponse contains the generated DDL and metadata.

@@ -260,6 +260,27 @@ type MigrationConfig struct {
 	// with default tiers, 2× on local when the server allows ≥8 parallel
 	// predictions, no harm in either case.
 	AIConcurrency int `yaml:"ai_concurrency"`
+
+	// AIMaxRetries caps how many times the writer re-asks the AI to fix a
+	// CREATE TABLE that the database rejected with a syntactically-suspect
+	// error (parser error, missing type, non-immutable generation expression,
+	// MySQL Error 1064/1067/1101, MSSQL "Incorrect syntax near", etc.). On a
+	// retryable error the prior failed DDL plus the database's verbatim error
+	// are appended to the next AI prompt, giving the model exact corrective
+	// context. Non-retryable errors (object already exists, FK violations,
+	// permission denied, etc.) bypass the loop and surface immediately.
+	//
+	// Default 0 means "no retries" — preserves pre-#29 behavior. Set to 3
+	// for the recommended setting (variance experiment showed per-call
+	// success ~81% on a model that's deterministically wrong; with 3 retries
+	// per-table success becomes ~99.9%, full-pipeline ~98% on 14-table
+	// fixtures). Negative values are treated the same as 0.
+	//
+	// Each retry costs one extra AI call. Cloud Sonnet rarely triggers
+	// retries; local models (gpt-oss, qwen-coder) trigger them often enough
+	// that this setting is the difference between 5/9 and ~9/9 matrix scores.
+	// See #29 for the empirical justification.
+	AIMaxRetries int `yaml:"ai_max_retries"`
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 	// AI-driven real-time parameter adjustment

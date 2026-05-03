@@ -1290,22 +1290,26 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 		return nil, fmt.Errorf("TargetDBType is required")
 	}
 
-	// Build cache key based on table structure
+	// Build cache key based on table structure. Cache is consulted only on
+	// first-try calls; retry calls (PreviousAttempt != nil) bypass the cache
+	// in both directions — see TableDDLRequest.PreviousAttempt for rationale.
 	cacheKey := m.tableCacheKey(req)
+	isRetry := req.PreviousAttempt != nil
 
-	// Check cache first
-	m.cacheMu.RLock()
-	if cached, ok := m.cache.Get(cacheKey); ok {
+	if !isRetry {
+		m.cacheMu.RLock()
+		if cached, ok := m.cache.Get(cacheKey); ok {
+			m.cacheMu.RUnlock()
+			return m.parseTableDDLFromCache(cached, req.SourceTable)
+		}
 		m.cacheMu.RUnlock()
-		return m.parseTableDDLFromCache(cached, req.SourceTable)
 	}
-	m.cacheMu.RUnlock()
 
 	// Build the prompt with full table context
 	prompt := m.buildTableDDLPrompt(req)
 
-	logging.Debug("AI table DDL generation: %s.%s (%s -> %s)\n--- PROMPT ---\n%s\n--- END PROMPT ---",
-		req.SourceTable.Schema, req.SourceTable.Name, req.SourceDBType, req.TargetDBType, prompt)
+	logging.Debug("AI table DDL generation: %s.%s (%s -> %s, retry=%v)\n--- PROMPT ---\n%s\n--- END PROMPT ---",
+		req.SourceTable.Schema, req.SourceTable.Name, req.SourceDBType, req.TargetDBType, isRetry, prompt)
 
 	// Call AI API
 	result, err := m.CallAI(ctx, prompt)
@@ -1321,20 +1325,39 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 			req.SourceTable.Schema, req.SourceTable.Name, err)
 	}
 
-	// Cache the DDL result
-	m.cacheMu.Lock()
-	m.cache.Set(cacheKey, response.CreateTableDDL)
-	m.cacheMu.Unlock()
+	// Cache the DDL result on first-try only. Retry results are cached by the
+	// writer via CacheTableDDL after the database confirms the DDL is valid —
+	// don't cache here because we haven't yet validated the result.
+	if !isRetry {
+		m.cacheMu.Lock()
+		m.cache.Set(cacheKey, response.CreateTableDDL)
+		m.cacheMu.Unlock()
 
-	// Persist cache
+		if err := m.saveCache(); err != nil {
+			logging.Warn("Failed to save AI table DDL cache: %v", err)
+		}
+	}
+
+	logging.Debug("AI generated DDL for %s.%s (%d columns mapped, retry=%v)",
+		req.SourceTable.Schema, req.SourceTable.Name, len(response.ColumnTypes), isRetry)
+
+	return response, nil
+}
+
+// CacheTableDDL stores a known-good DDL for the request, replacing any prior
+// cached value. The writer calls this after a successful CREATE TABLE
+// execution against the target database, including after a retry that
+// corrected a previously-cached bad DDL — see TableTypeMapper for the full
+// rationale on why the AI mapper can't safely cache on its own when retry is
+// involved.
+func (m *AITypeMapper) CacheTableDDL(req TableDDLRequest, ddl string) {
+	cacheKey := m.tableCacheKey(req)
+	m.cacheMu.Lock()
+	m.cache.Set(cacheKey, ddl)
+	m.cacheMu.Unlock()
 	if err := m.saveCache(); err != nil {
 		logging.Warn("Failed to save AI table DDL cache: %v", err)
 	}
-
-	logging.Debug("AI generated DDL for %s.%s (%d columns mapped)",
-		req.SourceTable.Schema, req.SourceTable.Name, len(response.ColumnTypes))
-
-	return response, nil
 }
 
 // tableCacheKey generates a cache key for table-level DDL.
@@ -1453,6 +1476,21 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as \"%s\"\n", rw, strings.ToLower(rw)))
 			}
 		}
+	}
+
+	// PRIOR ATTEMPT FAILED — last in the prompt so the corrective context is the
+	// most recent thing the model sees before generating. Only present when this
+	// is a retry call (PreviousAttempt != nil); see #29 for the validate-and-retry
+	// design. Verbatim DDL + verbatim error give the model the exact ground truth
+	// of what it produced and what the database said about it.
+	if req.PreviousAttempt != nil {
+		sb.WriteString("\n=== PRIOR ATTEMPT FAILED ===\n")
+		sb.WriteString("The previous CREATE TABLE you generated was rejected by the target database.\n\n")
+		sb.WriteString("Previous DDL (verbatim):\n")
+		sb.WriteString(req.PreviousAttempt.DDL)
+		sb.WriteString("\n\nDatabase error (verbatim):\n")
+		sb.WriteString(req.PreviousAttempt.Error)
+		sb.WriteString("\n\nGenerate a corrected CREATE TABLE for the same source table. Use the same target column names, types, and constraints — only fix what the error indicates is wrong. Do not regenerate from scratch.\n")
 	}
 
 	return sb.String()
