@@ -62,15 +62,11 @@ func TestAIPromptAugmentation_ComputedColumnNullability(t *testing.T) {
 	d := &Dialect{}
 	aug := d.AIPromptAugmentation()
 
-	for _, needle := range []string{
+	mustContain(t, aug,
 		"computed column nullability",
 		"NEVER append `NULL`",
 		"PERSISTED NULL`", // the wrong example
 		"PERSISTED`",      // the right form
 		"implicitly nullable",
-	} {
-		if !strings.Contains(aug, needle) {
-			t.Errorf("prompt missing required phrase %q", needle)
-		}
-	}
+	)
 }

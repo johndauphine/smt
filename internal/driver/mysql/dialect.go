@@ -301,7 +301,8 @@ CRITICAL MySQL expression-default parenthesization rule:
 - Wrong: ` + "`settings JSON NOT NULL DEFAULT '{}'`" + `  (Error 1101 — JSON/TEXT/BLOB cols
    pre-8.0.13 forbid defaults entirely; 8.0.13+ requires the parenthesized
    expression form even for literal-looking JSON defaults)
-- Right: ` + "`settings JSON NOT NULL DEFAULT (JSON_OBJECT())`" + `  or ` + "`DEFAULT (CAST('{}' AS JSON))`" + `
+- Right: ` + "`settings JSON NOT NULL DEFAULT (JSON_OBJECT())`" + `
+- Right: ` + "`settings JSON NOT NULL DEFAULT (CAST('{}' AS JSON))`" + `
 - The ` + "`CURRENT_TIMESTAMP`" + ` family is the one exception — it works without parens
   (` + "`DEFAULT CURRENT_TIMESTAMP`" + ` and ` + "`DEFAULT CURRENT_TIMESTAMP(6)`" + ` are both valid).
   Every other function default needs the parens.
