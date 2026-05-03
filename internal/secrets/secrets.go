@@ -550,10 +550,13 @@ ai:
     openai:
       api_key: ""  # Get from https://platform.openai.com/
       model: "gpt-4o"  # optional
+      # model_temperature: 1  # required when model is an OpenAI reasoning family
+      #                       # (o-series, gpt-5.x) — they reject the default 0
 
     gemini:
       api_key: ""  # Get from https://makersuite.google.com/
       model: "gemini-2.0-flash"  # optional
+      # model_temperature: 0  # optional sampling temperature (default 0 = deterministic)
 
     # Local providers (no API key needed)
     ollama:
