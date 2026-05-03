@@ -23,17 +23,7 @@ import (
 // branches are present so the modern query keeps the new is_identity
 // check and the legacy query stays as a safety net.
 func TestLoadColumnsSQL_DetectsModernIdentity(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed; cannot locate reader.go")
-	}
-	readerFile := filepath.Join(filepath.Dir(thisFile), "reader.go")
-	src, err := os.ReadFile(readerFile)
-	if err != nil {
-		t.Fatalf("read reader.go: %v", err)
-	}
-
-	body := string(src)
+	body := readReaderSource(t)
 	for _, needle := range []string{
 		"is_identity = 'YES'",            // modern (PG 10+) covers GENERATED ... AS IDENTITY
 		"column_default LIKE 'nextval%'", // legacy (PG 9.x) covers SERIAL / BIGSERIAL
@@ -43,6 +33,64 @@ func TestLoadColumnsSQL_DetectsModernIdentity(t *testing.T) {
 			t.Errorf("loadColumns code missing required marker %q", needle)
 		}
 	}
+}
+
+// TestLoadForeignKeysSQL_QueriesPgConstraint is a regression guard for issue
+// #17. LoadForeignKeys was previously a `return nil` stub; every pg-as-source
+// migration produced 0 FKs on the target. This test asserts the implementation
+// uses the right pg_catalog primitives — accidental rewrites that drop any of
+// these markers would silently regress every pg-source pair.
+func TestLoadForeignKeysSQL_QueriesPgConstraint(t *testing.T) {
+	body := readReaderSource(t)
+	for _, needle := range []string{
+		"pg_constraint",            // source of truth for FK metadata
+		"c.contype = 'f'",          // filter to foreign keys only
+		"confdeltype",              // ON DELETE action
+		"confupdtype",              // ON UPDATE action
+		"LATERAL unnest(c.conkey)", // composite-FK column ordering
+		"c.confkey[u.attposition]", // referenced-column lookup by position
+		"'CASCADE'",                // CASE-mapping to writer-friendly keyword
+		"'SET NULL'",               // (proves all action codes are mapped)
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("LoadForeignKeys code missing required marker %q", needle)
+		}
+	}
+}
+
+// TestLoadCheckConstraintsSQL_UsesPgGetExpr is a regression guard for issue
+// #17 (the CHECK half). The implementation must use pg_get_expr(conbin,...) to
+// produce predicate-only text without the "CHECK ( ... )" wrapper, matching
+// the format the mssql/mysql readers produce so the AI prompt stays
+// dialect-agnostic. Accidental switches to `consrc` (deprecated since PG 12,
+// removed in some builds) or to including the CHECK wrapper would break the
+// downstream prompt shape.
+func TestLoadCheckConstraintsSQL_UsesPgGetExpr(t *testing.T) {
+	body := readReaderSource(t)
+	for _, needle := range []string{
+		"pg_constraint",        // source of truth for CHECK metadata
+		"c.contype = 'c'",      // filter to check constraints only
+		"pg_get_expr(c.conbin", // predicate-only text extraction
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("LoadCheckConstraints code missing required marker %q", needle)
+		}
+	}
+}
+
+// readReaderSource returns the contents of reader.go as a string. Used by the
+// regression-guard tests that grep for SQL markers without needing a live DB.
+func readReaderSource(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed; cannot locate reader.go")
+	}
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "reader.go"))
+	if err != nil {
+		t.Fatalf("read reader.go: %v", err)
+	}
+	return string(src)
 }
 
 func TestDriverRegistration(t *testing.T) {

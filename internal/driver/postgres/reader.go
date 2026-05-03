@@ -411,15 +411,99 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 }
 
 // LoadForeignKeys loads foreign key metadata for a table.
+//
+// Reads from pg_constraint (contype='f') joined to pg_attribute on both sides
+// so composite FKs work correctly: c.conkey holds the parent column attnums in
+// FK column order; c.confkey holds the matching referenced column attnums.
+// LATERAL UNNEST(c.conkey) WITH ORDINALITY exposes the position so we can
+// reach into c.confkey[position] for the corresponding referenced column.
+//
+// confdeltype/confupdtype map to the action keywords the writer phase needs.
+// PG codes: 'a'=NO ACTION, 'r'=RESTRICT, 'c'=CASCADE, 'n'=SET NULL, 'd'=SET DEFAULT.
 func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
-	// Similar pattern to LoadIndexes
-	return nil
+	rows, err := r.sqlDB.QueryContext(ctx, `
+		SELECT
+			c.conname AS fk_name,
+			array_to_string(array_agg(att.attname  ORDER BY u.attposition), ',') AS columns,
+			fns.nspname AS ref_schema,
+			fcl.relname AS ref_table,
+			array_to_string(array_agg(fatt.attname ORDER BY u.attposition), ',') AS ref_columns,
+			CASE c.confdeltype
+				WHEN 'a' THEN 'NO ACTION'
+				WHEN 'r' THEN 'RESTRICT'
+				WHEN 'c' THEN 'CASCADE'
+				WHEN 'n' THEN 'SET NULL'
+				WHEN 'd' THEN 'SET DEFAULT'
+			END AS on_delete,
+			CASE c.confupdtype
+				WHEN 'a' THEN 'NO ACTION'
+				WHEN 'r' THEN 'RESTRICT'
+				WHEN 'c' THEN 'CASCADE'
+				WHEN 'n' THEN 'SET NULL'
+				WHEN 'd' THEN 'SET DEFAULT'
+			END AS on_update
+		FROM pg_constraint c
+		JOIN pg_class cl       ON c.conrelid = cl.oid
+		JOIN pg_namespace ns   ON cl.relnamespace = ns.oid
+		JOIN pg_class fcl      ON c.confrelid = fcl.oid
+		JOIN pg_namespace fns  ON fcl.relnamespace = fns.oid
+		CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS u(attnum, attposition)
+		JOIN pg_attribute att  ON att.attrelid  = c.conrelid  AND att.attnum  = u.attnum
+		JOIN pg_attribute fatt ON fatt.attrelid = c.confrelid AND fatt.attnum = c.confkey[u.attposition]
+		WHERE c.contype = 'f' AND ns.nspname = $1 AND cl.relname = $2
+		GROUP BY c.conname, fns.nspname, fcl.relname, c.confdeltype, c.confupdtype
+		ORDER BY c.conname
+	`, t.Schema, t.Name)
+	if err != nil {
+		return fmt.Errorf("querying foreign keys: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var fk driver.ForeignKey
+		var columns, refColumns string
+		if err := rows.Scan(&fk.Name, &columns, &fk.RefSchema, &fk.RefTable, &refColumns,
+			&fk.OnDelete, &fk.OnUpdate); err != nil {
+			return fmt.Errorf("scanning FK for %s.%s: %w", t.Schema, t.Name, err)
+		}
+		fk.Columns = strings.Split(columns, ",")
+		fk.RefColumns = strings.Split(refColumns, ",")
+		t.ForeignKeys = append(t.ForeignKeys, fk)
+	}
+	return rows.Err()
 }
 
 // LoadCheckConstraints loads check constraint metadata for a table.
+//
+// pg_constraint.contype='c' is the explicit CHECK family; PG stores NOT NULL
+// as a column-level attnotnull flag, not as a CHECK, so this query naturally
+// excludes those. pg_get_expr(conbin, conrelid) returns just the predicate
+// text (no surrounding "CHECK ( ... )" wrapper) — matches the format the
+// mssql/mysql readers produce so the AI prompt can stay dialect-agnostic.
 func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) error {
-	// Similar pattern to LoadIndexes
-	return nil
+	rows, err := r.sqlDB.QueryContext(ctx, `
+		SELECT
+			c.conname,
+			pg_get_expr(c.conbin, c.conrelid) AS definition
+		FROM pg_constraint c
+		JOIN pg_class cl     ON c.conrelid = cl.oid
+		JOIN pg_namespace ns ON cl.relnamespace = ns.oid
+		WHERE c.contype = 'c' AND ns.nspname = $1 AND cl.relname = $2
+		ORDER BY c.conname
+	`, t.Schema, t.Name)
+	if err != nil {
+		return fmt.Errorf("querying check constraints: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var chk driver.CheckConstraint
+		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
+			return fmt.Errorf("scanning check constraint for %s.%s: %w", t.Schema, t.Name, err)
+		}
+		t.CheckConstraints = append(t.CheckConstraints, chk)
+	}
+	return rows.Err()
 }
 
 // ReadTable reads data from a table and returns batches via a channel.
