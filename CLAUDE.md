@@ -128,9 +128,28 @@ Some files preserve DMT's original code shape unchanged (verbatim copy with modu
 
 ## Open follow-ups
 
+Active work is tracked in GitHub issues. Run `gh issue list --state open` and read the bodies — each carries Symptom + Root cause + Proposed fix:
+
+- **#13** — SourceContext is never populated. The AI prompt's `=== SOURCE DATABASE ===` block has only `Type:` (no version, charset, varchar semantics). Fix is structural: add `DatabaseContext()` to the `Reader` interface and plumb through `WriterOptions` / `TableOptions`. Independent of #16.
+- **#17** — `internal/driver/postgres/reader.go` `LoadForeignKeys` and `LoadCheckConstraints` are literal `return nil` stubs. Every postgres-as-source migration produces 0 FKs on the target. Implement against `pg_constraint` / `information_schema.check_constraints`, mirror the mssql/mysql readers.
+- **#18** — `internal/driver/mysql/reader.go` substring-matches `"GENERATED"` on the `EXTRA` column, which also matches `DEFAULT_GENERATED` (MySQL 8.0.13+ marker for any expression default). Misclassifies default-valued TIMESTAMP/DATETIME columns as computed. Tighten the match to `"VIRTUAL GENERATED"` / `"STORED GENERATED"`.
+- **#19** — AI prompt-coverage gap: mssql → mysql for `DATETIME2(N)` columns with `DEFAULT GETUTCDATE()` produces invalid `DATETIME(N) DEFAULT CURRENT_TIMESTAMP` (MySQL needs the precision argument on the default). One-line addition to migration rules.
+
+Older non-issue follow-ups:
+
 - `smt validate` and `smt analyze` are stubs. validate is a small reuse of `schemadiff.Compute` against the target's introspection rather than a stored snapshot. analyze reuses the AI plumbing for schema-relevant suggestions (risky type mappings, tables to exclude, missing indexes).
 - TUI `/sync` and `/snapshot` print "lands in a later phase" instead of dispatching to the new commands; wire them to call the same handlers as the CLI.
 - `MigrationDefaults` in `internal/secrets/secrets.go` carries unused workers/chunk_size/buffer fields. Safe to drop once we're confident no DMT secrets file in the wild needs them.
+
+### Cross-engine coverage status (as of 2026-05-03)
+
+The CRM fixture (`testdata/crm/`) supports all three engines as both source and target. Coverage of the 9-pair matrix:
+
+- **mssql sources:** mssql→pg ✓, mssql→mssql ✓, mssql→mysql blocked by #19.
+- **pg sources:** tables phase works on all targets; FKs/CHECKs blocked by #17 on every pair.
+- **mysql sources:** all pairs blocked by #18 at the first table with a `DEFAULT CURRENT_TIMESTAMP` column.
+
+Default model is `claude-sonnet-4-6`. Haiku was tried and reverted because it regressed on `pg → mssql` for tables with computed columns (emitted invalid `<type> AS (...) PERSISTED` where MSSQL forbids the type before AS). The prompt now contains an explicit rule for this case (see PR #16) but Sonnet remains the safer default.
 
 ### Resolved (kept here as decision log)
 
