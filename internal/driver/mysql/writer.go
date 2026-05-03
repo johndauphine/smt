@@ -117,11 +117,24 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 }
 
 // gatherDatabaseContext collects MySQL/MariaDB database metadata for AI context.
+// Thin wrapper that calls the package-level helper so the Reader and Writer
+// can share the same query logic — see issue #13.
 func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
+	return gatherDatabaseContext(w.db, w.config.Database, w.config.Host, version, w.isMariaDB)
+}
+
+// gatherDatabaseContext queries a live MySQL/MariaDB connection for metadata
+// the AI prompt's SOURCE DATABASE / TARGET DATABASE block consumes (charset,
+// collation, identifier case, storage engine, version-gated feature list).
+// Used by both the Writer (target context) and the Reader (source context,
+// plumbed through TableOptions.SourceContext via the orchestrator). Failures
+// on individual queries are non-fatal — the function returns whatever it
+// could collect.
+func gatherDatabaseContext(db *sql.DB, dbName, host, version string, isMariaDB bool) *driver.DatabaseContext {
 	dbCtx := &driver.DatabaseContext{
 		Version:                  version,
-		DatabaseName:             w.config.Database,
-		ServerName:               w.config.Host,
+		DatabaseName:             dbName,
+		ServerName:               host,
 		IdentifierCase:           "preserve",
 		CaseSensitiveIdentifiers: false, // Depends on OS/config
 		MaxIdentifierLength:      64,
@@ -138,7 +151,7 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 		}
 	}
 
-	if w.isMariaDB {
+	if isMariaDB {
 		dbCtx.StorageEngine = "MariaDB"
 	}
 
@@ -149,7 +162,7 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 
 	// Query character set and collation
 	var charsetVar, collationVar string
-	if w.db.QueryRow("SELECT @@character_set_database, @@collation_database").Scan(&charsetVar, &collationVar) == nil {
+	if db.QueryRow("SELECT @@character_set_database, @@collation_database").Scan(&charsetVar, &collationVar) == nil {
 		dbCtx.Charset = charsetVar
 		dbCtx.Collation = collationVar
 
@@ -181,7 +194,7 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 	// Query lower_case_table_names for identifier case sensitivity
 	// Use -1 as sentinel to distinguish "not queried" from actual value of 0
 	lowerCaseTableNames := -1
-	if w.db.QueryRow("SELECT @@lower_case_table_names").Scan(&lowerCaseTableNames) == nil {
+	if db.QueryRow("SELECT @@lower_case_table_names").Scan(&lowerCaseTableNames) == nil {
 		switch lowerCaseTableNames {
 		case 0:
 			dbCtx.CaseSensitiveIdentifiers = true
@@ -197,7 +210,7 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 
 	// Query default storage engine
 	var engine string
-	if w.db.QueryRow("SELECT @@default_storage_engine").Scan(&engine) == nil {
+	if db.QueryRow("SELECT @@default_storage_engine").Scan(&engine) == nil {
 		dbCtx.StorageEngine = engine
 	}
 
@@ -214,10 +227,10 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 
 	// Standard MySQL features
 	dbCtx.Features = []string{"JSON", "SPATIAL", "FULLTEXT"}
-	if w.isMariaDB {
+	if isMariaDB {
 		dbCtx.Features = append(dbCtx.Features, "SEQUENCES", "SYSTEM_VERSIONING")
 	}
-	if dbCtx.MajorVersion >= 8 || (w.isMariaDB && dbCtx.MajorVersion >= 10) {
+	if dbCtx.MajorVersion >= 8 || (isMariaDB && dbCtx.MajorVersion >= 10) {
 		dbCtx.Features = append(dbCtx.Features, "CTE", "WINDOW_FUNCTIONS")
 	}
 

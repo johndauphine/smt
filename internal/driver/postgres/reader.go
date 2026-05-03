@@ -27,6 +27,21 @@ type Reader struct {
 	// serverVersionOnce gates the lazy lookup of serverVersionNum.
 	serverVersionOnce sync.Once
 	serverVersionNum  int // 0 if lookup failed; integer like 160001 (PG 16.0.1)
+
+	// dbContextOnce gates the (single) lookup of dbContext for the source side.
+	dbContextOnce sync.Once
+	dbContext     *driver.DatabaseContext
+}
+
+// DatabaseContext returns metadata about this source database for the AI prompt
+// (version, charset, collation, identifier case, varchar semantics, etc.).
+// Cached after first call so the orchestrator's per-table loop doesn't re-query
+// pg_database / SHOW server_encoding for every CREATE TABLE.
+func (r *Reader) DatabaseContext() *driver.DatabaseContext {
+	r.dbContextOnce.Do(func() {
+		r.dbContext = gatherDatabaseContext(context.Background(), r.pool, r.config.Database, r.config.Host)
+	})
+	return r.dbContext
 }
 
 // NewReader creates a new PostgreSQL reader.

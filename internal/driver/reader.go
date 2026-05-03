@@ -39,6 +39,15 @@ type Reader interface {
 	MaxConns() int
 	DBType() string
 	PoolStats() stats.PoolStats
+
+	// DatabaseContext returns metadata about this source database for the AI
+	// prompt (version, charset, collation, identifier case, varchar semantics,
+	// etc.). The orchestrator passes the result to target.CreateTableWithOptions
+	// via TableOptions.SourceContext so the AI sees a populated SOURCE DATABASE
+	// block alongside the existing TARGET DATABASE block. Implementations should
+	// cache after first call — orchestrator may invoke this for every CREATE
+	// TABLE on a wide schema.
+	DatabaseContext() *DatabaseContext
 }
 
 // ReadOptions configures how to read data from a table.

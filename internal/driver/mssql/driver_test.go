@@ -1,11 +1,45 @@
 package mssql
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"smt/internal/driver"
 )
+
+// TestReaderDatabaseContext_Populated is the mssql side of the issue #13
+// regression guard. Mirrors the postgres/mysql tests.
+func TestReaderDatabaseContext_Populated(t *testing.T) {
+	body := readReaderSource(t)
+	for _, needle := range []string{
+		"func (r *Reader) DatabaseContext()",
+		"dbContextOnce.Do",
+		"gatherDatabaseContext(",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("reader.go missing required marker %q", needle)
+		}
+	}
+}
+
+// readReaderSource returns the contents of reader.go as a string. Uses
+// runtime.Caller to locate the file by absolute path so the test doesn't
+// depend on the working directory.
+func readReaderSource(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed; cannot locate reader.go")
+	}
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "reader.go"))
+	if err != nil {
+		t.Fatalf("read reader.go: %v", err)
+	}
+	return string(src)
+}
 
 func TestDriverRegistration(t *testing.T) {
 	// The driver should be registered via init()

@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
+	"smt/internal/driver"
 	"smt/internal/logging"
 	"smt/internal/source"
 )
@@ -149,8 +150,14 @@ func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 	total := len(o.tables)
 	logging.Info("[%s] creating %d tables (concurrency=%d)", TaskCreateTables, total, o.aiConcurrency())
 	var done atomic.Int64
+	// Gather source DB context once up front (Reader caches; this primes the
+	// cache so the per-table goroutines all read the same value without racing
+	// on the sync.Once inside the Reader implementation). The result feeds the
+	// AI prompt's SOURCE DATABASE block — see issue #13.
+	sourceCtx := o.source.DatabaseContext()
 	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
-		if err := o.target.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+		opts := driver.TableOptions{SourceContext: sourceCtx}
+		if err := o.target.CreateTableWithOptions(ctx, &t, o.config.Target.Schema, opts); err != nil {
 			return fmt.Errorf("creating table %s: %w", t.Name, err)
 		}
 		n := done.Add(1)
