@@ -1387,9 +1387,13 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	sb.WriteString("\n")
 
 	// === SOURCE TABLE DDL ===
-	sb.WriteString("=== SOURCE TABLE DDL ===\n")
-	sb.WriteString(m.buildSourceDDLWithTarget(req.SourceTable, req.SourceDBType, req.TargetDBType))
-	sb.WriteString("\n\n")
+	// SMT does not maintain Go-side per-dialect rendering rules. The model
+	// already knows source-dialect semantics from its training; we hand it
+	// the introspection facts (data_type, max_length, precision, scale,
+	// nullability, identity, default, computed expression) and ask for the
+	// target-dialect CREATE TABLE in one step. No source-DDL middleman.
+	sb.WriteString(buildSourceIntrospectionBlock(req.SourceTable, req.SourceDBType))
+	sb.WriteString("\n")
 
 	// === REQUIRED TARGET COLUMN NAMES ===
 	// Provide the exact column names the AI must use in the target DDL.
@@ -1708,127 +1712,88 @@ func targetIdentifier(name, targetDBType string) string {
 	return ident.SanitizePG(name)
 }
 
-// buildSourceDDL creates a DDL-like representation of the source table.
-func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
-	return m.buildSourceDDLWithTarget(t, sourceDBType, "")
-}
-
-// computedTypeStr returns the source-dialect type string for a computed column.
-// MSSQL stores the resolved type in DataType for computed columns (often
-// inferred — may be empty if introspection didn't surface it); PG and MySQL
-// always carry an explicit declared type. Returns "" if no type info is
-// available, in which case the prompt omits the type and lets the AI infer.
-func computedTypeStr(col Column) string {
-	if col.DataType == "" {
-		return ""
-	}
-	if col.MaxLength > 0 {
-		return fmt.Sprintf("%s(%d)", col.DataType, col.MaxLength)
-	}
-	if col.MaxLength == -1 {
-		return fmt.Sprintf("%s(MAX)", col.DataType)
-	}
-	if col.Precision > 0 {
-		if col.Scale > 0 {
-			return fmt.Sprintf("%s(%d,%d)", col.DataType, col.Precision, col.Scale)
-		}
-		return fmt.Sprintf("%s(%d)", col.DataType, col.Precision)
-	}
-	return col.DataType
-}
-
-// buildSourceDDLWithTarget creates a DDL-like representation of the source table
-// with required target column names annotated inline.
-func (m *AITypeMapper) buildSourceDDLWithTarget(t *Table, sourceDBType, targetDBType string) string {
+// buildSourceIntrospectionBlock renders the source table's introspection
+// metadata as a structured prompt section. The AI gets raw facts (data_type,
+// max_length, precision, scale, nullability, identity, default expression,
+// computed expression) and uses its own dialect knowledge to interpret them.
+//
+// Default-valued attributes are suppressed (no `is_identity: false` line for
+// non-identity columns) to keep the prompt scannable. The dialect label tells
+// the model how to read the facts (e.g. "max_length: -1" → MAX in MSSQL,
+// "data_type: int + precision: 10" → bare INT in MSSQL because INT takes no
+// precision arg there).
+func buildSourceIntrospectionBlock(t *Table, sourceDBType string) string {
 	var sb strings.Builder
 
-	tableName := t.Name
+	sb.WriteString("=== SOURCE TABLE (introspection metadata) ===\n")
+	sb.WriteString("source_dialect: ")
+	sb.WriteString(sourceDBType)
+	sb.WriteString("\n")
 	if t.Schema != "" {
-		tableName = t.Schema + "." + t.Name
+		sb.WriteString("schema: ")
+		sb.WriteString(t.Schema)
+		sb.WriteString("\n")
 	}
+	sb.WriteString("table: ")
+	sb.WriteString(t.Name)
+	sb.WriteString("\n\n")
 
-	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", tableName))
-
-	for i, col := range t.Columns {
-		sb.WriteString("    ")
+	sb.WriteString("columns (in ordinal position):\n")
+	for _, col := range t.Columns {
+		sb.WriteString("- name: ")
 		sb.WriteString(col.Name)
-		sb.WriteString(" ")
-
-		// Computed columns: include the column's declared type (PG/MySQL syntax
-		// requires it; MSSQL infers it but the type is still useful AI context),
-		// the generation expression, and a STORED-vs-VIRTUAL hint. The AI
-		// translates to the target's generated-column syntax.
-		if col.IsComputed && col.ComputedExpression != "" {
-			typeStr := computedTypeStr(col)
-			storageKW := " VIRTUAL"
-			if col.ComputedPersisted {
-				storageKW = " STORED" // also rendered as PERSISTED in MSSQL output
-			}
-			if typeStr != "" {
-				sb.WriteString(fmt.Sprintf("%s AS (%s)%s", typeStr, col.ComputedExpression, storageKW))
-			} else {
-				sb.WriteString(fmt.Sprintf("AS (%s)%s", col.ComputedExpression, storageKW))
-			}
+		sb.WriteString(", data_type: ")
+		// Computed columns may have empty DataType in MSSQL (type is inferred
+		// from the expression). Surface the empty value explicitly so the AI
+		// knows to infer it from computed_expression.
+		if col.DataType == "" {
+			sb.WriteString("(inferred)")
 		} else {
-			// Build type with length/precision
-			typeStr := col.DataType
-			if col.MaxLength > 0 {
-				typeStr = fmt.Sprintf("%s(%d)", col.DataType, col.MaxLength)
-			} else if col.MaxLength == -1 {
-				typeStr = fmt.Sprintf("%s(MAX)", col.DataType)
-			} else if col.Precision > 0 {
-				if col.Scale > 0 {
-					typeStr = fmt.Sprintf("%s(%d,%d)", col.DataType, col.Precision, col.Scale)
-				} else {
-					typeStr = fmt.Sprintf("%s(%d)", col.DataType, col.Precision)
-				}
+			sb.WriteString(col.DataType)
+		}
+		if col.MaxLength == -1 {
+			sb.WriteString(", max_length: MAX")
+		} else if col.MaxLength > 0 {
+			sb.WriteString(fmt.Sprintf(", max_length: %d", col.MaxLength))
+		}
+		if col.Precision > 0 {
+			sb.WriteString(fmt.Sprintf(", precision: %d", col.Precision))
+		}
+		if col.Scale > 0 {
+			sb.WriteString(fmt.Sprintf(", scale: %d", col.Scale))
+		}
+		if col.IsNullable {
+			sb.WriteString(", nullable: true")
+		} else {
+			sb.WriteString(", nullable: false")
+		}
+		if col.IsIdentity {
+			sb.WriteString(", identity: true")
+		}
+		if col.DefaultExpression != "" {
+			sb.WriteString(", default_expression: ")
+			sb.WriteString(col.DefaultExpression)
+		}
+		if col.IsComputed {
+			sb.WriteString(", computed: true")
+			if col.ComputedExpression != "" {
+				sb.WriteString(", computed_expression: ")
+				sb.WriteString(col.ComputedExpression)
 			}
-			sb.WriteString(typeStr)
-
-			// NULL constraint
-			if !col.IsNullable {
-				sb.WriteString(" NOT NULL")
-			}
-
-			// Identity
-			if col.IsIdentity {
-				switch sourceDBType {
-				case "postgres":
-					sb.WriteString(" GENERATED BY DEFAULT AS IDENTITY")
-				case "mssql":
-					sb.WriteString(" IDENTITY")
-				case "mysql":
-					sb.WriteString(" AUTO_INCREMENT")
-				}
-			}
-
-			// DEFAULT clause — emit as-is; AI translates dialect-specific functions.
-			if col.DefaultExpression != "" {
-				sb.WriteString(fmt.Sprintf(" DEFAULT %s", col.DefaultExpression))
+			if col.ComputedPersisted {
+				sb.WriteString(", computed_storage: STORED")
+			} else {
+				sb.WriteString(", computed_storage: VIRTUAL")
 			}
 		}
-
-		if i < len(t.Columns)-1 {
-			sb.WriteString(",")
-		}
-
-		// Annotate with required target column name
-		if targetDBType != "" {
-			tgt := targetIdentifier(col.Name, targetDBType)
-			if tgt != col.Name {
-				sb.WriteString(fmt.Sprintf("  -- target column: %s", tgt))
-			}
-		}
-
 		sb.WriteString("\n")
 	}
 
-	// Primary key
 	if len(t.PrimaryKey) > 0 {
-		sb.WriteString(fmt.Sprintf("    ,PRIMARY KEY (%s)\n", strings.Join(t.PrimaryKey, ", ")))
+		sb.WriteString("\nprimary_key: (")
+		sb.WriteString(strings.Join(t.PrimaryKey, ", "))
+		sb.WriteString(")\n")
 	}
-
-	sb.WriteString(");")
 
 	return sb.String()
 }

@@ -119,12 +119,8 @@ var KnownProviders = map[string]struct {
 }
 
 // DefaultModels maps providers to their default models.
-// Anthropic default is Sonnet because table-DDL generation is a multi-page,
-// judgment-heavy prompt where Haiku has been observed to translate the same
-// type inconsistently between tables. The volume is low (one call per table,
-// cached) so Sonnet's cost is not a concern.
 var DefaultModels = map[string]string{
-	"anthropic": "claude-sonnet-4-6",
+	"anthropic": "claude-haiku-4-5-20251001",
 	"openai":    "gpt-4o",
 	"gemini":    "gemini-2.0-flash",
 	"ollama":    "llama3",
@@ -549,7 +545,7 @@ ai:
     # Cloud providers (require API key)
     anthropic:
       api_key: ""  # Get from https://console.anthropic.com/
-      model: "claude-sonnet-4-6"  # optional
+      model: "claude-haiku-4-5-20251001"  # optional
 
     openai:
       api_key: ""  # Get from https://platform.openai.com/
