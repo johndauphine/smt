@@ -1541,11 +1541,11 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 
 	sb.WriteString("\n")
 
-	// Target database rules - derived from TargetContext.
-	// Identifier rules deliberately omitted: target column names are pre-resolved
-	// in REQUIRED TARGET COLUMN NAMES, the target table name is given in OUTPUT
-	// REQUIRED, and the target dialect's AIPromptAugmentation supplies any
-	// dialect-specific case-folding rules.
+	// Target database rules - derived from TargetContext. Identifier rules
+	// deliberately omitted: target column names are pre-resolved in
+	// REQUIRED TARGET COLUMN NAMES, the target table name is given in
+	// OUTPUT REQUIREMENTS, and each target dialect's AIPromptAugmentation
+	// supplies any dialect-specific case-folding rules.
 	sb.WriteString("Target database rules:\n")
 	if req.TargetContext != nil {
 		m.writeVarcharGuidance(sb, req.TargetContext, "target")
