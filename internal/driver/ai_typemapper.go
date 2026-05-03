@@ -1531,13 +1531,9 @@ func (m *AITypeMapper) writeContextDetails(sb *strings.Builder, ctx *DatabaseCon
 	}
 }
 
-// writeMigrationRules writes migration guidance derived from the source/target
-// database context plus a small number of per-target dialect gotchas that the
-// AI consistently gets wrong without a prompt nudge. Most rules are dynamic
-// (computed from SourceContext / TargetContext); the per-target conditionals
-// at the end of the function (e.g. the MySQL fractional-second precision
-// rule) are kept narrow and only emitted when the relevant target is in play
-// so the prompt stays focused for other targets.
+// writeMigrationRules writes migration guidance derived dynamically from database context.
+// All rules are generated from runtime metadata - no hardcoded database-specific rules.
+// Per-target dialect gotchas live in each driver's Dialect.AIPromptAugmentation, not here.
 func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequest) {
 	// Source database characteristics - derived from SourceContext
 	sb.WriteString("Source database characteristics:\n")
@@ -1597,12 +1593,6 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	sb.WriteString("  * mssql:    AS (expression) PERSISTED  (MSSQL infers type; persisted = STORED). Do NOT include the column type before AS — MSSQL forbids it on computed columns.\n")
 	sb.WriteString("  * If the source data_type is reported as `(inferred)` (MSSQL computed columns may omit it), infer the type from the expression and source columns.\n")
 	sb.WriteString("  * Translate dialect-specific functions inside the expression too (e.g. CAST(x AS VARCHAR(10)) is portable; ISNULL(a,b) (MSSQL) -> COALESCE(a,b))\n")
-
-	// Per-target gotchas. Each one only fires when its target dialect is in play
-	// to keep the prompt focused; if you add another, mirror this conditional.
-	if Canonicalize(req.TargetDBType) == "mysql" {
-		sb.WriteString("- MySQL fractional-second precision rule: when mapping any source column with `scale` > 0 (per the introspection metadata) to a MySQL `DATETIME(N)` / `TIMESTAMP(N)` / `TIME(N)` target — regardless of the source dialect's spelling (MSSQL `DATETIME2(N)`, PG `TIMESTAMP(N)` / `TIMESTAMPTZ(N)`, MySQL `DATETIME(N)`, etc.) — any `CURRENT_TIMESTAMP` / `NOW()` default in the target DDL MUST carry the same precision argument: `created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)`. MySQL rejects mismatched precision with error 1067 \"Invalid default value\". This applies only to function defaults; literal-value defaults are unaffected.\n")
-	}
 }
 
 // capitalizeFirst returns the string with its first character uppercased.

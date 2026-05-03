@@ -280,6 +280,16 @@ CRITICAL MySQL VARCHAR / charset rules:
     ` + "`LONGTEXT`" + `   — 4,294,967,295 bytes (~1G chars utf8mb4 worst case)
   When in doubt prefer the larger type — silent truncation on insert is much
   worse than a few extra bytes of pointer overhead.
+
+CRITICAL MySQL fractional-second precision rule:
+- When mapping any source column with ` + "`scale > 0`" + ` (per the introspection metadata) to a
+  MySQL ` + "`DATETIME(N)`" + ` / ` + "`TIMESTAMP(N)`" + ` / ` + "`TIME(N)`" + ` target — regardless of the
+  source dialect's spelling (MSSQL ` + "`DATETIME2(N)`" + `, ` + "`DATETIMEOFFSET`" + `;
+  PG ` + "`TIMESTAMP(N)`" + ` / ` + "`TIMESTAMPTZ(N)`" + `; MySQL ` + "`DATETIME(N)`" + `; etc.) — any
+  ` + "`CURRENT_TIMESTAMP`" + ` / ` + "`NOW()`" + ` default in the target DDL MUST carry the same precision
+  argument: ` + "`created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)`" + `.
+- MySQL rejects mismatched precision with error 1067 "Invalid default value".
+- This applies only to function defaults; literal-value defaults are unaffected.
 `
 }
 
