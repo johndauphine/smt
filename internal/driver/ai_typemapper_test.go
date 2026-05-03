@@ -88,7 +88,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 		provider      string
 		expectedModel string
 	}{
-		{"anthropic", "claude-haiku-4-5-20251001"},
+		{"anthropic", "claude-sonnet-4-6"},
 		{"openai", "gpt-4o"},
 		{"gemini", "gemini-2.0-flash"},
 		{"ollama", "llama3"},
@@ -1370,6 +1370,80 @@ func TestBuildTableDDLPrompt_SameEngine_NoAnnotations(t *testing.T) {
 	// But the required names section should still be present
 	if !strings.Contains(prompt, "InvoiceID -> InvoiceID") {
 		t.Error("same-engine prompt should still list required column names")
+	}
+}
+
+func TestBuildTableDDLPrompt_TypeValidityRule(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	tests := []struct {
+		name         string
+		sourceDBType string
+		targetDBType string
+		wantValidity bool
+	}{
+		{"mssql to postgres includes type-validity rule", "mssql", "postgres", true},
+		{"postgres to mssql includes type-validity rule", "postgres", "mssql", true},
+		{"mssql to mysql includes type-validity rule", "mssql", "mysql", true},
+		{"mysql to postgres includes type-validity rule", "mysql", "postgres", true},
+		{"same engine omits type-validity rule", "postgres", "postgres", false},
+		{"same engine mssql omits type-validity rule", "mssql", "mssql", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := TableDDLRequest{
+				SourceDBType: tt.sourceDBType,
+				TargetDBType: tt.targetDBType,
+				SourceTable: &Table{
+					Name: "T",
+					Columns: []Column{
+						{Name: "id", DataType: "int", IsNullable: false},
+					},
+					PrimaryKey: []string{"id"},
+				},
+			}
+			prompt := mapper.buildTableDDLPrompt(req)
+			marker := "Type validity (MANDATORY):"
+			has := strings.Contains(prompt, marker)
+			if has != tt.wantValidity {
+				t.Errorf("prompt contains %q = %v, want %v\nprompt:\n%s", marker, has, tt.wantValidity, prompt)
+			}
+		})
+	}
+}
+
+// Make sure the prompt does not regress into a hand-coded translation table.
+// The whole point is that SMT delegates type mapping to the AI — if a per-pair
+// "MSSQL X -> PG Y" enumeration shows up here again, it should be deleted in
+// favor of the general type-validity rule.
+func TestBuildTableDDLPrompt_NoHardcodedTypeMappings(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	req := TableDDLRequest{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		SourceTable: &Table{
+			Name:       "T",
+			Columns:    []Column{{Name: "id", DataType: "int", IsNullable: false}},
+			PrimaryKey: []string{"id"},
+		},
+	}
+	prompt := mapper.buildTableDDLPrompt(req)
+
+	// These are the kinds of explicit mappings we deliberately do NOT include.
+	// If you find yourself wanting to add one, fix the model or sharpen the
+	// general rule instead.
+	forbidden := []string{
+		"NVARCHAR(n) -> VARCHAR(n)",
+		"NCHAR(n) -> CHAR(n)",
+		"NTEXT -> TEXT",
+		"NVARCHAR(MAX) -> LONGTEXT",
+	}
+	for _, f := range forbidden {
+		if strings.Contains(prompt, f) {
+			t.Errorf("prompt contains hand-coded type mapping %q — delegate to the AI instead", f)
+		}
 	}
 }
 
