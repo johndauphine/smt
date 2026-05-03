@@ -258,3 +258,50 @@ func TestReaderDatabaseContext_Populated(t *testing.T) {
 		}
 	}
 }
+
+// TestRetrySuccessCachesPreUnloggedDDL is the regression guard for the
+// cache-poisoning bug Copilot caught on PR #30: caching the post-Unlogged-
+// rewrite form would mean a successful retry stores `CREATE UNLOGGED TABLE
+// ...` in the AI cache. Because tableCacheKey doesn't include
+// TableOptions.Unlogged, a future call with opts.Unlogged=false would
+// hit that cache entry and unexpectedly create an UNLOGGED table.
+//
+// The fix is structural in the writer: hold the AI-returned DDL separately
+// from the execution-time DDL, cache only the AI form, let opts.Unlogged
+// drive the rewrite per-call. This test reads writer.go and asserts those
+// markers are present so a future refactor that collapses the two
+// variables back together fails the test instead of silently regressing.
+func TestRetrySuccessCachesPreUnloggedDDL(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(callerFile(t)), "writer.go"))
+	if err != nil {
+		t.Fatalf("read writer.go: %v", err)
+	}
+	body := string(src)
+	for _, needle := range []string{
+		"aiDDL := resp.CreateTableDDL", // canonical form held separately
+		"execDDL := aiDDL",             // execution form starts as the canonical
+		"CacheTableDDL(req, aiDDL)",    // cache the AI form, NOT the rewritten one
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("writer.go missing required marker %q — see PR #30 review", needle)
+		}
+	}
+	// And the inverse: ensure the reverse-direction bug (caching execDDL)
+	// is NOT lurking. If anyone reintroduces CacheTableDDL(req, execDDL) the
+	// cache-poisoning bug is back.
+	if strings.Contains(body, "CacheTableDDL(req, execDDL)") {
+		t.Error("writer.go regresses cache-poisoning bug from PR #30: caches execDDL (Unlogged-rewritten) instead of aiDDL")
+	}
+}
+
+// callerFile returns the absolute path of the file calling this helper.
+// Used by readReader-style tests that need to locate sibling files via
+// runtime.Caller without hardcoding the package path.
+func callerFile(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(1)
+	if !ok {
+		t.Fatal("runtime.Caller(1) failed")
+	}
+	return thisFile
+}

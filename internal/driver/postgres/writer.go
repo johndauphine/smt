@@ -304,27 +304,36 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 			return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
 		}
 
-		ddl := resp.CreateTableDDL
-		if opts.Unlogged && !strings.Contains(strings.ToUpper(ddl), "UNLOGGED") {
-			ddl = strings.Replace(ddl, "CREATE TABLE", "CREATE UNLOGGED TABLE", 1)
+		// Hold the AI-returned DDL separately from the locally-rewritten form
+		// the database actually executes. The Unlogged rewrite is a per-call
+		// post-processing step driven by opts.Unlogged, NOT by anything the
+		// AI knows about — and tableCacheKey doesn't carry the Unlogged flag.
+		// So we cache aiDDL (canonical form) and let the writer re-apply its
+		// own Unlogged rewrite on each cache hit. Caching execDDL would
+		// poison the cache for any subsequent call that wants Unlogged=false.
+		aiDDL := resp.CreateTableDDL
+		execDDL := aiDDL
+		if opts.Unlogged && !strings.Contains(strings.ToUpper(execDDL), "UNLOGGED") {
+			execDDL = strings.Replace(execDDL, "CREATE TABLE", "CREATE UNLOGGED TABLE", 1)
 		}
-		logging.Debug("AI generated DDL for %s (attempt %d):\n%s", t.FullName(), attempt+1, ddl)
+		logging.Debug("AI generated DDL for %s (attempt %d):\n%s", t.FullName(), attempt+1, execDDL)
 		for colName, colType := range resp.ColumnTypes {
 			logging.Debug("  Column %s -> %s", colName, colType)
 		}
 
-		if _, err = w.pool.Exec(ctx, ddl); err == nil {
+		if _, err = w.pool.Exec(ctx, execDDL); err == nil {
 			// Success. If this was a retry, re-prime the AI cache so future
 			// first-try calls for this table-shape get the validated DDL
-			// instead of whatever bad DDL the first attempt cached.
+			// instead of whatever bad DDL the first attempt cached. Cache
+			// the AI-returned form (aiDDL), not the Unlogged-rewritten form.
 			if attempt > 0 {
-				w.tableMapper.CacheTableDDL(req, ddl)
+				w.tableMapper.CacheTableDDL(req, aiDDL)
 				logging.Info("table %s succeeded on retry attempt %d/%d", t.FullName(), attempt, opts.MaxRetries)
 			}
 			return nil
 		}
 
-		lastDDL = ddl
+		lastDDL = execDDL
 		lastErr = err
 		if !isRetryableDDLError(err) {
 			break
