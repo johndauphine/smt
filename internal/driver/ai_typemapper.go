@@ -1562,6 +1562,12 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	if (srcType == "postgres" || srcType == "mysql") && tgtType == "mssql" {
 		sb.WriteString("- MANDATORY: Every VARCHAR column MUST be NVARCHAR, every CHAR column MUST be NCHAR — using VARCHAR will corrupt multi-byte data because VARCHAR uses byte lengths while the source uses character lengths\n")
 	}
+	if srcType == "mssql" && tgtType == "postgres" {
+		sb.WriteString("- MANDATORY: PostgreSQL has no NVARCHAR/NCHAR/NTEXT types. Convert MSSQL national-character types: NVARCHAR(n) -> VARCHAR(n), NCHAR(n) -> CHAR(n), NTEXT -> TEXT, NVARCHAR(MAX) -> TEXT. Emitting NVARCHAR fails with 'type \"nvarchar\" does not exist'.\n")
+	}
+	if srcType == "mssql" && tgtType == "mysql" {
+		sb.WriteString("- MANDATORY: Convert MSSQL national-character types to MySQL standard types: NVARCHAR(n) -> VARCHAR(n), NCHAR(n) -> CHAR(n), NTEXT -> TEXT, NVARCHAR(MAX) -> LONGTEXT. The MySQL table charset (e.g. utf8mb4) already provides Unicode storage.\n")
+	}
 
 	// Reserved words note
 	sb.WriteString("\nReserved words: If any column name is a SQL reserved word, quote it appropriately for the target database.\n")

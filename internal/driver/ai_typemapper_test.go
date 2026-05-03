@@ -1373,6 +1373,85 @@ func TestBuildTableDDLPrompt_SameEngine_NoAnnotations(t *testing.T) {
 	}
 }
 
+func TestBuildTableDDLPrompt_NTypeConversionGuidance(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	tests := []struct {
+		name         string
+		sourceDBType string
+		targetDBType string
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name:         "mssql to postgres mandates nvarchar removal",
+			sourceDBType: "mssql",
+			targetDBType: "postgres",
+			wantContains: []string{
+				"PostgreSQL has no NVARCHAR/NCHAR/NTEXT types",
+				"NVARCHAR(n) -> VARCHAR(n)",
+				"NTEXT -> TEXT",
+			},
+		},
+		{
+			name:         "mssql to mysql mandates nvarchar removal",
+			sourceDBType: "mssql",
+			targetDBType: "mysql",
+			wantContains: []string{
+				"NVARCHAR(n) -> VARCHAR(n)",
+				"NVARCHAR(MAX) -> LONGTEXT",
+			},
+		},
+		{
+			name:         "postgres to mssql still mandates nvarchar use",
+			sourceDBType: "postgres",
+			targetDBType: "mssql",
+			wantContains: []string{
+				"Every VARCHAR column MUST be NVARCHAR",
+			},
+			wantAbsent: []string{
+				"PostgreSQL has no NVARCHAR",
+			},
+		},
+		{
+			name:         "same engine has no nvarchar conversion guidance",
+			sourceDBType: "postgres",
+			targetDBType: "postgres",
+			wantAbsent: []string{
+				"PostgreSQL has no NVARCHAR",
+				"Every VARCHAR column MUST be NVARCHAR",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := TableDDLRequest{
+				SourceDBType: tt.sourceDBType,
+				TargetDBType: tt.targetDBType,
+				SourceTable: &Table{
+					Name: "T",
+					Columns: []Column{
+						{Name: "id", DataType: "int", IsNullable: false},
+					},
+					PrimaryKey: []string{"id"},
+				},
+			}
+			prompt := mapper.buildTableDDLPrompt(req)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("prompt should contain %q\nprompt:\n%s", want, prompt)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(prompt, absent) {
+					t.Errorf("prompt should NOT contain %q\nprompt:\n%s", absent, prompt)
+				}
+			}
+		})
+	}
+}
+
 func TestWriteIdentifierGuidance_SameEngine(t *testing.T) {
 	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
