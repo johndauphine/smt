@@ -1447,71 +1447,47 @@ func TestBuildTableDDLPrompt_NoHardcodedTypeMappings(t *testing.T) {
 	}
 }
 
-func TestWriteIdentifierGuidance_SameEngine(t *testing.T) {
+// The auto-generated identifier guidance was removed because target identifier
+// rules are already covered by:
+//   - REQUIRED TARGET COLUMN NAMES (explicit per-column mapping)
+//   - OUTPUT REQUIREMENTS (explicit fully-qualified target table name)
+//   - Each target dialect's AIPromptAugmentation (case-folding rules)
+// Guard against the auto-generated guidance creeping back in.
+func TestBuildTableDDLPrompt_NoAutoIdentifierRules(t *testing.T) {
 	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
-	tests := []struct {
-		name         string
-		sourceDBType string
-		targetDBType string
-		wantContains []string
-		wantAbsent   []string
-	}{
-		{
-			name:         "same engine preserves identifiers",
-			sourceDBType: "postgres",
-			targetDBType: "postgres",
-			wantContains: []string{
-				"Source and target are the same database engine",
-				"Preserve ALL source column and table names EXACTLY as-is",
-				"user_id -> user_id (NOT userid)",
-				"created_at -> created_at (NOT createdat)",
-			},
-			wantAbsent: []string{
-				"UserId -> userid",
-			},
-		},
-		{
-			name:         "same engine mssql",
-			sourceDBType: "mssql",
-			targetDBType: "mssql",
-			wantContains: []string{
-				"Source and target are the same database engine",
-				"Preserve ALL source column and table names EXACTLY as-is",
-			},
-			wantAbsent: []string{
-				"UserId -> userid",
-			},
-		},
-		{
-			name:         "cross engine uses lowercase guidance",
-			sourceDBType: "mssql",
-			targetDBType: "postgres",
-			wantContains: []string{
-				"Unquoted identifiers are folded to lowercase",
-				"UserId -> userid",
-			},
-			wantAbsent: []string{
-				"Source and target are the same database engine",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var sb strings.Builder
-			ctx := &DatabaseContext{IdentifierCase: "lower"}
-			mapper.writeIdentifierGuidance(&sb, ctx, tt.sourceDBType, tt.targetDBType)
-			result := sb.String()
-
-			for _, want := range tt.wantContains {
-				if !strings.Contains(result, want) {
-					t.Errorf("expected guidance to contain %q, got:\n%s", want, result)
-				}
+	for _, pair := range []struct{ src, tgt string }{
+		{"mssql", "postgres"},
+		{"postgres", "mssql"},
+		{"mysql", "postgres"},
+		{"postgres", "postgres"},
+		{"mssql", "mssql"},
+	} {
+		t.Run(pair.src+"_to_"+pair.tgt, func(t *testing.T) {
+			req := TableDDLRequest{
+				SourceDBType: pair.src,
+				TargetDBType: pair.tgt,
+				TargetContext: &DatabaseContext{
+					IdentifierCase: "lower", // would have triggered the deleted block
+				},
+				SourceTable: &Table{
+					Name:       "T",
+					Columns:    []Column{{Name: "id", DataType: "int", IsNullable: false}},
+					PrimaryKey: []string{"id"},
+				},
 			}
-			for _, absent := range tt.wantAbsent {
-				if strings.Contains(result, absent) {
-					t.Errorf("expected guidance NOT to contain %q, got:\n%s", absent, result)
+			prompt := mapper.buildTableDDLPrompt(req)
+
+			forbidden := []string{
+				"Unquoted identifiers are folded to lowercase",
+				"Use lowercase for all table and column names",
+				"Do NOT convert to snake_case",
+				"Source and target are the same database engine",
+				"Preserve ALL source column and table names EXACTLY as-is",
+			}
+			for _, f := range forbidden {
+				if strings.Contains(prompt, f) {
+					t.Errorf("prompt contains auto-generated identifier rule %q — let the dialect or REQUIRED TARGET COLUMN NAMES be the voice on identifiers", f)
 				}
 			}
 		})

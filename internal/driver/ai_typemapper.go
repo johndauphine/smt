@@ -1541,12 +1541,15 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 
 	sb.WriteString("\n")
 
-	// Target database rules - derived from TargetContext
+	// Target database rules - derived from TargetContext.
+	// Identifier rules deliberately omitted: target column names are pre-resolved
+	// in REQUIRED TARGET COLUMN NAMES, the target table name is given in OUTPUT
+	// REQUIRED, and the target dialect's AIPromptAugmentation supplies any
+	// dialect-specific case-folding rules.
 	sb.WriteString("Target database rules:\n")
 	if req.TargetContext != nil {
 		m.writeVarcharGuidance(sb, req.TargetContext, "target")
 		m.writeEncodingGuidance(sb, req.TargetContext, "target")
-		m.writeIdentifierGuidance(sb, req.TargetContext, req.SourceDBType, req.TargetDBType)
 		m.writeLimitsGuidance(sb, req.TargetContext)
 	} else {
 		sb.WriteString("- No target context available, use standard type mappings\n")
@@ -1621,36 +1624,6 @@ func (m *AITypeMapper) writeEncodingGuidance(sb *strings.Builder, ctx *DatabaseC
 	}
 	if ctx.Encoding != "" && ctx.Encoding != ctx.Charset {
 		sb.WriteString(fmt.Sprintf("- Encoding: %s\n", ctx.Encoding))
-	}
-}
-
-// writeIdentifierGuidance writes identifier handling guidance based on context.
-func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *DatabaseContext, sourceDBType, targetDBType string) {
-	if ctx.IdentifierCase != "" {
-		switch strings.ToLower(ctx.IdentifierCase) {
-		case "upper":
-			sb.WriteString("- CRITICAL: Unquoted identifiers are folded to UPPERCASE\n")
-			sb.WriteString("- Use UPPERCASE for all unquoted table and column names\n")
-			sb.WriteString("- Only quote identifiers that are reserved words\n")
-		case "lower":
-			if Canonicalize(sourceDBType) == Canonicalize(targetDBType) {
-				sb.WriteString("- CRITICAL: Source and target are the same database engine\n")
-				sb.WriteString("- Preserve ALL source column and table names EXACTLY as-is, including underscores\n")
-				sb.WriteString("- Do NOT remove, add, or modify any characters in identifier names\n")
-				sb.WriteString("- Example: user_id -> user_id (NOT userid)\n")
-				sb.WriteString("- Example: created_at -> created_at (NOT createdat)\n")
-			} else {
-				sb.WriteString("- CRITICAL: Unquoted identifiers are folded to lowercase\n")
-				sb.WriteString("- Use lowercase for all table and column names (e.g., UserId -> userid, not user_id)\n")
-				sb.WriteString("- Do NOT convert to snake_case - just lowercase the original name directly\n")
-			}
-		case "preserve":
-			sb.WriteString("- Identifier case is preserved as written\n")
-		}
-	}
-
-	if ctx.CaseSensitiveIdentifiers {
-		sb.WriteString("- Identifiers are case-sensitive when quoted\n")
 	}
 }
 
