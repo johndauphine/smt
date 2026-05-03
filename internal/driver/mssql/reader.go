@@ -206,7 +206,8 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			ISNULL(NUMERIC_SCALE, 0),
 			CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
 			COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity'),
-			ORDINAL_POSITION
+			ORDINAL_POSITION,
+			ISNULL(COLUMN_DEFAULT, '')
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
 		ORDER BY ORDINAL_POSITION
@@ -220,12 +221,67 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var col driver.Column
 		var isNullable, isIdentity int
-		if err := rows.Scan(&col.Name, &col.DataType, &col.MaxLength, &col.Precision, &col.Scale, &isNullable, &isIdentity, &col.OrdinalPos); err != nil {
+		if err := rows.Scan(&col.Name, &col.DataType, &col.MaxLength, &col.Precision, &col.Scale, &isNullable, &isIdentity, &col.OrdinalPos, &col.DefaultExpression); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
 		col.IsNullable = isNullable == 1
 		col.IsIdentity = isIdentity == 1
 		t.Columns = append(t.Columns, col)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating columns: %w", err)
+	}
+
+	if err := r.loadComputedColumns(ctx, t); err != nil {
+		return fmt.Errorf("loading computed columns: %w", err)
+	}
+
+	return nil
+}
+
+// loadComputedColumns annotates t.Columns with computed-column metadata.
+// MSSQL stores computed-column definitions in sys.computed_columns; INFORMATION_SCHEMA
+// has no equivalent.
+func (r *Reader) loadComputedColumns(ctx context.Context, t *driver.Table) error {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT cc.name, cc.definition, cc.is_persisted
+		FROM sys.computed_columns cc
+		JOIN sys.tables tb ON cc.object_id = tb.object_id
+		JOIN sys.schemas s ON tb.schema_id = s.schema_id
+		WHERE s.name = @schema AND tb.name = @table
+	`, sql.Named("schema", t.Schema), sql.Named("table", t.Name))
+	if err != nil {
+		return fmt.Errorf("querying computed columns: %w", err)
+	}
+	defer rows.Close()
+
+	computed := make(map[string]struct {
+		def       string
+		persisted bool
+	})
+	for rows.Next() {
+		var name, def string
+		var persisted bool
+		if err := rows.Scan(&name, &def, &persisted); err != nil {
+			return fmt.Errorf("scanning computed column: %w", err)
+		}
+		computed[name] = struct {
+			def       string
+			persisted bool
+		}{def, persisted}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating computed columns: %w", err)
+	}
+
+	for i := range t.Columns {
+		if c, ok := computed[t.Columns[i].Name]; ok {
+			t.Columns[i].IsComputed = true
+			t.Columns[i].ComputedExpression = c.def
+			t.Columns[i].ComputedPersisted = c.persisted
+			// Computed columns don't have meaningful DEFAULT clauses
+			t.Columns[i].DefaultExpression = ""
+		}
 	}
 
 	return nil

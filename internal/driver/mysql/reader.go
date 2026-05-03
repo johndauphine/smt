@@ -203,7 +203,10 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			COALESCE(NUMERIC_SCALE, 0),
 			CASE WHEN IS_NULLABLE = 'YES' THEN true ELSE false END,
 			CASE WHEN EXTRA LIKE '%auto_increment%' THEN true ELSE false END,
-			ORDINAL_POSITION
+			ORDINAL_POSITION,
+			COALESCE(COLUMN_DEFAULT, ''),
+			COALESCE(EXTRA, ''),
+			COALESCE(GENERATION_EXPRESSION, '')
 		FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION
@@ -215,9 +218,19 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 
 	for rows.Next() {
 		var c driver.Column
+		var extra, generationExpr string
 		if err := rows.Scan(&c.Name, &c.DataType, &c.MaxLength, &c.Precision, &c.Scale,
-			&c.IsNullable, &c.IsIdentity, &c.OrdinalPos); err != nil {
+			&c.IsNullable, &c.IsIdentity, &c.OrdinalPos,
+			&c.DefaultExpression, &extra, &generationExpr); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
+		}
+		// MySQL signals generated columns via EXTRA: "VIRTUAL GENERATED" or "STORED GENERATED".
+		if strings.Contains(extra, "GENERATED") {
+			c.IsComputed = true
+			c.ComputedExpression = generationExpr
+			c.ComputedPersisted = strings.Contains(extra, "STORED")
+			// generated columns can't have a regular DEFAULT
+			c.DefaultExpression = ""
 		}
 		t.Columns = append(t.Columns, c)
 	}
