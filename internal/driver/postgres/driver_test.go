@@ -23,17 +23,7 @@ import (
 // branches are present so the modern query keeps the new is_identity
 // check and the legacy query stays as a safety net.
 func TestLoadColumnsSQL_DetectsModernIdentity(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed; cannot locate reader.go")
-	}
-	readerFile := filepath.Join(filepath.Dir(thisFile), "reader.go")
-	src, err := os.ReadFile(readerFile)
-	if err != nil {
-		t.Fatalf("read reader.go: %v", err)
-	}
-
-	body := string(src)
+	body := readReaderSource(t)
 	for _, needle := range []string{
 		"is_identity = 'YES'",            // modern (PG 10+) covers GENERATED ... AS IDENTITY
 		"column_default LIKE 'nextval%'", // legacy (PG 9.x) covers SERIAL / BIGSERIAL
