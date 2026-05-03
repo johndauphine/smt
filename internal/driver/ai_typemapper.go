@@ -1556,17 +1556,13 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	sb.WriteString("\nConversion guidance:\n")
 	m.writeConversionGuidance(sb, req.SourceContext, req.TargetContext)
 
-	// NVARCHAR guidance based on DB types — fires even when SourceContext is nil
-	srcType := Canonicalize(req.SourceDBType)
-	tgtType := Canonicalize(req.TargetDBType)
-	if (srcType == "postgres" || srcType == "mysql") && tgtType == "mssql" {
-		sb.WriteString("- MANDATORY: Every VARCHAR column MUST be NVARCHAR, every CHAR column MUST be NCHAR — using VARCHAR will corrupt multi-byte data because VARCHAR uses byte lengths while the source uses character lengths\n")
-	}
-	if srcType == "mssql" && tgtType == "postgres" {
-		sb.WriteString("- MANDATORY: PostgreSQL has no NVARCHAR/NCHAR/NTEXT types. Convert MSSQL national-character types: NVARCHAR(n) -> VARCHAR(n), NCHAR(n) -> CHAR(n), NTEXT -> TEXT, NVARCHAR(MAX) -> TEXT. Emitting NVARCHAR fails with 'type \"nvarchar\" does not exist'.\n")
-	}
-	if srcType == "mssql" && tgtType == "mysql" {
-		sb.WriteString("- MANDATORY: Convert MSSQL national-character types to MySQL standard types: NVARCHAR(n) -> VARCHAR(n), NCHAR(n) -> CHAR(n), NTEXT -> TEXT, NVARCHAR(MAX) -> LONGTEXT. The MySQL table charset (e.g. utf8mb4) already provides Unicode storage.\n")
+	// Type validity is the AI's job — SMT does not maintain a per-pair translation
+	// table. State the invariant once: every emitted type must exist in the target.
+	if Canonicalize(req.SourceDBType) != Canonicalize(req.TargetDBType) {
+		sb.WriteString("\nType validity (MANDATORY):\n")
+		sb.WriteString("- Every column type in the output CREATE TABLE must be a real, valid type in the target database. Do not pass through a source-only keyword (e.g. MSSQL NVARCHAR/NCHAR/NTEXT/UNIQUEIDENTIFIER/DATETIMEOFFSET, MySQL ENUM/SET/MEDIUMTEXT, PostgreSQL TEXT[]/JSONB).\n")
+		sb.WriteString("- For each source type, choose the target's closest semantic equivalent in storage class, length, precision, signedness, timezone-awareness, and Unicode capability. If the target charset already provides Unicode storage, prefer the standard type over a national-character variant.\n")
+		sb.WriteString("- If unsure whether a keyword is valid in the target, pick the safest standard SQL type that preserves semantics. Never invent a type name.\n")
 	}
 
 	// Reserved words note
