@@ -1533,6 +1533,7 @@ func (m *AITypeMapper) writeContextDetails(sb *strings.Builder, ctx *DatabaseCon
 
 // writeMigrationRules writes migration guidance derived dynamically from database context.
 // All rules are generated from runtime metadata - no hardcoded database-specific rules.
+// Per-target dialect gotchas live in each driver's Dialect.AIPromptAugmentation, not here.
 func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequest) {
 	// Source database characteristics - derived from SourceContext
 	sb.WriteString("Source database characteristics:\n")

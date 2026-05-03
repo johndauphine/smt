@@ -70,3 +70,27 @@ func TestAIPromptAugmentation_VarcharLengthAndCharset(t *testing.T) {
 		}
 	}
 }
+
+// TestAIPromptAugmentation_FractionalSecondPrecision is the regression test
+// for issue #19. The mssql → mysql pair on the CRM fixture used to fail at
+// the first table containing `DATETIME2(N) DEFAULT GETUTCDATE()` because the
+// AI emitted `DATETIME(N) DEFAULT CURRENT_TIMESTAMP` (no precision argument
+// on the default), which MySQL rejects with `Error 1067 (42000): Invalid
+// default value`. The rule lives in the MySQL dialect's prompt augmentation
+// (not in the central writeMigrationRules) because it's mysql-specific.
+func TestAIPromptAugmentation_FractionalSecondPrecision(t *testing.T) {
+	d := &Dialect{}
+	aug := d.AIPromptAugmentation()
+
+	for _, needle := range []string{
+		"fractional-second precision",
+		"scale > 0`",
+		"DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+		"error 1067",
+		"function defaults; literal-value defaults are unaffected",
+	} {
+		if !strings.Contains(aug, needle) {
+			t.Errorf("prompt missing required phrase %q", needle)
+		}
+	}
+}

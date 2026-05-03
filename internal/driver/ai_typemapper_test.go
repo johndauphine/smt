@@ -1334,7 +1334,7 @@ func TestBuildTableDDLPrompt_IncludesTargetColumnNames(t *testing.T) {
 		"CustomerID -> customerid",
 		"PackedByPersonID -> packedbypersonid",
 		"EXACT column names",
-		"sales.invoices",                          // target table name should be lowercased
+		"sales.invoices",                                // target table name should be lowercased
 		"=== SOURCE TABLE (introspection metadata) ===", // structured facts replace SOURCE TABLE DDL
 	}
 	for _, check := range checks {
@@ -1451,6 +1451,7 @@ func TestBuildTableDDLPrompt_NoHardcodedTypeMappings(t *testing.T) {
 //   - REQUIRED TARGET COLUMN NAMES (explicit per-column mapping)
 //   - OUTPUT REQUIREMENTS (explicit fully-qualified target table name)
 //   - Each target dialect's AIPromptAugmentation (case-folding rules)
+//
 // Guard against the auto-generated guidance creeping back in.
 func TestBuildTableDDLPrompt_NoAutoIdentifierRules(t *testing.T) {
 	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
@@ -1679,7 +1680,7 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				IsComputed: true, ComputedExpression: "quantity * unit_price",
 				ComputedPersisted: true,
 			},
-			sourceDB:    "mssql",
+			sourceDB: "mssql",
 			// Empty DataType surfaces explicitly so the AI knows to infer it.
 			wantContain: []string{`"data_type":"(inferred)"`, `"computed_expression":"quantity * unit_price"`, `"computed_storage":"STORED"`},
 		},
@@ -1697,7 +1698,7 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 			col: Column{
 				Name: "notes", DataType: "nvarchar", MaxLength: -1, IsNullable: true,
 			},
-			sourceDB:    "mssql",
+			sourceDB: "mssql",
 			// Sentinel -1 surfaced as the string "MAX" so the model never sees the
 			// magic-number convention.
 			wantContain: []string{`"data_type":"nvarchar"`, `"max_length":"MAX"`},
@@ -1719,11 +1720,11 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 			name: "computed expression with newline must be JSON-escaped",
 			col: Column{
 				Name: "summary", DataType: "text", IsNullable: true,
-				IsComputed:        true,
+				IsComputed:         true,
 				ComputedExpression: "first_line\nsecond_line",
-				ComputedPersisted: true,
+				ComputedPersisted:  true,
 			},
-			sourceDB:    "postgres",
+			sourceDB: "postgres",
 			// JSON encodes the literal newline as \n (two chars in the output).
 			wantContain: []string{`"computed_expression":"first_line\nsecond_line"`},
 		},
