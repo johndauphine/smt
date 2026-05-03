@@ -271,6 +271,16 @@ CRITICAL SQL Server NVARCHAR length rules:
   code page (1-2 bytes per character depending on collation). Inserting Unicode
   text that has no mapping in the code page is silently lossy — characters
   become ` + "`?`" + `. NVARCHAR uses UTF-16 and round-trips Unicode safely.
+
+CRITICAL SQL Server computed column nullability rule:
+- Computed columns (` + "`<col> AS (<expr>) PERSISTED`" + `) are implicitly nullable in SQL
+  Server — their nullability is derived from the expression. NEVER append ` + "`NULL`" + ` or
+  ` + "`NOT NULL`" + ` after ` + "`PERSISTED`" + ` (or after the expression in a non-persisted form).
+- Wrong: ` + "`line_total AS (qty * unit_price) PERSISTED NULL`" + `  (parser error)
+- Wrong: ` + "`line_total AS (qty * unit_price) PERSISTED NOT NULL`" + `  (parser error)
+- Right: ` + "`line_total AS (qty * unit_price) PERSISTED`" + `
+- If the source introspection metadata reports ` + "`nullable: false`" + ` on a computed
+  column, do not translate that into a nullability suffix — emit just the AS form.
 `
 }
 

@@ -128,3 +128,28 @@ func readReaderSource(t *testing.T) string {
 	}
 	return string(src)
 }
+
+// TestAIPromptAugmentation_ExpressionDefaultParens is the regression test for
+// two failure modes seen running gpt-oss-20b end-to-end against the CRM
+// fixture: `DEFAULT UUID()` (Error 1064 syntax error) and `JSON DEFAULT '{}'`
+// (Error 1101, JSON column can't have default in pre-8.0.13 form). MySQL
+// 8.0.13+ allows arbitrary expression defaults but requires them to be
+// parenthesized. This is a general dialect rule (not a per-model workaround)
+// and applies to any AI model translating to MySQL targets.
+func TestAIPromptAugmentation_ExpressionDefaultParens(t *testing.T) {
+	d := &Dialect{}
+	aug := d.AIPromptAugmentation()
+
+	for _, needle := range []string{
+		"expression-default parenthesization",
+		"DEFAULT (UUID())`", // canonical right form
+		"DEFAULT (JSON_OBJECT())`",
+		"Error 1064",        // bare-function syntax error
+		"Error 1101",        // pre-8.0.13 JSON-default rejection
+		"CURRENT_TIMESTAMP", // documented exception
+	} {
+		if !strings.Contains(aug, needle) {
+			t.Errorf("prompt missing required phrase %q", needle)
+		}
+	}
+}
