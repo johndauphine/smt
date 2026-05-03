@@ -1422,7 +1422,7 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	sb.WriteString("- Use the EXACT column names from the REQUIRED TARGET COLUMN NAMES section above\n")
 	sb.WriteString("- Include all columns with appropriate target types\n")
 
-	sb.WriteString("- Preserve nullability exactly as shown in the source DDL — keep NOT NULL where present, allow NULL where absent. SMT migrates schema, not data; do not relax nullability for loading flexibility.\n")
+	sb.WriteString("- Preserve nullability exactly as reported in the introspection metadata — emit NOT NULL when nullable=false, allow NULL when nullable=true. SMT migrates schema, not data; do not relax nullability for loading flexibility.\n")
 	sb.WriteString("- Primary key columns must be NOT NULL\n")
 	sb.WriteString("- Include PRIMARY KEY constraint\n")
 	sb.WriteString("- Do NOT include foreign keys (created separately in Finalize)\n")
@@ -1575,21 +1575,22 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	// Reserved words note
 	sb.WriteString("\nReserved words: If any column name is a SQL reserved word, quote it appropriately for the target database.\n")
 
-	// Column-attribute preservation rules. The source DDL above already shows NOT NULL,
-	// DEFAULT, and AS (...) for every column that has them — these rules force the AI
-	// to carry them through to the target instead of silently dropping them.
+	// Column-attribute preservation rules. The introspection block above
+	// reports nullable, default_expression, computed/computed_expression for
+	// every column that has them — these rules force the AI to carry them
+	// through to the target instead of silently dropping them.
 	sb.WriteString("\nColumn-attribute preservation:\n")
-	sb.WriteString("- Preserve every NOT NULL constraint shown in the source DDL. Do not change a NOT NULL column to nullable.\n")
-	sb.WriteString("- Preserve every DEFAULT clause shown in the source DDL. Translate dialect-specific function defaults to the target's equivalent:\n")
+	sb.WriteString("- Preserve every NOT NULL constraint (nullable=false in the introspection metadata). Do not change a non-nullable column to nullable.\n")
+	sb.WriteString("- Preserve every default_expression reported in the introspection metadata. Translate dialect-specific function defaults to the target's equivalent:\n")
 	sb.WriteString("  * GETDATE() / GETUTCDATE() / SYSDATETIMEOFFSET() / SYSDATETIME() (MSSQL) -> CURRENT_TIMESTAMP (postgres/mysql)\n")
 	sb.WriteString("  * NEWID() (MSSQL) -> gen_random_uuid() (postgres) -> UUID() (mysql)\n")
 	sb.WriteString("  * Strip outer parentheses MSSQL adds around literal defaults: ((0)) -> 0, ((1)) -> 1, ('pending') -> 'pending'\n")
 	sb.WriteString("  * Cast literals if the target type requires it (e.g. PG bit -> boolean: ((1)) -> true)\n")
-	sb.WriteString("- Computed columns appear in the source DDL as `<type> AS (expression) STORED` (persisted/computed result is materialized) or `<type> AS (expression) VIRTUAL` (computed on read; MySQL only). Translate to the target's generated-column syntax:\n")
+	sb.WriteString("- Computed columns appear in the introspection metadata as `computed: true` with a `computed_expression` and `computed_storage` of STORED or VIRTUAL. Translate to the target's generated-column syntax:\n")
 	sb.WriteString("  * postgres: <type> GENERATED ALWAYS AS (expression) STORED  (PG only supports STORED; if source is VIRTUAL, emit STORED)\n")
 	sb.WriteString("  * mysql:    <type> GENERATED ALWAYS AS (expression) STORED  (or VIRTUAL — preserve the source storage hint)\n")
-	sb.WriteString("  * mssql:    AS (expression) PERSISTED  (MSSQL infers type; persisted = STORED)\n")
-	sb.WriteString("  * If the source column shows no explicit type (MSSQL computed columns may omit it), infer the type from the expression and source columns.\n")
+	sb.WriteString("  * mssql:    AS (expression) PERSISTED  (MSSQL infers type; persisted = STORED). Do NOT include the column type before AS — MSSQL forbids it on computed columns.\n")
+	sb.WriteString("  * If the source data_type is reported as `(inferred)` (MSSQL computed columns may omit it), infer the type from the expression and source columns.\n")
 	sb.WriteString("  * Translate dialect-specific functions inside the expression too (e.g. CAST(x AS VARCHAR(10)) is portable; ISNULL(a,b) (MSSQL) -> COALESCE(a,b))\n")
 }
 
@@ -1717,11 +1718,17 @@ func targetIdentifier(name, targetDBType string) string {
 // max_length, precision, scale, nullability, identity, default expression,
 // computed expression) and uses its own dialect knowledge to interpret them.
 //
-// Default-valued attributes are suppressed (no `is_identity: false` line for
-// non-identity columns) to keep the prompt scannable. The dialect label tells
-// the model how to read the facts (e.g. "max_length: -1" → MAX in MSSQL,
-// "data_type: int + precision: 10" → bare INT in MSSQL because INT takes no
-// precision arg there).
+// Each column is emitted as a single JSON object on its own line. JSON is
+// chosen over a comma-separated key:value form because default_expression
+// and computed_expression are raw SQL fragments that can legitimately
+// contain commas, quotes, parentheses, or newlines (e.g. literal defaults
+// like 'a, b' or multi-line CHECK predicates) — encoding/json handles all
+// the escaping. Models parse JSON-per-line fluently.
+//
+// Optional fields are omitted when zero/empty so the line stays compact.
+// MSSQL's MAX-length sentinel (MaxLength=-1) is surfaced as the string
+// "MAX" rather than -1 so the model doesn't have to know the sentinel
+// convention.
 func buildSourceIntrospectionBlock(t *Table, sourceDBType string) string {
 	var sb strings.Builder
 
@@ -1738,54 +1745,18 @@ func buildSourceIntrospectionBlock(t *Table, sourceDBType string) string {
 	sb.WriteString(t.Name)
 	sb.WriteString("\n\n")
 
-	sb.WriteString("columns (in ordinal position):\n")
+	sb.WriteString("columns (in ordinal position, one JSON object per line):\n")
 	for _, col := range t.Columns {
-		sb.WriteString("- name: ")
-		sb.WriteString(col.Name)
-		sb.WriteString(", data_type: ")
-		// Computed columns may have empty DataType in MSSQL (type is inferred
-		// from the expression). Surface the empty value explicitly so the AI
-		// knows to infer it from computed_expression.
-		if col.DataType == "" {
-			sb.WriteString("(inferred)")
-		} else {
-			sb.WriteString(col.DataType)
+		row := columnIntrospection(col)
+		// Marshal errors here would mean a bug in our own struct shape — fall
+		// back to a literal { } string rather than panic; tests will catch it.
+		buf, err := json.Marshal(row)
+		if err != nil {
+			sb.WriteString("  {}\n")
+			continue
 		}
-		if col.MaxLength == -1 {
-			sb.WriteString(", max_length: MAX")
-		} else if col.MaxLength > 0 {
-			sb.WriteString(fmt.Sprintf(", max_length: %d", col.MaxLength))
-		}
-		if col.Precision > 0 {
-			sb.WriteString(fmt.Sprintf(", precision: %d", col.Precision))
-		}
-		if col.Scale > 0 {
-			sb.WriteString(fmt.Sprintf(", scale: %d", col.Scale))
-		}
-		if col.IsNullable {
-			sb.WriteString(", nullable: true")
-		} else {
-			sb.WriteString(", nullable: false")
-		}
-		if col.IsIdentity {
-			sb.WriteString(", identity: true")
-		}
-		if col.DefaultExpression != "" {
-			sb.WriteString(", default_expression: ")
-			sb.WriteString(col.DefaultExpression)
-		}
-		if col.IsComputed {
-			sb.WriteString(", computed: true")
-			if col.ComputedExpression != "" {
-				sb.WriteString(", computed_expression: ")
-				sb.WriteString(col.ComputedExpression)
-			}
-			if col.ComputedPersisted {
-				sb.WriteString(", computed_storage: STORED")
-			} else {
-				sb.WriteString(", computed_storage: VIRTUAL")
-			}
-		}
+		sb.WriteString("  ")
+		sb.Write(buf)
 		sb.WriteString("\n")
 	}
 
@@ -1796,6 +1767,55 @@ func buildSourceIntrospectionBlock(t *Table, sourceDBType string) string {
 	}
 
 	return sb.String()
+}
+
+// columnIntrospection builds the per-column JSON-marshalable shape used in
+// the introspection block. Optional attributes use omitempty so a non-identity
+// column doesn't carry an "identity":false key, etc. — keeps the line short.
+// MaxLength is rendered as a string ("MAX" or a decimal) so we can surface
+// the MSSQL MaxLength=-1 sentinel as "MAX" without exposing the magic number.
+func columnIntrospection(col Column) map[string]any {
+	m := map[string]any{
+		"name":     col.Name,
+		"nullable": col.IsNullable,
+	}
+	if col.DataType == "" {
+		// MSSQL computed columns can omit the declared type; surface that
+		// explicitly so the model knows to infer it from computed_expression.
+		m["data_type"] = "(inferred)"
+	} else {
+		m["data_type"] = col.DataType
+	}
+	switch {
+	case col.MaxLength == -1:
+		m["max_length"] = "MAX"
+	case col.MaxLength > 0:
+		m["max_length"] = col.MaxLength
+	}
+	if col.Precision > 0 {
+		m["precision"] = col.Precision
+	}
+	if col.Scale > 0 {
+		m["scale"] = col.Scale
+	}
+	if col.IsIdentity {
+		m["identity"] = true
+	}
+	if col.DefaultExpression != "" {
+		m["default_expression"] = col.DefaultExpression
+	}
+	if col.IsComputed {
+		m["computed"] = true
+		if col.ComputedExpression != "" {
+			m["computed_expression"] = col.ComputedExpression
+		}
+		if col.ComputedPersisted {
+			m["computed_storage"] = "STORED"
+		} else {
+			m["computed_storage"] = "VIRTUAL"
+		}
+	}
+	return m
 }
 
 // parseTableDDLResponse extracts the DDL and column types from AI response.

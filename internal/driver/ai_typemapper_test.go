@@ -1597,6 +1597,11 @@ func TestOpenAIResponse_ErrorMessage(t *testing.T) {
 // table — there is no Go-rendered source DDL anymore. If a fact (default,
 // computed expression, identity flag, MAX length) doesn't make it into this
 // block the AI has no way to surface it in target DDL.
+//
+// Each column is emitted as a JSON object — assertions are on JSON-shaped
+// substrings ("data_type":"int") rather than k:v pairs. JSON was chosen
+// because default_expression and computed_expression are raw SQL fragments
+// that may contain commas/newlines/quotes; encoding/json handles escaping.
 func TestBuildSourceIntrospectionBlock(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1612,8 +1617,8 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				DefaultExpression: "((1))",
 			},
 			sourceDB:    "mssql",
-			wantContain: []string{"name: is_active", "data_type: bit", "nullable: false", "default_expression: ((1))"},
-			notContain:  []string{"identity: true"},
+			wantContain: []string{`"name":"is_active"`, `"data_type":"bit"`, `"nullable":false`, `"default_expression":"((1))"`},
+			notContain:  []string{`"identity":true`},
 		},
 		{
 			name: "function default — GETUTCDATE",
@@ -1622,7 +1627,7 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				DefaultExpression: "(getutcdate())",
 			},
 			sourceDB:    "mssql",
-			wantContain: []string{"data_type: datetime2", "default_expression: (getutcdate())"},
+			wantContain: []string{`"data_type":"datetime2"`, `"default_expression":"(getutcdate())"`},
 		},
 		{
 			name: "MSSQL identity — precision is reported as a fact, AI decides what to do with it",
@@ -1631,10 +1636,8 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				IsIdentity: true,
 			},
 			sourceDB:    "mssql",
-			// AI knows mssql int takes no precision arg; we still surface the
-			// precision fact because some types (datetime2, decimal) need it.
-			wantContain: []string{"name: id", "data_type: int", "precision: 10", "nullable: false", "identity: true"},
-			notContain:  []string{"default_expression"},
+			wantContain: []string{`"name":"id"`, `"data_type":"int"`, `"precision":10`, `"nullable":false`, `"identity":true`},
+			notContain:  []string{`"default_expression"`},
 		},
 		{
 			name: "PG identity — DefaultExpression must be cleared by reader so block is clean",
@@ -1644,8 +1647,8 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				DefaultExpression: "",
 			},
 			sourceDB:    "postgres",
-			wantContain: []string{"data_type: int4", "identity: true"},
-			notContain:  []string{"default_expression"},
+			wantContain: []string{`"data_type":"int4"`, `"identity":true`},
+			notContain:  []string{`"default_expression"`},
 		},
 		{
 			name: "computed STORED with explicit type",
@@ -1655,8 +1658,8 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				ComputedPersisted: true,
 			},
 			sourceDB:    "postgres",
-			wantContain: []string{"computed: true", "computed_expression: first_name || ' ' || last_name", "computed_storage: STORED"},
-			notContain:  []string{"computed_storage: VIRTUAL"},
+			wantContain: []string{`"computed":true`, `"computed_expression":"first_name || ' ' || last_name"`, `"computed_storage":"STORED"`},
+			notContain:  []string{`"computed_storage":"VIRTUAL"`},
 		},
 		{
 			name: "computed VIRTUAL with type (MySQL)",
@@ -1666,8 +1669,8 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				ComputedPersisted: false,
 			},
 			sourceDB:    "mysql",
-			wantContain: []string{"data_type: decimal", "precision: 8", "scale: 4", "computed: true", "computed_storage: VIRTUAL"},
-			notContain:  []string{"computed_storage: STORED"},
+			wantContain: []string{`"data_type":"decimal"`, `"precision":8`, `"scale":4`, `"computed":true`, `"computed_storage":"VIRTUAL"`},
+			notContain:  []string{`"computed_storage":"STORED"`},
 		},
 		{
 			name: "computed with no type (MSSQL inferred)",
@@ -1676,9 +1679,9 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				IsComputed: true, ComputedExpression: "quantity * unit_price",
 				ComputedPersisted: true,
 			},
-			sourceDB: "mssql",
+			sourceDB:    "mssql",
 			// Empty DataType surfaces explicitly so the AI knows to infer it.
-			wantContain: []string{"data_type: (inferred)", "computed_expression: quantity * unit_price", "computed_storage: STORED"},
+			wantContain: []string{`"data_type":"(inferred)"`, `"computed_expression":"quantity * unit_price"`, `"computed_storage":"STORED"`},
 		},
 		{
 			name: "nullable column with length",
@@ -1686,8 +1689,8 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				Name: "phone", DataType: "varchar", MaxLength: 50, IsNullable: true,
 			},
 			sourceDB:    "mssql",
-			wantContain: []string{"data_type: varchar", "max_length: 50", "nullable: true"},
-			notContain:  []string{"identity", "default_expression", "computed"},
+			wantContain: []string{`"data_type":"varchar"`, `"max_length":50`, `"nullable":true`},
+			notContain:  []string{`"identity"`, `"default_expression"`, `"computed"`},
 		},
 		{
 			name: "MSSQL nvarchar(MAX) sentinel",
@@ -1695,8 +1698,34 @@ func TestBuildSourceIntrospectionBlock(t *testing.T) {
 				Name: "notes", DataType: "nvarchar", MaxLength: -1, IsNullable: true,
 			},
 			sourceDB:    "mssql",
-			wantContain: []string{"data_type: nvarchar", "max_length: MAX"},
-			notContain:  []string{"max_length: -1"}, // sentinel translated to MAX, not raw -1
+			// Sentinel -1 surfaced as the string "MAX" so the model never sees the
+			// magic-number convention.
+			wantContain: []string{`"data_type":"nvarchar"`, `"max_length":"MAX"`},
+			notContain:  []string{`"max_length":-1`},
+		},
+		{
+			name: "default expression containing comma — JSON encoding must escape it",
+			col: Column{
+				// Real-world: MSSQL ((CAST('a, b' AS varchar))) or MySQL DEFAULT ('a,b').
+				// Comma-delimited k:v emission would split this; JSON keeps it intact.
+				Name: "label", DataType: "varchar", MaxLength: 50, IsNullable: false,
+				DefaultExpression: "('a, b')",
+			},
+			sourceDB:    "mssql",
+			wantContain: []string{`"default_expression":"('a, b')"`},
+			notContain:  []string{`"default_expression":"('a"`}, // would appear if comma split the line
+		},
+		{
+			name: "computed expression with newline must be JSON-escaped",
+			col: Column{
+				Name: "summary", DataType: "text", IsNullable: true,
+				IsComputed:        true,
+				ComputedExpression: "first_line\nsecond_line",
+				ComputedPersisted: true,
+			},
+			sourceDB:    "postgres",
+			// JSON encodes the literal newline as \n (two chars in the output).
+			wantContain: []string{`"computed_expression":"first_line\nsecond_line"`},
 		},
 	}
 
@@ -1742,7 +1771,7 @@ func TestBuildSourceIntrospectionBlock_HeaderAndPrimaryKey(t *testing.T) {
 		"source_dialect: mssql",
 		"schema: dbo",
 		"table: Orders",
-		"columns (in ordinal position):",
+		"columns (in ordinal position, one JSON object per line):",
 		"primary_key: (order_id)",
 	} {
 		if !strings.Contains(got, want) {
