@@ -1346,8 +1346,9 @@ func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 		req.SourceDBType, req.TargetDBType, req.TargetSchema, req.SourceTable.Schema, req.SourceTable.Name))
 
 	for _, col := range req.SourceTable.Columns {
-		sb.WriteString(fmt.Sprintf("%s:%s:%d:%d:%d:%v;",
-			col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, col.IsNullable))
+		sb.WriteString(fmt.Sprintf("%s:%s:%d:%d:%d:%v:%v:%s:%v:%s;",
+			col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, col.IsNullable,
+			col.IsIdentity, col.DefaultExpression, col.IsComputed, col.ComputedExpression))
 	}
 
 	// Add PK info
@@ -1417,7 +1418,7 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	sb.WriteString("- Use the EXACT column names from the REQUIRED TARGET COLUMN NAMES section above\n")
 	sb.WriteString("- Include all columns with appropriate target types\n")
 
-	sb.WriteString("- Make ALL non-primary-key columns nullable (omit NOT NULL) to allow data migration flexibility\n")
+	sb.WriteString("- Preserve nullability exactly as shown in the source DDL — keep NOT NULL where present, allow NULL where absent. SMT migrates schema, not data; do not relax nullability for loading flexibility.\n")
 	sb.WriteString("- Primary key columns must be NOT NULL\n")
 	sb.WriteString("- Include PRIMARY KEY constraint\n")
 	sb.WriteString("- Do NOT include foreign keys (created separately in Finalize)\n")
@@ -1564,6 +1565,22 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 
 	// Reserved words note
 	sb.WriteString("\nReserved words: If any column name is a SQL reserved word, quote it appropriately for the target database.\n")
+
+	// Column-attribute preservation rules. The source DDL above already shows NOT NULL,
+	// DEFAULT, and AS (...) for every column that has them — these rules force the AI
+	// to carry them through to the target instead of silently dropping them.
+	sb.WriteString("\nColumn-attribute preservation:\n")
+	sb.WriteString("- Preserve every NOT NULL constraint shown in the source DDL. Do not change a NOT NULL column to nullable.\n")
+	sb.WriteString("- Preserve every DEFAULT clause shown in the source DDL. Translate dialect-specific function defaults to the target's equivalent:\n")
+	sb.WriteString("  * GETDATE() / GETUTCDATE() / SYSDATETIMEOFFSET() / SYSDATETIME() (MSSQL) -> CURRENT_TIMESTAMP (postgres/mysql)\n")
+	sb.WriteString("  * NEWID() (MSSQL) -> gen_random_uuid() (postgres) -> UUID() (mysql)\n")
+	sb.WriteString("  * Strip outer parentheses MSSQL adds around literal defaults: ((0)) -> 0, ((1)) -> 1, ('pending') -> 'pending'\n")
+	sb.WriteString("  * Cast literals if the target type requires it (e.g. PG bit -> boolean: ((1)) -> true)\n")
+	sb.WriteString("- Computed columns appear in the source DDL as `AS (expression) PERSISTED` (MSSQL) or just `AS (expression)`. Translate to the target's generated-column syntax:\n")
+	sb.WriteString("  * postgres: <type> GENERATED ALWAYS AS (expression) STORED  (you must infer the column type from the expression and source data types)\n")
+	sb.WriteString("  * mysql:    <type> GENERATED ALWAYS AS (expression) STORED\n")
+	sb.WriteString("  * mssql:    AS (expression) PERSISTED\n")
+	sb.WriteString("  * Translate dialect-specific functions inside the expression too (e.g. CAST(x AS VARCHAR(10)) is portable; ISNULL(a,b) (MSSQL) -> COALESCE(a,b))\n")
 }
 
 // capitalizeFirst returns the string with its first character uppercased.
@@ -1737,35 +1754,50 @@ func (m *AITypeMapper) buildSourceDDLWithTarget(t *Table, sourceDBType, targetDB
 		sb.WriteString(col.Name)
 		sb.WriteString(" ")
 
-		// Build type with length/precision
-		typeStr := col.DataType
-		if col.MaxLength > 0 {
-			typeStr = fmt.Sprintf("%s(%d)", col.DataType, col.MaxLength)
-		} else if col.MaxLength == -1 {
-			typeStr = fmt.Sprintf("%s(MAX)", col.DataType)
-		} else if col.Precision > 0 {
-			if col.Scale > 0 {
-				typeStr = fmt.Sprintf("%s(%d,%d)", col.DataType, col.Precision, col.Scale)
-			} else {
-				typeStr = fmt.Sprintf("%s(%d)", col.DataType, col.Precision)
+		// Computed columns: emit only the generation expression, not a base type.
+		// The AI must translate to the target's generated-column syntax.
+		if col.IsComputed && col.ComputedExpression != "" {
+			persistedKW := ""
+			if col.ComputedPersisted {
+				persistedKW = " PERSISTED"
 			}
-		}
-		sb.WriteString(typeStr)
+			sb.WriteString(fmt.Sprintf("AS (%s)%s", col.ComputedExpression, persistedKW))
+		} else {
+			// Build type with length/precision
+			typeStr := col.DataType
+			if col.MaxLength > 0 {
+				typeStr = fmt.Sprintf("%s(%d)", col.DataType, col.MaxLength)
+			} else if col.MaxLength == -1 {
+				typeStr = fmt.Sprintf("%s(MAX)", col.DataType)
+			} else if col.Precision > 0 {
+				if col.Scale > 0 {
+					typeStr = fmt.Sprintf("%s(%d,%d)", col.DataType, col.Precision, col.Scale)
+				} else {
+					typeStr = fmt.Sprintf("%s(%d)", col.DataType, col.Precision)
+				}
+			}
+			sb.WriteString(typeStr)
 
-		// NULL constraint
-		if !col.IsNullable {
-			sb.WriteString(" NOT NULL")
-		}
+			// NULL constraint
+			if !col.IsNullable {
+				sb.WriteString(" NOT NULL")
+			}
 
-		// Identity
-		if col.IsIdentity {
-			switch sourceDBType {
-			case "postgres":
-				sb.WriteString(" GENERATED BY DEFAULT AS IDENTITY")
-			case "mssql":
-				sb.WriteString(" IDENTITY")
-			case "mysql":
-				sb.WriteString(" AUTO_INCREMENT")
+			// Identity
+			if col.IsIdentity {
+				switch sourceDBType {
+				case "postgres":
+					sb.WriteString(" GENERATED BY DEFAULT AS IDENTITY")
+				case "mssql":
+					sb.WriteString(" IDENTITY")
+				case "mysql":
+					sb.WriteString(" AUTO_INCREMENT")
+				}
+			}
+
+			// DEFAULT clause — emit as-is; AI translates dialect-specific functions.
+			if col.DefaultExpression != "" {
+				sb.WriteString(fmt.Sprintf(" DEFAULT %s", col.DefaultExpression))
 			}
 		}
 

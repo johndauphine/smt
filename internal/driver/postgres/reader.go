@@ -240,7 +240,10 @@ func (r *Reader) loadColumnsSQL(ctx context.Context) string {
 			COALESCE(numeric_scale, 0),
 			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
 			CASE WHEN is_identity = 'YES' OR column_default LIKE 'nextval%' THEN true ELSE false END,
-			ordinal_position
+			ordinal_position,
+			COALESCE(column_default, ''),
+			CASE WHEN is_generated = 'ALWAYS' THEN true ELSE false END,
+			COALESCE(generation_expression, '')
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2
 		ORDER BY ordinal_position`
@@ -254,7 +257,10 @@ func (r *Reader) loadColumnsSQL(ctx context.Context) string {
 			COALESCE(numeric_scale, 0),
 			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
 			CASE WHEN column_default LIKE 'nextval%' THEN true ELSE false END,
-			ordinal_position
+			ordinal_position,
+			COALESCE(column_default, ''),
+			false,
+			''
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2
 		ORDER BY ordinal_position`
@@ -291,8 +297,16 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var c driver.Column
 		if err := rows.Scan(&c.Name, &c.DataType, &c.MaxLength, &c.Precision, &c.Scale,
-			&c.IsNullable, &c.IsIdentity, &c.OrdinalPos); err != nil {
+			&c.IsNullable, &c.IsIdentity, &c.OrdinalPos,
+			&c.DefaultExpression, &c.IsComputed, &c.ComputedExpression); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
+		}
+		// PG generated columns are always STORED; reflect that.
+		if c.IsComputed {
+			c.ComputedPersisted = true
+			// generated columns have a computed expression — drop the column_default
+			// (it's the same expression and would double-emit in the prompt)
+			c.DefaultExpression = ""
 		}
 		t.Columns = append(t.Columns, c)
 	}

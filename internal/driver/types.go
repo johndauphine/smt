@@ -107,16 +107,20 @@ func (t *Table) GetColumnNames() []string {
 
 // Column represents a table column.
 type Column struct {
-	Name         string   `json:"name"`
-	DataType     string   `json:"data_type"`
-	MaxLength    int      `json:"max_length"`
-	Precision    int      `json:"precision"`
-	Scale        int      `json:"scale"`
-	IsNullable   bool     `json:"is_nullable"`
-	IsIdentity   bool     `json:"is_identity"`
-	OrdinalPos   int      `json:"ordinal_position"`
-	SRID         int      `json:"srid,omitempty"`          // Spatial Reference ID for geography/geometry columns (0 = default/unset)
-	SampleValues []string `json:"sample_values,omitempty"` // Sample data values for AI type mapping context
+	Name               string   `json:"name"`
+	DataType           string   `json:"data_type"`
+	MaxLength          int      `json:"max_length"`
+	Precision          int      `json:"precision"`
+	Scale              int      `json:"scale"`
+	IsNullable         bool     `json:"is_nullable"`
+	IsIdentity         bool     `json:"is_identity"`
+	OrdinalPos         int      `json:"ordinal_position"`
+	DefaultExpression  string   `json:"default_expression,omitempty"`  // raw default clause from source dialect (e.g. "((0))", "getutcdate()", "'pending'") — empty if no default
+	IsComputed         bool     `json:"is_computed,omitempty"`         // true if this column is a generated/computed column
+	ComputedExpression string   `json:"computed_expression,omitempty"` // generation expression for computed columns
+	ComputedPersisted  bool     `json:"computed_persisted,omitempty"`  // true if computed value is persisted/stored (vs virtual)
+	SRID               int      `json:"srid,omitempty"`                // Spatial Reference ID for geography/geometry columns (0 = default/unset)
+	SampleValues       []string `json:"sample_values,omitempty"`       // Sample data values for AI type mapping context
 }
 
 // IsIntegerType returns true if the column is an integer type.
