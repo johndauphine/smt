@@ -834,7 +834,7 @@ func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt stri
 			{Role: "user", Content: prompt},
 		},
 		MaxCompletionTokens: maxTokens,
-		Temperature:         0,
+		Temperature:         m.provider.GetEffectiveModelTemperature(),
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -914,7 +914,7 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 			{Role: "user", Content: prompt},
 		},
 		MaxCompletionTokens: maxTokens,
-		Temperature:         0,
+		Temperature:         m.provider.GetEffectiveModelTemperature(),
 	}
 
 	// For local providers (Ollama/LMStudio), use max_tokens (older OpenAI-compatible API)
@@ -1034,7 +1034,7 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 		},
 		GenerationConfig: geminiGenConfig{
 			MaxOutputTokens: maxTokens,
-			Temperature:     0,
+			Temperature:     m.provider.GetEffectiveModelTemperature(),
 		},
 	}
 

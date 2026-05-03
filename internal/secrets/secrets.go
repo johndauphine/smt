@@ -74,12 +74,13 @@ type AIConfig struct {
 
 // Provider represents an AI provider configuration
 type Provider struct {
-	APIKey         string `yaml:"api_key,omitempty"`         // Required for cloud providers
-	BaseURL        string `yaml:"base_url,omitempty"`        // Required for local providers, optional for cloud
-	Model          string `yaml:"model,omitempty"`           // Optional, uses smart defaults
-	ContextWindow  int    `yaml:"context_window,omitempty"`  // Optional, context window size in tokens (for Ollama/local providers)
-	MaxTokens      int    `yaml:"max_tokens,omitempty"`      // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
-	TimeoutSeconds int    `yaml:"timeout_seconds,omitempty"` // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
+	APIKey           string   `yaml:"api_key,omitempty"`           // Required for cloud providers
+	BaseURL          string   `yaml:"base_url,omitempty"`          // Required for local providers, optional for cloud
+	Model            string   `yaml:"model,omitempty"`             // Optional, uses smart defaults
+	ContextWindow    int      `yaml:"context_window,omitempty"`    // Optional, context window size in tokens (for Ollama/local providers)
+	MaxTokens        int      `yaml:"max_tokens,omitempty"`        // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
+	TimeoutSeconds   int      `yaml:"timeout_seconds,omitempty"`   // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
+	ModelTemperature *float64 `yaml:"model_temperature,omitempty"` // Optional sampling temperature for the model. Defaults to 0 (deterministic). Some providers reject 0 for certain models — e.g. OpenAI reasoning models (o-series, gpt-5.x) require model_temperature: 1.
 }
 
 // EncryptionConfig holds encryption-related secrets
@@ -487,6 +488,18 @@ func (p *Provider) GetEffectiveMaxTokens(providerName string) int {
 	return 4000
 }
 
+// GetEffectiveModelTemperature returns the sampling temperature for a provider's
+// model. Returns the configured value if set, otherwise 0 (deterministic).
+// Some providers reject 0 for certain models (e.g. OpenAI reasoning models
+// require model_temperature: 1) — set ModelTemperature explicitly in the
+// secrets file for those.
+func (p *Provider) GetEffectiveModelTemperature() float64 {
+	if p.ModelTemperature != nil {
+		return *p.ModelTemperature
+	}
+	return 0
+}
+
 // IsLocalProvider returns true if the provider is a local provider (no API key needed)
 func IsLocalProvider(name string) bool {
 	if known, ok := KnownProviders[name]; ok {
@@ -537,10 +550,13 @@ ai:
     openai:
       api_key: ""  # Get from https://platform.openai.com/
       model: "gpt-4o"  # optional
+      # model_temperature: 1  # required when model is an OpenAI reasoning family
+      #                       # (o-series, gpt-5.x) — they reject the default 0
 
     gemini:
       api_key: ""  # Get from https://makersuite.google.com/
       model: "gemini-2.0-flash"  # optional
+      # model_temperature: 0  # optional sampling temperature (default 0 = deterministic)
 
     # Local providers (no API key needed)
     ollama:
