@@ -268,3 +268,25 @@ func containsHelper(s, substr string) bool {
 	}
 	return false
 }
+
+func TestGetEffectiveModelTemperature(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider Provider
+		want     float64
+	}{
+		{"unset returns 0 (deterministic default)", Provider{}, 0},
+		{"explicit 0 returns 0", Provider{ModelTemperature: floatPtr(0)}, 0},
+		{"explicit 1 returns 1 (for OpenAI reasoning models)", Provider{ModelTemperature: floatPtr(1)}, 1},
+		{"explicit 0.7 returns 0.7", Provider{ModelTemperature: floatPtr(0.7)}, 0.7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.provider.GetEffectiveModelTemperature(); got != tt.want {
+				t.Errorf("GetEffectiveModelTemperature() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func floatPtr(f float64) *float64 { return &f }
