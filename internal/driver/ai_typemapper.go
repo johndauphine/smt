@@ -1592,6 +1592,12 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	sb.WriteString("  * mssql:    AS (expression) PERSISTED  (MSSQL infers type; persisted = STORED). Do NOT include the column type before AS — MSSQL forbids it on computed columns.\n")
 	sb.WriteString("  * If the source data_type is reported as `(inferred)` (MSSQL computed columns may omit it), infer the type from the expression and source columns.\n")
 	sb.WriteString("  * Translate dialect-specific functions inside the expression too (e.g. CAST(x AS VARCHAR(10)) is portable; ISNULL(a,b) (MSSQL) -> COALESCE(a,b))\n")
+
+	// Per-target gotchas. Each one only fires when its target dialect is in play
+	// to keep the prompt focused; if you add another, mirror this conditional.
+	if Canonicalize(req.TargetDBType) == "mysql" {
+		sb.WriteString("- MySQL fractional-second precision rule: when the source column is `DATETIME(N)` / `TIMESTAMP(N)` / `TIME(N)` with N > 0 (look at `scale` in the introspection metadata), any `CURRENT_TIMESTAMP` / `NOW()` default in the target DDL MUST carry the same precision argument: `created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)`. MySQL rejects mismatched precision with error 1067 \"Invalid default value\". This applies only to the function defaults; literal-value defaults are unaffected.\n")
+	}
 }
 
 // capitalizeFirst returns the string with its first character uppercased.
