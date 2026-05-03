@@ -119,10 +119,12 @@ var KnownProviders = map[string]struct {
 }
 
 // DefaultModels maps providers to their default models.
-// Anthropic default is Sonnet because table-DDL generation is a multi-page,
-// judgment-heavy prompt where Haiku has been observed to translate the same
-// type inconsistently between tables. The volume is low (one call per table,
-// cached) so Sonnet's cost is not a concern.
+// Anthropic default is Sonnet because Haiku, even with the cleaned-up
+// introspection-facts prompt, was observed to misrender source-dialect
+// computed-column metadata when translating to MSSQL (e.g. emitting
+// `NUMERIC(15,2) AS (...) PERSISTED` where MSSQL forbids the explicit
+// type on a computed column). Volume is low (one cached call per table);
+// Sonnet's cost is negligible.
 var DefaultModels = map[string]string{
 	"anthropic": "claude-sonnet-4-6",
 	"openai":    "gpt-4o",
