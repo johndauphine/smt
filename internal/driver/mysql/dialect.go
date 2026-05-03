@@ -290,6 +290,21 @@ CRITICAL MySQL fractional-second precision rule:
   argument: ` + "`created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)`" + `.
 - MySQL rejects mismatched precision with error 1067 "Invalid default value".
 - This applies only to function defaults; literal-value defaults are unaffected.
+
+CRITICAL MySQL expression-default parenthesization rule:
+- MySQL 8.0.13+ allows arbitrary expressions as DEFAULT values, but the expression
+  MUST be wrapped in parentheses. Bare function calls are a syntax error.
+- Wrong: ` + "`employee_uuid CHAR(36) NOT NULL DEFAULT UUID()`" + `  (Error 1064)
+- Right: ` + "`employee_uuid CHAR(36) NOT NULL DEFAULT (UUID())`" + `
+- Wrong: ` + "`settings JSON NOT NULL DEFAULT JSON_OBJECT()`" + `  (Error 1064)
+- Right: ` + "`settings JSON NOT NULL DEFAULT (JSON_OBJECT())`" + `
+- Wrong: ` + "`settings JSON NOT NULL DEFAULT '{}'`" + `  (Error 1101 — JSON/TEXT/BLOB cols
+   pre-8.0.13 forbid defaults entirely; 8.0.13+ requires the parenthesized
+   expression form even for literal-looking JSON defaults)
+- Right: ` + "`settings JSON NOT NULL DEFAULT (JSON_OBJECT())`" + `  or ` + "`DEFAULT (CAST('{}' AS JSON))`" + `
+- The ` + "`CURRENT_TIMESTAMP`" + ` family is the one exception — it works without parens
+  (` + "`DEFAULT CURRENT_TIMESTAMP`" + ` and ` + "`DEFAULT CURRENT_TIMESTAMP(6)`" + ` are both valid).
+  Every other function default needs the parens.
 `
 }
 

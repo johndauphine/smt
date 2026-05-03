@@ -49,3 +49,28 @@ func mustContain(t *testing.T, haystack string, needles ...string) {
 		}
 	}
 }
+
+// TestAIPromptAugmentation_ComputedColumnNullability is the regression test
+// for the gpt-oss-20b mssql → mssql failure mode where the model emitted
+// `line_total AS (...) PERSISTED NULL`. SQL Server rejects any nullability
+// suffix after PERSISTED — computed columns are implicitly nullable based on
+// their expression. This is a one-line dialect-augmentation rule (not a
+// per-model workaround) and applies to any AI model that might mistakenly
+// translate the source `nullable: false` flag into a literal NOT NULL keyword
+// on a computed column.
+func TestAIPromptAugmentation_ComputedColumnNullability(t *testing.T) {
+	d := &Dialect{}
+	aug := d.AIPromptAugmentation()
+
+	for _, needle := range []string{
+		"computed column nullability",
+		"NEVER append `NULL`",
+		"PERSISTED NULL`", // the wrong example
+		"PERSISTED`",      // the right form
+		"implicitly nullable",
+	} {
+		if !strings.Contains(aug, needle) {
+			t.Errorf("prompt missing required phrase %q", needle)
+		}
+	}
+}
