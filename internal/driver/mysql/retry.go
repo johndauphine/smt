@@ -87,6 +87,10 @@ func isRetryableDDLError(err error) bool {
 // See #29 PR B; the finalization mapper has no cache so successful retries
 // don't need any re-prime step.
 func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, maxRetries int, label string) error {
+	// Defensive clamp — see postgres equivalent for rationale.
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 	var (
 		lastDDL string
 		lastErr error

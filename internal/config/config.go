@@ -273,17 +273,16 @@ type MigrationConfig struct {
 	// Applies to all four DDL phases — see #29 PR A (table) and PR B (finalize).
 	//
 	// Resolution (applied in orchestrator.aiMaxRetries):
-	//   - omitted or 0   → 3 (the recommended default; see defaultAIMaxRetries)
+	//   - omitted        → 3 (the recommended default; see defaultAIMaxRetries)
+	//   - 0              → 0 (explicit opt-out — disables retries)
 	//   - positive value → use that exact budget
-	//   - negative value → 0 (explicit opt-out; only way to disable retries)
 	//
-	// Each retry costs one extra AI call. Cloud Sonnet rarely triggers retries;
-	// local models (gpt-oss, qwen-coder) trigger them often enough that this
-	// setting is the difference between 5/9 and ~9/9 matrix scores. The
-	// variance experiment in #29 showed per-call success ~81% on a model
-	// that's deterministically wrong on the first try; 3 retries lift
-	// per-call success to ~99.9% and full-pipeline ~98% on 14-table fixtures.
-	AIMaxRetries int `yaml:"ai_max_retries"`
+	// Pointer type lets us distinguish "user didn't set it" (nil) from
+	// "user explicitly set 0" (zero pointer to int) — without that
+	// distinction we'd have to overload one of the values, which is what
+	// an earlier draft did with negatives. YAML unmarshalling reads an
+	// omitted key as nil and a present key as a non-nil *int.
+	AIMaxRetries *int `yaml:"ai_max_retries"`
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 	// AI-driven real-time parameter adjustment

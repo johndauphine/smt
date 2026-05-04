@@ -285,6 +285,13 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		TargetContext: w.dbContext,
 	}
 
+	// Defensive clamp — see retryFinalize. Negative MaxRetries would skip
+	// the loop entirely (no AI call, no exec) and surface a wrapped-nil
+	// error. Orchestrator already maps negatives to 0; this guard exists
+	// for direct WithOptions callers. (Copilot review on PR #31.)
+	if opts.MaxRetries < 0 {
+		opts.MaxRetries = 0
+	}
 	var (
 		lastDDL string
 		lastErr error

@@ -180,23 +180,25 @@ const defaultAIMaxRetries = 3
 
 // aiMaxRetries returns the per-DDL retry budget for this run. The contract:
 //
-//   - omitted or zero  → defaultAIMaxRetries (3)
+//   - omitted (nil)    → defaultAIMaxRetries (3)
+//   - 0                → 0 (explicit opt-out)
 //   - positive integer → that exact value
-//   - negative integer → 0 (explicit opt-out — the only way for a user to
-//     disable retries entirely is to set ai_max_retries: -1)
+//   - negative integer → 0 (defensive clamp — config validation should
+//     reject this earlier, but we don't want a misconfiguration to make
+//     the helper surface a wrapped-nil error)
 //
-// Treating zero as "default" rather than "off" matches the YAML convention
-// where an omitted field reads back as the zero value: a user who doesn't
-// know about retries gets the recommended setting automatically. Users who
-// want the old no-retry behavior must opt out explicitly with a negative
-// value, which is rare and worth an explicit decision.
+// The pointer type on Migration.AIMaxRetries lets us distinguish "user
+// didn't set it" (nil → use default) from "user explicitly set 0"
+// (non-nil pointer to 0 → opt out). A user who doesn't know about
+// retries gets the recommended budget automatically; a user who wants
+// the no-retry behavior of pre-#29 sets ai_max_retries: 0 explicitly.
 func (o *Orchestrator) aiMaxRetries() int {
-	n := o.config.Migration.AIMaxRetries
+	if o.config.Migration.AIMaxRetries == nil {
+		return defaultAIMaxRetries
+	}
+	n := *o.config.Migration.AIMaxRetries
 	if n < 0 {
 		return 0
-	}
-	if n == 0 {
-		return defaultAIMaxRetries
 	}
 	return n
 }

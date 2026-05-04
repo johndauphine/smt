@@ -79,6 +79,14 @@ func isRetryableDDLError(err error) bool {
 // re-prime anything. label is used for logging and the wrapping error message
 // (e.g. "index Orders.idx_customer", "FK Orders.fk_customer").
 func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, maxRetries int, label string) error {
+	// Defensive clamp: a negative budget would skip the loop body entirely
+	// (no AI call, no exec) and surface a confusing wrapped-nil error.
+	// Orchestrator.aiMaxRetries already maps negatives to 0 before this is
+	// called, so this guard exists for direct WithOptions callers (tests,
+	// future external integrations) — see Copilot review on PR #31.
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 	var (
 		lastDDL string
 		lastErr error
