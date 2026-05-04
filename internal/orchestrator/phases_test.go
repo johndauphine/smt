@@ -9,6 +9,36 @@ import (
 
 func tbl(name string) source.Table { return source.Table{Name: name} }
 
+// TestAIMaxRetries pins the contract for the unset / negative / positive
+// cases. Zero (the YAML zero-value, which is also what an omitted field
+// reads back as) maps to defaultAIMaxRetries — the user gets the
+// recommended retry budget without configuring anything, while still
+// being able to opt out via -1. See the helper's docstring for the why.
+func TestAIMaxRetries(t *testing.T) {
+	tests := []struct {
+		name     string
+		configIn int
+		want     int
+	}{
+		{"unset / zero → default", 0, defaultAIMaxRetries},
+		{"explicit positive value passes through", 5, 5},
+		{"explicit 1", 1, 1},
+		{"negative is the explicit opt-out → 0", -1, 0},
+		{"deeply negative still maps to 0", -42, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Migration.AIMaxRetries = tt.configIn
+			o := &Orchestrator{config: cfg}
+			if got := o.aiMaxRetries(); got != tt.want {
+				t.Errorf("aiMaxRetries() with config=%d = %d, want %d", tt.configIn, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFilterTables_NoConfig(t *testing.T) {
 	o := &Orchestrator{config: &config.Config{}}
 	in := []source.Table{tbl("Users"), tbl("Posts"), tbl("__schema_versions")}

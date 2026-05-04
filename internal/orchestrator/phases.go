@@ -170,15 +170,35 @@ func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 	})
 }
 
-// aiMaxRetries returns the configured Migration.AIMaxRetries value clamped to
-// [0, ∞). Negative values are treated as 0 (no retries) — silently sanitizing
-// rather than erroring keeps the default-zero / no-config case working without
-// a validation layer the callers don't need.
+// defaultAIMaxRetries is the per-DDL retry budget when the user has not set
+// migration.ai_max_retries. Picked at 3 because the empirical variance test
+// in #29 showed gpt-oss-20b producing correct DDL ~1 in 3 attempts on cases
+// where it's deterministically wrong on the first try; with 3 retries
+// per-call success climbs to ~99.9%, full-pipeline ~98% on 14-table fixtures.
+// Cloud Sonnet rarely triggers retries so the cost is essentially nil there.
+const defaultAIMaxRetries = 3
+
+// aiMaxRetries returns the per-DDL retry budget for this run. The contract:
+//
+//   - omitted or zero  → defaultAIMaxRetries (3)
+//   - positive integer → that exact value
+//   - negative integer → 0 (explicit opt-out — the only way for a user to
+//     disable retries entirely is to set ai_max_retries: -1)
+//
+// Treating zero as "default" rather than "off" matches the YAML convention
+// where an omitted field reads back as the zero value: a user who doesn't
+// know about retries gets the recommended setting automatically. Users who
+// want the old no-retry behavior must opt out explicitly with a negative
+// value, which is rare and worth an explicit decision.
 func (o *Orchestrator) aiMaxRetries() int {
-	if o.config.Migration.AIMaxRetries < 0 {
+	n := o.config.Migration.AIMaxRetries
+	if n < 0 {
 		return 0
 	}
-	return o.config.Migration.AIMaxRetries
+	if n == 0 {
+		return defaultAIMaxRetries
+	}
+	return n
 }
 
 // CreateIndexes loads each table's indexes from the source and creates
