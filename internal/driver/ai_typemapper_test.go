@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2085,9 +2086,11 @@ func TestGenerateTableDDL_DoesNotAutoCache_Issue32(t *testing.T) {
 // (the writer never called it because exec failed) leaves the cache empty —
 // so the next GenerateTableDDL invokes the AI again with a fresh chance.
 func TestGenerateTableDDL_FailedFirstTryDoesNotPoison_Issue32(t *testing.T) {
-	callCount := 0
+	// callCount is touched by both the test goroutine (assertions) and the
+	// httptest handler goroutine (increment). Use atomic to keep -race quiet.
+	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(openAIResponse{
 			Choices: []struct {
@@ -2130,8 +2133,8 @@ func TestGenerateTableDDL_FailedFirstTryDoesNotPoison_Issue32(t *testing.T) {
 	if _, err := mapper.GenerateTableDDL(context.Background(), req); err != nil {
 		t.Fatalf("first GenerateTableDDL: %v", err)
 	}
-	if callCount != 1 {
-		t.Fatalf("expected 1 AI call, got %d", callCount)
+	if got := callCount.Load(); got != 1 {
+		t.Fatalf("expected 1 AI call, got %d", got)
 	}
 
 	// Second call with identical req: must invoke the AI again because the
@@ -2140,8 +2143,8 @@ func TestGenerateTableDDL_FailedFirstTryDoesNotPoison_Issue32(t *testing.T) {
 	if _, err := mapper.GenerateTableDDL(context.Background(), req); err != nil {
 		t.Fatalf("second GenerateTableDDL: %v", err)
 	}
-	if callCount != 2 {
-		t.Errorf("BUG (#32): second GenerateTableDDL hit cache instead of re-calling AI; got %d total calls, want 2", callCount)
+	if got := callCount.Load(); got != 2 {
+		t.Errorf("BUG (#32): second GenerateTableDDL hit cache instead of re-calling AI; got %d total calls, want 2", got)
 	}
 }
 
