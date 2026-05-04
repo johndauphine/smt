@@ -81,6 +81,7 @@ type Provider struct {
 	MaxTokens        int      `yaml:"max_tokens,omitempty"`        // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
 	TimeoutSeconds   int      `yaml:"timeout_seconds,omitempty"`   // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
 	ModelTemperature *float64 `yaml:"model_temperature,omitempty"` // Optional sampling temperature for the model. Defaults to 0 (deterministic). Some providers reject 0 for certain models — e.g. OpenAI reasoning models (o-series, gpt-5.x) require model_temperature: 1.
+	ReasoningEffort  string   `yaml:"reasoning_effort,omitempty"`  // Optional reasoning_effort hint for reasoning-capable models (gpt-oss, OpenAI o-series, gpt-5.x). Allowed values: "low", "medium", "high". Empty (omitted) means don't send the field — the server uses the model's built-in default (typically "medium" for gpt-oss). Set to "low" to trade reliability for ~2-3× speed; set to "high" to trade speed for fewer retries.
 }
 
 // EncryptionConfig holds encryption-related secrets

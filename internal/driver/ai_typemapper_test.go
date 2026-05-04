@@ -2148,6 +2148,54 @@ func TestGenerateTableDDL_FailedFirstTryDoesNotPoison_Issue32(t *testing.T) {
 	}
 }
 
+// TestOpenAIRequest_ReasoningEffort_Optional confirms the contract that the
+// reasoning_effort field is sent only when the user explicitly set
+// Provider.ReasoningEffort. Empty (omitted in YAML) → field absent from the
+// request body, so the server uses the model's built-in default. Set →
+// field present with the configured value.
+//
+// Reasoning-capable models (gpt-oss, OpenAI o-series, gpt-5.x) honor the
+// hint; non-reasoning models silently ignore it. The optional/empty default
+// preserves prior behavior for users who haven't touched the setting.
+func TestOpenAIRequest_ReasoningEffort_Optional(t *testing.T) {
+	tests := []struct {
+		name        string
+		effort      string
+		wantPresent bool
+		wantValue   string
+	}{
+		{"empty effort → field absent", "", false, ""},
+		{"low effort", "low", true, "low"},
+		{"medium effort", "medium", true, "medium"},
+		{"high effort", "high", true, "high"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := openAIRequest{
+				Model:           "test-model",
+				Messages:        []openAIMessage{{Role: "user", Content: "x"}},
+				ReasoningEffort: tt.effort,
+			}
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(body, &decoded); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, present := decoded["reasoning_effort"]
+			if present != tt.wantPresent {
+				t.Errorf("reasoning_effort present=%v, want %v\nbody: %s", present, tt.wantPresent, body)
+			}
+			if tt.wantPresent && got != tt.wantValue {
+				t.Errorf("reasoning_effort=%v, want %q", got, tt.wantValue)
+			}
+		})
+	}
+}
+
 // TestCacheTableDDL is a regression guard for the cache-replacement behavior
 // the writer relies on after a successful retry. Without this, a first-try
 // call that produced bad DDL would leave the bad DDL cached, and a future

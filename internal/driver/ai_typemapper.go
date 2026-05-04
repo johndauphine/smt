@@ -755,7 +755,13 @@ type openAIRequest struct {
 	MaxCompletionTokens int                    `json:"max_completion_tokens,omitempty"`
 	MaxTokens           int                    `json:"max_tokens,omitempty"`
 	Temperature         float64                `json:"temperature"`
-	Options             map[string]interface{} `json:"options,omitempty"` // Provider-specific options (e.g., Ollama's num_ctx for context window size)
+	// ReasoningEffort is sent only when non-empty (`,omitempty` — empty string
+	// drops the field). Maps to Provider.ReasoningEffort in the secrets file:
+	// "low" / "medium" / "high" hint the server toward less or more reasoning.
+	// gpt-oss / OpenAI o-series / gpt-5.x honor it; non-reasoning models
+	// silently ignore it. Omit to use the model's built-in default.
+	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
+	Options         map[string]interface{} `json:"options,omitempty"` // Provider-specific options (e.g., Ollama's num_ctx for context window size)
 }
 
 type openAIMessage struct {
@@ -835,6 +841,7 @@ func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt stri
 		},
 		MaxCompletionTokens: maxTokens,
 		Temperature:         m.provider.GetEffectiveModelTemperature(),
+		ReasoningEffort:     m.provider.ReasoningEffort,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -915,6 +922,7 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 		},
 		MaxCompletionTokens: maxTokens,
 		Temperature:         m.provider.GetEffectiveModelTemperature(),
+		ReasoningEffort:     m.provider.ReasoningEffort,
 	}
 
 	// For local providers (Ollama/LMStudio), use max_tokens (older OpenAI-compatible API)
