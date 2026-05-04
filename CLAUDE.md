@@ -87,7 +87,17 @@ The full multi-provider HTTP plumbing (Anthropic / OpenAI / Gemini / Ollama / LM
 
 The table-DDL prompt (`buildTableDDLPrompt` → `buildSourceIntrospectionBlock`) hands the AI **raw introspection facts** (data_type, max_length, precision, scale, nullable, default_expression, computed/computed_expression/computed_storage), not a synthesized source DDL string. Earlier versions assembled a per-dialect CREATE TABLE in Go and asked the AI to translate it; PR #16 dropped that intermediate step because Go-side synthesis was duplicating work the AI already does well and was hiding metadata behind dialect quoting. If you need to give the AI more source context, extend the introspection block — don't rebuild the source-DDL synthesizer.
 
-`internal/driver/ai_errordiag.go` diagnoses DDL failures. All AI prompts are in-source string builders, not template files. Provider config and API keys live in `~/.secrets/smt-config.yaml` (env var override: `SMT_SECRETS_FILE`).
+The source side of that prompt (the `=== SOURCE DATABASE ===` block) is populated via `Reader.DatabaseContext()` — each driver's Reader caches a `*DatabaseContext` (sync.Once) and the orchestrator passes it through `TableOptions.SourceContext` on the first `CreateTableWithOptions` call. PR #24 (closes #13) added this; before that the source block had only `Type:` and the prompt was a one-sided ask.
+
+### AI-DDL validate-and-retry
+
+`internal/driver/retry.go` is the shared retry primitive that wraps every AI-rendered DDL phase (CREATE TABLE + the three finalize phases). The flow inside each writer's `Create*WithOptions` is: ask AI → exec → on failure, feed the verbatim prior DDL + verbatim DB error back into the next prompt → up to `migration.ai_max_retries` retries. There is **no SQLSTATE allowlist** — instead the AI itself classifies hopeless cases by emitting the literal `NOT_RETRYABLE` marker (parsed by `classifyRetryResponse` into `ErrNotRetryable`), in which case the loop exits and the original DB error surfaces to the user. `IsCanceled` short-circuits ctx cancellation/deadline so Ctrl-C doesn't get re-prompted as a "fix this" round-trip.
+
+Cache discipline matters here: the type-mapper's cache is **read-only on the AI path**. Only the writer caches DDL, and only after a successful exec — so a structurally-valid-but-semantically-wrong first attempt can't poison the cache for future runs (PR #33 closes #32). Postgres's `Unlogged` rewrite is applied to `execDDL` while `aiDDL` is what gets cached, so future calls with `Unlogged=false` get the un-rewritten form back.
+
+Config: `migration.ai_max_retries` is `*int` — omitted defaults to 3, `0` is the explicit opt-out, negative values clamp to 0. Resolved in `orchestrator.aiMaxRetries`.
+
+`internal/driver/ai_errordiag.go` diagnoses DDL failures (used outside the retry loop, e.g. for surfacing a final error). All AI prompts are in-source string builders, not template files. Provider config and API keys live in `~/.secrets/smt-config.yaml` (env var override: `SMT_SECRETS_FILE`).
 
 ### Schema diff + sync (the new SMT-specific feature)
 
@@ -136,10 +146,9 @@ Some files preserve DMT's original code shape unchanged (verbatim copy with modu
 
 Active work is tracked in GitHub issues. Run `gh issue list --state open` and read the bodies — each carries Symptom + Root cause + Proposed fix:
 
-- **#13** — SourceContext is never populated. The AI prompt's `=== SOURCE DATABASE ===` block has only `Type:` (no version, charset, varchar semantics). Fix is structural: add `DatabaseContext()` to the `Reader` interface and plumb through `WriterOptions` / `TableOptions`. Independent of #16.
-- **#17** — `internal/driver/postgres/reader.go` `LoadForeignKeys` and `LoadCheckConstraints` are literal `return nil` stubs. Every postgres-as-source migration produces 0 FKs on the target. Implement against `pg_constraint` / `information_schema.check_constraints`, mirror the mssql/mysql readers.
-- **#18** — `internal/driver/mysql/reader.go` substring-matches `"GENERATED"` on the `EXTRA` column, which also matches `DEFAULT_GENERATED` (MySQL 8.0.13+ marker for any expression default). Misclassifies default-valued TIMESTAMP/DATETIME columns as computed. Tighten the match to `"VIRTUAL GENERATED"` / `"STORED GENERATED"`.
-- **#19** — AI prompt-coverage gap: mssql → mysql for `DATETIME2(N)` columns with `DEFAULT GETUTCDATE()` produces invalid `DATETIME(N) DEFAULT CURRENT_TIMESTAMP` (MySQL needs the precision argument on the default). One-line addition to migration rules.
+- **#25** — MySQL InnoDB CHECK-constraint creation deadlocks (Error 1213) at `ai_concurrency: 16`. InnoDB takes metadata locks on parent + child tables when adding a CHECK; SMT fans out across goroutines and the lock graph deadlocks on related tables. Mssql/pg targets tolerate it. Cleanest fix: cap CHECK-phase concurrency at 1 for MySQL targets in `Orchestrator.CreateCheckConstraints`. Surfaced only after #17 was fixed (no PG-source CHECKs to create before that).
+- **#26** — MySQL reader doesn't extract ENUM/SET value lists. `loadColumns` reads `DATA_TYPE` (`enum`) but not `COLUMN_TYPE` (`enum('billing','shipping','physical','mailing')`), so the AI sees no values and on `*→mysql` fabricates `ENUM('','')` (Error 1291: duplicated empty value). Fix: add `EnumValues []string` to `driver.Column`, parse `COLUMN_TYPE`, surface in the introspection block. Same shape as #18.
+- **#28** — Documentation-only: gpt-oss-20b → MSSQL whack-a-mole. Pre-#27 prompt rules and post-#27 prompt rules give the same 5/9 net score on the matrix but redistribute which pairs fail (rule-following inconsistency, not missing rules). Standing rule "no per-model AI workarounds" applies — the issue exists to document the model-selection guidance, not as a fix target. Note: the validate-and-retry work landed since (#29 family) helps materially on local models, partially answering this issue's "out of scope" suggestion.
 
 Older non-issue follow-ups:
 
@@ -147,19 +156,26 @@ Older non-issue follow-ups:
 - TUI `/sync` and `/snapshot` print "lands in a later phase" instead of dispatching to the new commands; wire them to call the same handlers as the CLI.
 - `MigrationDefaults` in `internal/secrets/secrets.go` carries unused workers/chunk_size/buffer fields. Safe to drop once we're confident no DMT secrets file in the wild needs them.
 
-### Cross-engine coverage status (as of 2026-05-03)
+### Cross-engine coverage status (as of 2026-05-04)
 
-The CRM fixture (`testdata/crm/`) supports all three engines as both source and target. Coverage of the 9-pair matrix:
+The CRM fixture (`testdata/crm/`) supports all three engines as both source and target. The full 9-pair matrix is functional with the project default (Sonnet 4.6) — every source × target pair lands 14/22/33 (tables / FKs / CHECKs) on the CRM fixture.
 
-- **mssql sources:** mssql→pg ✓, mssql→mssql ✓, mssql→mysql blocked by #19.
-- **pg sources:** tables phase works on all targets; FKs/CHECKs blocked by #17 on every pair.
-- **mysql sources:** all pairs blocked by #18 at the first table with a `DEFAULT CURRENT_TIMESTAMP` column.
+Caveats:
+- **`pg → mysql` at high `ai_concurrency`** can hit MySQL InnoDB CHECK deadlocks (#25). Workaround: drop `ai_concurrency` to 1 for MySQL targets, or run only the affected phase serially. Other 8 pairs are unaffected.
+- **`* → mysql` ENUM/SET columns** rely on the AI inferring values from column names because the reader doesn't expose `COLUMN_TYPE` (#26). Sonnet usually infers plausibly; gpt-oss-20b emits empty strings and trips Error 1291.
+- **Local models** (gpt-oss-20b, qwen3-coder-30b) score around 3-5/9 with model-specific failure patterns; see #28 for the documented analysis. The validate-and-retry feature (`migration.ai_max_retries`, default 3) materially helps local-model reliability — gpt-oss-20b mssql→mssql went 6/14 → 14/22/31 at temperature=0 with retries fixing parser-rejected DDL on the second attempt.
 
-Default model is `claude-sonnet-4-6`. Haiku was tried and reverted because it regressed on `pg → mssql` for tables with computed columns (emitted invalid `<type> AS (...) PERSISTED` where MSSQL forbids the type before AS). The prompt now contains an explicit rule for this case (see PR #16) but Sonnet remains the safer default.
+Default model is `claude-sonnet-4-6`. Haiku was tried and reverted historically because of `pg → mssql` PERSISTED computed-column issues; with #13 plumbed (full SourceContext in the prompt) Haiku now lands mssql↔pg correctly, useful for cost-sensitive workloads — though mssql↔mysql with Haiku is still flaky.
 
 ### Resolved (kept here as decision log)
 
 - `create` and `sync` now agree on identifier naming. Both go through `driver.NormalizeIdentifier(targetType, name)` — a single source of truth that matches PostgreSQL's case-folding (lowercases + slugs non-alphanumeric) and passes MSSQL/MySQL through. Earlier I misread the codebase and thought `create` was hand-coding ~3000 lines of DDL string assembly per driver; in fact the per-driver `Writer.CreateTable` / `CreateIndex` / `CreateForeignKey` / `CreateCheckConstraint` already use AI rendering (via `tableMapper.GenerateTableDDL` and `finalizationMapper.GenerateFinalizationDDL`). The actual divergence was a small per-driver pre-sanitization step that `sync` skipped. See `internal/driver/identifiers.go` and the `Diff.Normalize` call in `cmd/smt/sync.go`.
+- **#13 (PR #24)** — SourceContext now populated. `Reader.DatabaseContext()` returns a sync.Once-cached `*DatabaseContext`; `Orchestrator.CreateTables` passes it via `TableOptions.SourceContext`. The `=== SOURCE DATABASE ===` prompt block is now symmetric to TARGET (version, charset, collation, identifier case, varchar semantics, version-gated features). The "No source context available" string is gone.
+- **#17 (PR #22)** — Postgres `LoadForeignKeys` / `LoadCheckConstraints` are real implementations against `pg_constraint`. Composite FKs handled via `LATERAL UNNEST(c.conkey) WITH ORDINALITY` indexed into `c.confkey`. CHECK predicates via `pg_get_expr(c.conbin, ...)`. Action keywords mapped to the same uppercase strings the mssql/mysql readers produce.
+- **#18 (PR #21)** — MySQL `EXTRA` parsing via `parseGeneratedColumnExtra` matches `VIRTUAL GENERATED` / `STORED GENERATED` explicitly, no longer false-matching `DEFAULT_GENERATED`.
+- **#19 (PR #23)** — MySQL `DATETIME(N)` precision rule lives in `mysql/dialect.go::AIPromptAugmentation` (engine-specific rules belong in the per-driver Dialect, not in `writeMigrationRules`).
+- **#29 family (PRs #30, #31, #33)** — AI-DDL validate-and-retry across all four DDL phases. Cache writes are writer-controlled (post-exec only). AI classifies futile retries via `NOT_RETRYABLE` marker rather than per-driver SQLSTATE allowlists. `IsCanceled` short-circuit on context cancellation/deadline.
+- **#27** — MySQL function-call default parens (`DEFAULT (UUID())`, `DEFAULT (JSON_OBJECT())`) and MSSQL PERSISTED-implicit-nullability are explicit prompt rules in the per-driver Dialect.
 
 ## Common gotchas
 
