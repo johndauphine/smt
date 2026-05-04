@@ -2056,10 +2056,19 @@ func writeFinalizationPriorAttempt(sb *strings.Builder, req FinalizationDDLReque
 // allowlists and rely on the model to recognize cases where retry is futile.
 // Phrasing examples come from real cases that surfaced in matrix runs:
 // PG 42883 (uuid()), MySQL 1213 (deadlock), MSSQL 2714 (already exists).
+//
+// The strict-output paragraph at the end is the #34 fix: smaller / chattier
+// models (haiku 4.5 in particular) sometimes interpret the corrective context
+// as inviting analysis and respond in natural language, which the parser
+// rejects as malformed and surfaces as a hard run-killer. The asymmetric old
+// wording strictly enforced "no prose" only on the bail branch; this version
+// applies the same strictness to the fix branch too. See issue #34 for the
+// observed haiku case (concat() not immutable on PG generated column).
 func writeRetryClassificationInstruction(sb *strings.Builder) {
 	sb.WriteString("\nIMPORTANT — RETRY CLASSIFICATION:\n")
 	sb.WriteString("If, after reading the database error, you determine that retrying will NOT help — for example: the object already exists in the target, an FK references a missing parent, the user lacks permission, the error is a real data-integrity violation, the operation deadlocked, or the connection failed — respond with ONLY the literal text NOT_RETRYABLE on the first line, optionally followed by ': ' and a one-sentence reason. Emit no DDL, no code fences, no other text in that case.\n")
 	sb.WriteString("Otherwise (the error indicates a fixable defect in the DDL — wrong syntax, unknown type, undeclared function, malformed clause, etc.), return the corrected DDL as instructed above.\n")
+	sb.WriteString("\nSTRICT OUTPUT REQUIREMENT: your entire response must be EITHER a complete DDL statement OR the NOT_RETRYABLE marker (with optional reason). Do not include explanations, analysis, commentary, code fences, markdown, or any prose outside SQL syntax. If you would otherwise discuss the problem in words, write the corrected DDL instead — or, if no DDL can fix it, write NOT_RETRYABLE: <reason>. Output the SQL statement (or the marker) directly with no preamble.\n")
 }
 
 // buildIndexDDLPrompt creates the AI prompt for index DDL generation.

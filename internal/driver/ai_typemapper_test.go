@@ -1329,6 +1329,10 @@ func TestBuildFinalizationDDLPrompt_PreviousAttempt(t *testing.T) {
 				// prompts also invite NOT_RETRYABLE bailout on non-fixable errors.
 				"NOT_RETRYABLE",
 				"RETRY CLASSIFICATION",
+				// #34 fix: strict-output requirement to stop chatty models
+				// (haiku 4.5) from returning prose instead of DDL/marker.
+				"STRICT OUTPUT REQUIREMENT",
+				"Do not include explanations",
 			} {
 				if !strings.Contains(prompt, p) {
 					t.Errorf("prompt missing required phrase %q\n--- prompt tail ---\n%s",
@@ -1969,6 +1973,10 @@ func TestBuildTableDDLPrompt_PreviousAttempt(t *testing.T) {
 				// must invite the model to bail with NOT_RETRYABLE on non-fixable errors.
 				"NOT_RETRYABLE",
 				"RETRY CLASSIFICATION",
+				// #34 fix: strict-output requirement to stop chatty models
+				// (haiku 4.5) from returning prose instead of DDL/marker.
+				"STRICT OUTPUT REQUIREMENT",
+				"Do not include explanations",
 			},
 		},
 	}
