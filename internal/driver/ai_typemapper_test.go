@@ -1324,6 +1324,10 @@ func TestBuildFinalizationDDLPrompt_PreviousAttempt(t *testing.T) {
 				"Database error (verbatim):",
 				dbError,
 				"only fix what the error indicates is wrong",
+				// AI-classifier conversion (#29 follow-up): finalize retry
+				// prompts also invite NOT_RETRYABLE bailout on non-fixable errors.
+				"NOT_RETRYABLE",
+				"RETRY CLASSIFICATION",
 			} {
 				if !strings.Contains(prompt, p) {
 					t.Errorf("prompt missing required phrase %q\n--- prompt tail ---\n%s",
@@ -1960,6 +1964,10 @@ func TestBuildTableDDLPrompt_PreviousAttempt(t *testing.T) {
 				"Database error (verbatim):",
 				dbError, // the verbatim error must appear
 				"only fix what the error indicates is wrong", // the corrective instruction
+				// AI-classifier conversion (#29 follow-up): retry-corrective prompts
+				// must invite the model to bail with NOT_RETRYABLE on non-fixable errors.
+				"NOT_RETRYABLE",
+				"RETRY CLASSIFICATION",
 			},
 		},
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -333,6 +334,10 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 
 		resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
 		if err != nil {
+			if errors.Is(err, driver.ErrNotRetryable) {
+				logging.Info("table %s: AI classified DB error as non-retryable (%v); surfacing original error", t.FullName(), err)
+				return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), lastErr, lastDDL)
+			}
 			return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
 		}
 		ddl := resp.CreateTableDDL
@@ -351,9 +356,7 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 
 		lastDDL = ddl
 		lastErr = err
-		if !isRetryableDDLError(err) {
-			break
-		}
+		// No classifier — let the next iteration ask the AI.
 	}
 	return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), lastErr, lastDDL)
 }

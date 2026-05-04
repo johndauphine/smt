@@ -1491,6 +1491,7 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 		sb.WriteString("\n\nDatabase error (verbatim):\n")
 		sb.WriteString(req.PreviousAttempt.Error)
 		sb.WriteString("\n\nGenerate a corrected CREATE TABLE for the same source table. Use the same target column names, types, and constraints — only fix what the error indicates is wrong. Do not regenerate from scratch.\n")
+		writeRetryClassificationInstruction(&sb)
 	}
 
 	return sb.String()
@@ -1858,7 +1859,15 @@ func columnIntrospection(col Column) map[string]any {
 }
 
 // parseTableDDLResponse extracts the DDL and column types from AI response.
+// On retry calls (where the prompt invited a NOT_RETRYABLE classification),
+// the model may emit the marker instead of DDL — that case is detected here
+// and surfaced as ErrNotRetryable so the writer can break out of its retry
+// loop with the original DB error preserved.
 func (m *AITypeMapper) parseTableDDLResponse(response string, sourceTable *Table) (*TableDDLResponse, error) {
+	if abort, reason := classifyRetryResponse(response); abort {
+		return nil, WrapNotRetryable(reason)
+	}
+
 	ddl := strings.TrimSpace(response)
 
 	// Basic validation - should start with CREATE TABLE
@@ -1995,6 +2004,13 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 			req.Table.Name, entityName, err)
 	}
 
+	// On retry calls the prompt invited a NOT_RETRYABLE classification; if the
+	// model chose that path, surface ErrNotRetryable to the writer so it
+	// breaks out of the retry loop with the original DB error preserved.
+	if abort, reason := classifyRetryResponse(result); abort {
+		return "", WrapNotRetryable(reason)
+	}
+
 	ddl := strings.TrimSpace(result)
 
 	// Validate response starts with expected prefix
@@ -2029,6 +2045,25 @@ func writeFinalizationPriorAttempt(sb *strings.Builder, req FinalizationDDLReque
 	sb.WriteString("\n\nDatabase error (verbatim):\n")
 	sb.WriteString(req.PreviousAttempt.Error)
 	sb.WriteString("\n\nGenerate a corrected DDL for the same target object. Keep the same identifiers, columns, and intent — only fix what the error indicates is wrong. Do not regenerate from scratch.\n")
+	writeRetryClassificationInstruction(sb)
+}
+
+// writeRetryClassificationInstruction adds a "fix or bail" tail to retry-path
+// prompts. The AI must either return corrected DDL (the normal output the
+// validators look for) or — if the error is a non-fixable state issue — emit
+// the literal NOT_RETRYABLE marker on the first line. The writer's retry loop
+// errors.Is-checks for ErrNotRetryable and surfaces the original DB error
+// instead of consuming the rest of the retry budget.
+//
+// This is the load-bearing prompt change behind the AI-classifier conversion
+// (#29 follow-up): it lets us delete per-driver isRetryableDDLError SQLSTATE
+// allowlists and rely on the model to recognize cases where retry is futile.
+// Phrasing examples come from real cases that surfaced in matrix runs:
+// PG 42883 (uuid()), MySQL 1213 (deadlock), MSSQL 2714 (already exists).
+func writeRetryClassificationInstruction(sb *strings.Builder) {
+	sb.WriteString("\nIMPORTANT — RETRY CLASSIFICATION:\n")
+	sb.WriteString("If, after reading the database error, you determine that retrying will NOT help — for example: the object already exists in the target, an FK references a missing parent, the user lacks permission, the error is a real data-integrity violation, the operation deadlocked, or the connection failed — respond with ONLY the literal text NOT_RETRYABLE on the first line, optionally followed by ': ' and a one-sentence reason. Emit no DDL, no code fences, no other text in that case.\n")
+	sb.WriteString("Otherwise (the error indicates a fixable defect in the DDL — wrong syntax, unknown type, undeclared function, malformed clause, etc.), return the corrected DDL as instructed above.\n")
 }
 
 // buildIndexDDLPrompt creates the AI prompt for index DDL generation.
