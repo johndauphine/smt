@@ -337,12 +337,13 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		}
 
 		if _, err = w.pool.Exec(ctx, execDDL); err == nil {
-			// Success. If this was a retry, re-prime the AI cache so future
-			// first-try calls for this table-shape get the validated DDL
-			// instead of whatever bad DDL the first attempt cached. Cache
-			// the AI-returned form (aiDDL), not the Unlogged-rewritten form.
+			// Success — cache the validated DDL (#32). Mapper no longer caches
+			// AI output on its own, so this is the only path that populates
+			// the cache. Cache the AI-returned form (aiDDL), not the
+			// Unlogged-rewritten form, because tableCacheKey doesn't carry
+			// opts.Unlogged and the writer reapplies the rewrite per-call.
+			w.tableMapper.CacheTableDDL(req, aiDDL)
 			if attempt > 0 {
-				w.tableMapper.CacheTableDDL(req, aiDDL)
 				logging.Info("table %s succeeded on retry attempt %d/%d", t.FullName(), attempt, opts.MaxRetries)
 			}
 			return nil

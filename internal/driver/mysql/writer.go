@@ -347,8 +347,9 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		}
 
 		if _, err = w.db.ExecContext(ctx, ddl); err == nil {
+			// Cache validated DDL after exec confirms it works (#32).
+			w.tableMapper.CacheTableDDL(req, ddl)
 			if attempt > 0 {
-				w.tableMapper.CacheTableDDL(req, ddl)
 				logging.Info("table %s succeeded on retry attempt %d/%d", t.FullName(), attempt, opts.MaxRetries)
 			}
 			return nil
