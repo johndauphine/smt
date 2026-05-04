@@ -33,16 +33,20 @@ type TableTypeMapper interface {
 	CanMap(sourceDBType, targetDBType string) bool
 
 	// CacheTableDDL stores a known-good DDL for the request, replacing any prior
-	// cached value. Called by the writer after a CREATE TABLE has successfully
-	// executed against the target database — turns a runtime-validated DDL into
-	// the entry future GenerateTableDDL calls (without PreviousAttempt) will hit.
+	// cached value. This is the ONLY cache-write entry point — the mapper
+	// itself never writes the cache because it only sees AI output, not
+	// validated DDL (see #32). The writer calls this after every successful
+	// CREATE TABLE execution (first-try and retry alike); a failed exec leaves
+	// the cache untouched so the next call gets a fresh AI invocation rather
+	// than a poisoned hit.
 	//
-	// Without this method, a first-try call that produces bad DDL caches the bad
-	// DDL; a subsequent retry with PreviousAttempt produces good DDL but bypasses
-	// the cache for both lookup and store, so the bad cached DDL remains and a
-	// future migration of the same table-shape would fail again. CacheTableDDL
-	// closes that loop by letting the writer re-prime the cache once the database
-	// has confirmed the DDL is correct.
+	// History: an earlier shape cached AI output inside the mapper, with the
+	// writer additionally calling CacheTableDDL on retry success to overwrite
+	// any bad-DDL cache poisoning. That worked when retries succeeded but left
+	// stale bad DDL cached when retries didn't fire (allowlist false negative)
+	// or didn't succeed (model couldn't converge), causing 0-second failures
+	// on subsequent runs against the same source-table shape. Moving the cache
+	// write to post-exec eliminates the entire failure mode.
 	CacheTableDDL(req TableDDLRequest, ddl string)
 }
 

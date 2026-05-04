@@ -1325,18 +1325,13 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 			req.SourceTable.Schema, req.SourceTable.Name, err)
 	}
 
-	// Cache the DDL result on first-try only. Retry results are cached by the
-	// writer via CacheTableDDL after the database confirms the DDL is valid —
-	// don't cache here because we haven't yet validated the result.
-	if !isRetry {
-		m.cacheMu.Lock()
-		m.cache.Set(cacheKey, response.CreateTableDDL)
-		m.cacheMu.Unlock()
-
-		if err := m.saveCache(); err != nil {
-			logging.Warn("Failed to save AI table DDL cache: %v", err)
-		}
-	}
+	// Cache writes are deferred to the writer's CacheTableDDL call after the
+	// database confirms the DDL executes — see #32. Caching here would persist
+	// AI output that hasn't been validated against the target DB; if the DDL
+	// then fails (and the AI-classifier can't fix it on retry), the bad DDL
+	// would stay cached and poison every subsequent run for the same table
+	// shape with no chance to re-call the AI. Mapper is now read-only on the
+	// cache; only validated DDL ever gets stored.
 
 	logging.Debug("AI generated DDL for %s.%s (%d columns mapped, retry=%v)",
 		req.SourceTable.Schema, req.SourceTable.Name, len(response.ColumnTypes), isRetry)
@@ -1345,11 +1340,12 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 }
 
 // CacheTableDDL stores a known-good DDL for the request, replacing any prior
-// cached value. The writer calls this after a successful CREATE TABLE
-// execution against the target database, including after a retry that
-// corrected a previously-cached bad DDL — see TableTypeMapper for the full
-// rationale on why the AI mapper can't safely cache on its own when retry is
-// involved.
+// cached value. This is the ONLY entry point that writes to the AI table-DDL
+// cache (#32) — the mapper itself never caches because it only sees AI output,
+// not validated DDL. The writer calls this after every successful CREATE TABLE
+// execution (first-try success and retry success alike); a failed exec leaves
+// the cache untouched so the next call gets a fresh AI invocation rather than
+// a poisoned hit.
 func (m *AITypeMapper) CacheTableDDL(req TableDDLRequest, ddl string) {
 	cacheKey := m.tableCacheKey(req)
 	m.cacheMu.Lock()

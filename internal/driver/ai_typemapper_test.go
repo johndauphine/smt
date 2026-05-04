@@ -1990,6 +1990,161 @@ func TestBuildTableDDLPrompt_PreviousAttempt(t *testing.T) {
 	}
 }
 
+// TestGenerateTableDDL_DoesNotAutoCache_Issue32 is the regression test for #32:
+// the mapper must NOT write to its own cache after GenerateTableDDL, because
+// at that point the AI's output hasn't been validated against the target
+// database. The writer's CacheTableDDL is now the only path that populates
+// the cache, and it's only called after a successful exec — so a failed DDL
+// can no longer poison the cache for subsequent runs.
+//
+// History: this used to be the failure mode that caused mysql→pg with gpt-oss
+// to fail in 0 seconds on every re-run after the first attempt cached bad
+// uuid()/42883 DDL. Required `rm ~/.smt/type-cache.json` to recover. See PR
+// thread on issue #32.
+func TestGenerateTableDDL_DoesNotAutoCache_Issue32(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return a syntactically-valid CREATE TABLE — what matters here is what
+		// the mapper does AFTER successfully parsing the AI response, not the
+		// content of the DDL.
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(openAIResponse{
+			Choices: []struct {
+				Message struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{
+				{
+					Message: struct {
+						Content          string `json:"content"`
+						ReasoningContent string `json:"reasoning_content"`
+					}{Content: "CREATE TABLE public.foo (id integer NOT NULL);"},
+					FinishReason: "stop",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "lmstudio", &secrets.Provider{
+		APIKey:  "",
+		Model:   "test-model",
+		BaseURL: server.URL,
+	})
+	mapper.client = server.Client()
+
+	req := TableDDLRequest{
+		SourceDBType: "mysql", TargetDBType: "postgres",
+		SourceTable: &Table{
+			Schema:     "src",
+			Name:       "foo",
+			PrimaryKey: []string{"id"},
+			Columns:    []Column{{Name: "id", DataType: "int"}},
+		},
+		TargetSchema: "public",
+	}
+
+	resp, err := mapper.GenerateTableDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("GenerateTableDDL: %v", err)
+	}
+	if resp == nil || resp.CreateTableDDL == "" {
+		t.Fatal("expected a non-empty DDL response from the mock")
+	}
+
+	// THE FIX FOR #32: the mapper must not have written to its own cache
+	// during GenerateTableDDL. Until the writer calls CacheTableDDL after a
+	// successful exec, the cache is empty for this key.
+	cacheKey := mapper.tableCacheKey(req)
+	mapper.cacheMu.RLock()
+	_, hit := mapper.cache.Get(cacheKey)
+	mapper.cacheMu.RUnlock()
+	if hit {
+		t.Errorf("BUG (#32): mapper auto-cached AI output before exec validation; cache must remain empty until CacheTableDDL is called")
+	}
+
+	// Sanity: the existing CacheTableDDL path still works as the writer's
+	// post-exec entry point.
+	mapper.CacheTableDDL(req, resp.CreateTableDDL)
+	mapper.cacheMu.RLock()
+	cached, _ := mapper.cache.Get(cacheKey)
+	mapper.cacheMu.RUnlock()
+	if cached != resp.CreateTableDDL {
+		t.Errorf("explicit CacheTableDDL didn't populate cache:\n  got:  %q\n  want: %q", cached, resp.CreateTableDDL)
+	}
+}
+
+// TestGenerateTableDDL_FailedFirstTryDoesNotPoison_Issue32 simulates the
+// pathological case the old behavior introduced: AI generated a DDL, mapper
+// auto-cached it, exec failed (and the AI-classifier or retry budget couldn't
+// fix it). The next run for the same source table would hit the cache
+// instantly and fail with the same error in 0 seconds.
+//
+// Under the #32 fix, a GenerateTableDDL call followed by NO CacheTableDDL
+// (the writer never called it because exec failed) leaves the cache empty —
+// so the next GenerateTableDDL invokes the AI again with a fresh chance.
+func TestGenerateTableDDL_FailedFirstTryDoesNotPoison_Issue32(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(openAIResponse{
+			Choices: []struct {
+				Message struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{
+				{
+					Message: struct {
+						Content          string `json:"content"`
+						ReasoningContent string `json:"reasoning_content"`
+					}{Content: "CREATE TABLE public.foo (id integer);"},
+					FinishReason: "stop",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "lmstudio", &secrets.Provider{
+		APIKey: "", Model: "test-model", BaseURL: server.URL,
+	})
+	mapper.client = server.Client()
+
+	req := TableDDLRequest{
+		SourceDBType: "mysql", TargetDBType: "postgres",
+		SourceTable: &Table{
+			Schema:     "src",
+			Name:       "foo",
+			PrimaryKey: []string{"id"},
+			Columns:    []Column{{Name: "id", DataType: "int"}},
+		},
+		TargetSchema: "public",
+	}
+
+	// First call: simulates the writer calling GenerateTableDDL but then NOT
+	// calling CacheTableDDL because the subsequent exec failed.
+	if _, err := mapper.GenerateTableDDL(context.Background(), req); err != nil {
+		t.Fatalf("first GenerateTableDDL: %v", err)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 AI call, got %d", callCount)
+	}
+
+	// Second call with identical req: must invoke the AI again because the
+	// cache is empty (no CacheTableDDL between calls). Pre-#32 this would
+	// have hit the cache and skipped the AI entirely.
+	if _, err := mapper.GenerateTableDDL(context.Background(), req); err != nil {
+		t.Fatalf("second GenerateTableDDL: %v", err)
+	}
+	if callCount != 2 {
+		t.Errorf("BUG (#32): second GenerateTableDDL hit cache instead of re-calling AI; got %d total calls, want 2", callCount)
+	}
+}
+
 // TestCacheTableDDL is a regression guard for the cache-replacement behavior
 // the writer relies on after a successful retry. Without this, a first-try
 // call that produced bad DDL would leave the bad DDL cached, and a future
