@@ -269,6 +269,51 @@ func containsHelper(s, substr string) bool {
 	return false
 }
 
+// TestValidateReasoningEffort pins the contract added in PR #36: empty is
+// always fine, the three allowed values pass through (case-insensitive,
+// whitespace trimmed, normalized to lowercase), pure-whitespace input
+// collapses to empty, and anything else fails Validate() with a message
+// that names both the field and the bad value. The validator catches typos
+// at config-load time so users don't silently lose the setting (some
+// upstream APIs would just ignore garbage values).
+func TestValidateReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		wantErr        bool
+		wantNormalized string
+	}{
+		{"empty is allowed (field not sent)", "", false, ""},
+		{"low passes through", "low", false, "low"},
+		{"medium passes through", "medium", false, "medium"},
+		{"high passes through", "high", false, "high"},
+		{"uppercase normalized to lowercase", "HIGH", false, "high"},
+		{"mixed case normalized", "Medium", false, "medium"},
+		{"whitespace trimmed", "  low  ", false, "low"},
+		{"pure whitespace collapses to empty", "   ", false, ""},
+		{"typo lo rejected", "lo", true, ""},
+		{"typo hihg rejected", "hihg", true, ""},
+		{"unrelated word rejected", "fast", true, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Provider{
+				BaseURL:         "http://localhost:1234", // satisfies the unknown-provider branch
+				ReasoningEffort: tt.input,
+			}
+			err := validateProvider("test-provider", p)
+			gotErr := err != nil
+			if gotErr != tt.wantErr {
+				t.Errorf("validateProvider err=%v, wantErr=%v (input=%q)", err, tt.wantErr, tt.input)
+			}
+			if !tt.wantErr && p.ReasoningEffort != tt.wantNormalized {
+				t.Errorf("normalized=%q, want %q (input=%q)", p.ReasoningEffort, tt.wantNormalized, tt.input)
+			}
+		})
+	}
+}
+
 func TestGetEffectiveModelTemperature(t *testing.T) {
 	tests := []struct {
 		name     string

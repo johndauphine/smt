@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -81,7 +82,7 @@ type Provider struct {
 	MaxTokens        int      `yaml:"max_tokens,omitempty"`        // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
 	TimeoutSeconds   int      `yaml:"timeout_seconds,omitempty"`   // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
 	ModelTemperature *float64 `yaml:"model_temperature,omitempty"` // Optional sampling temperature for the model. Defaults to 0 (deterministic). Some providers reject 0 for certain models — e.g. OpenAI reasoning models (o-series, gpt-5.x) require model_temperature: 1.
-	ReasoningEffort  string   `yaml:"reasoning_effort,omitempty"`  // Optional reasoning_effort hint for reasoning-capable models (gpt-oss, OpenAI o-series, gpt-5.x). Allowed values: "low", "medium", "high". Empty (omitted) means don't send the field — the server uses the model's built-in default (typically "medium" for gpt-oss). Set to "low" to trade reliability for ~2-3× speed; set to "high" to trade speed for fewer retries.
+	ReasoningEffort  string   `yaml:"reasoning_effort,omitempty"`  // Optional reasoning_effort hint for reasoning-capable models (gpt-oss, OpenAI o-series, gpt-5.x). Allowed values: "low", "medium", "high" (case-insensitive, whitespace trimmed; normalized to lowercase by the config loader). Empty (omitted) means don't send the field — the server uses the model's built-in default (typically "medium" for gpt-oss). Set to "low" to trade reliability for ~2-3× speed; set to "high" to trade speed for fewer retries. Anything else fails Config.Validate() with a clear error message rather than getting silently ignored by the upstream API.
 }
 
 // EncryptionConfig holds encryption-related secrets
@@ -389,6 +390,22 @@ func validateProvider(name string, p *Provider) error {
 		}
 	}
 
+	// Normalize and validate reasoning_effort. Trim+lowercase first so
+	// stray whitespace and case variations don't reject input the user
+	// clearly meant to be valid; treat pure-whitespace as empty (don't
+	// send the field). Reject anything outside the allowed set so the
+	// config-load step catches typos like "lo" or "Hi" before they
+	// reach the upstream API as silently-ignored garbage.
+	normalized := strings.ToLower(strings.TrimSpace(p.ReasoningEffort))
+	switch normalized {
+	case "":
+		p.ReasoningEffort = "" // pure-whitespace input collapses to empty
+	case "low", "medium", "high":
+		p.ReasoningEffort = normalized
+	default:
+		return fmt.Errorf("provider %q has invalid reasoning_effort %q (allowed: \"low\", \"medium\", \"high\", or omit)", name, p.ReasoningEffort)
+	}
+
 	return nil
 }
 
@@ -559,6 +576,9 @@ ai:
       model: "gpt-4o"  # optional
       # model_temperature: 1  # required when model is an OpenAI reasoning family
       #                       # (o-series, gpt-5.x) — they reject the default 0
+      # reasoning_effort: "medium"  # optional: "low" | "medium" | "high"
+      #                             # Honored by reasoning models (o-series, gpt-5.x);
+      #                             # ignored by others. Omit to use the model default.
 
     gemini:
       api_key: ""  # Get from https://makersuite.google.com/
@@ -582,6 +602,10 @@ ai:
       model: "local-model"
       # context_window: 8192  # optional, configure based on your model
       # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
+      # reasoning_effort: "low"  # optional: "low" | "medium" | "high"
+      #                          # Honored by gpt-oss; ignored by non-reasoning models.
+      #                          # "low" trades reliability for ~2-3× speed; "high" trades
+      #                          # speed for fewer retries. Omit to use the model default.
 
 encryption:
   master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32
