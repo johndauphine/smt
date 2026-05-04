@@ -1252,6 +1252,88 @@ func TestBuildCheckConstraintDDLPrompt_NoSourceDB(t *testing.T) {
 	}
 }
 
+// TestBuildFinalizationDDLPrompt_PreviousAttempt is the PR B (finalize phase)
+// counterpart to TestBuildTableDDLPrompt_PreviousAttempt. Exercises each of
+// the three finalize prompt builders with and without a PreviousAttempt to
+// confirm the corrective section is appended verbatim only on retry.
+//
+// All three builders share writeFinalizationPriorAttempt, so this test
+// exercises the helper across every entry point rather than spreading three
+// nearly-identical tests across the file. See #29 PR B.
+func TestBuildFinalizationDDLPrompt_PreviousAttempt(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	tbl := &Table{Schema: "dbo", Name: "Orders"}
+
+	const (
+		failedDDL = `CREATE INDEX idx_orders_customer ON dbo.Orders (customer_id) INCLUDE first_name;`
+		dbError   = "ERROR: syntax error at or near \"first_name\" (SQLSTATE 42601)"
+	)
+
+	prevOK := &FinalizationDDLAttempt{DDL: failedDDL, Error: dbError}
+
+	cases := []struct {
+		name  string
+		build func(req FinalizationDDLRequest) string
+		req   FinalizationDDLRequest
+	}{
+		{
+			name:  "index",
+			build: mapper.buildIndexDDLPrompt,
+			req: FinalizationDDLRequest{
+				Type: DDLTypeIndex, TargetDBType: "postgres", Table: tbl,
+				Index: &Index{Name: "idx_orders_customer", Columns: []string{"customer_id"}},
+			},
+		},
+		{
+			name:  "foreign_key",
+			build: mapper.buildForeignKeyDDLPrompt,
+			req: FinalizationDDLRequest{
+				Type: DDLTypeForeignKey, TargetDBType: "postgres", Table: tbl,
+				ForeignKey: &ForeignKey{Name: "fk_orders_customer", Columns: []string{"customer_id"}, RefTable: "Customers", RefColumns: []string{"id"}},
+			},
+		},
+		{
+			name:  "check",
+			build: mapper.buildCheckConstraintDDLPrompt,
+			req: FinalizationDDLRequest{
+				Type: DDLTypeCheckConstraint, TargetDBType: "postgres", Table: tbl,
+				CheckConstraint: &CheckConstraint{Name: "chk_orders_total", Definition: "(total >= 0)"},
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name+"/no_PreviousAttempt", func(t *testing.T) {
+			prompt := c.build(c.req)
+			for _, p := range []string{"PRIOR ATTEMPT FAILED", "Previous DDL", "Database error"} {
+				if strings.Contains(prompt, p) {
+					t.Errorf("prompt unexpectedly contains %q without PreviousAttempt set", p)
+				}
+			}
+		})
+
+		t.Run(c.name+"/with_PreviousAttempt", func(t *testing.T) {
+			req := c.req
+			req.PreviousAttempt = prevOK
+			prompt := c.build(req)
+			for _, p := range []string{
+				"=== PRIOR ATTEMPT FAILED ===",
+				"Previous DDL (verbatim):",
+				failedDDL,
+				"Database error (verbatim):",
+				dbError,
+				"only fix what the error indicates is wrong",
+			} {
+				if !strings.Contains(prompt, p) {
+					t.Errorf("prompt missing required phrase %q\n--- prompt tail ---\n%s",
+						p, prompt[max(0, len(prompt)-1200):])
+				}
+			}
+		})
+	}
+}
+
 func TestTruncateString(t *testing.T) {
 	tests := []struct {
 		name     string

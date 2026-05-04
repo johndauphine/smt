@@ -1,10 +1,15 @@
 package mysql
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
+
+	"smt/internal/driver"
+	"smt/internal/logging"
 )
 
 // isRetryableDDLError reports whether a CREATE TABLE / index / FK / CHECK
@@ -73,4 +78,46 @@ func isRetryableDDLError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// retryFinalize generates DDL via the finalization mapper and executes it,
+// retrying on retryable DDL errors up to maxRetries times. Each retry feeds
+// the prior failed DDL plus the database error back into the AI prompt via
+// FinalizationDDLRequest.PreviousAttempt — same shape as the postgres helper.
+// See #29 PR B; the finalization mapper has no cache so successful retries
+// don't need any re-prime step.
+func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, maxRetries int, label string) error {
+	var (
+		lastDDL string
+		lastErr error
+	)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			req.PreviousAttempt = &driver.FinalizationDDLAttempt{
+				DDL:   lastDDL,
+				Error: lastErr.Error(),
+			}
+			logging.Info("retry attempt %d/%d for %s after retryable DDL error: %v",
+				attempt, maxRetries, label, lastErr)
+		}
+
+		ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, req)
+		if err != nil {
+			return fmt.Errorf("AI DDL generation failed for %s: %w", label, err)
+		}
+
+		if _, execErr := w.db.ExecContext(ctx, ddl); execErr == nil {
+			if attempt > 0 {
+				logging.Info("%s succeeded on retry attempt %d/%d", label, attempt, maxRetries)
+			}
+			return nil
+		} else {
+			lastDDL = ddl
+			lastErr = execErr
+			if !isRetryableDDLError(execErr) {
+				break
+			}
+		}
+	}
+	return fmt.Errorf("%s: %w\nDDL: %s", label, lastErr, lastDDL)
 }

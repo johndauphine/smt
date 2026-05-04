@@ -525,11 +525,17 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 
 // CreateIndex creates an index on the target table using AI-generated DDL.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
+	return w.CreateIndexWithOptions(ctx, t, idx, targetSchema, driver.FinalizeOptions{})
+}
+
+// CreateIndexWithOptions creates an index using AI-generated DDL, retrying on
+// retryable DDL errors per opts.MaxRetries. See retryFinalize and #29 PR B.
+func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for index creation")
 	}
 
-	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+	req := driver.FinalizationDDLRequest{
 		Type:          driver.DDLTypeIndex,
 		SourceDBType:  w.sourceType,
 		TargetDBType:  "mysql",
@@ -537,17 +543,18 @@ func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.I
 		Index:         idx,
 		TargetSchema:  targetSchema,
 		TargetContext: w.dbContext,
-	})
-	if err != nil {
-		return fmt.Errorf("AI index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
 	}
-
-	_, err = w.db.ExecContext(ctx, ddl)
-	return err
+	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("index %s.%s", t.Name, idx.Name))
 }
 
 // CreateForeignKey creates a foreign key constraint using AI-generated DDL.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
+	return w.CreateForeignKeyWithOptions(ctx, t, fk, targetSchema, driver.FinalizeOptions{})
+}
+
+// CreateForeignKeyWithOptions creates a foreign key using AI-generated DDL,
+// retrying on retryable DDL errors per opts.MaxRetries. See #29 PR B.
+func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
@@ -561,7 +568,7 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 	fkForTarget := *fk
 	fkForTarget.RefSchema = targetSchema
 
-	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+	req := driver.FinalizationDDLRequest{
 		Type:          driver.DDLTypeForeignKey,
 		SourceDBType:  w.sourceType,
 		TargetDBType:  "mysql",
@@ -569,23 +576,24 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 		ForeignKey:    &fkForTarget,
 		TargetSchema:  targetSchema,
 		TargetContext: w.dbContext,
-	})
-	if err != nil {
-		return fmt.Errorf("AI FK DDL generation failed for %s.%s: %w", t.Name, fk.Name, err)
 	}
-
-	_, err = w.db.ExecContext(ctx, ddl)
-	return err
+	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("FK %s.%s", t.Name, fk.Name))
 }
 
 // CreateCheckConstraint creates a check constraint using AI-generated DDL.
 // Note: MySQL 8.0.16+ supports CHECK constraints, earlier versions ignore them.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
+	return w.CreateCheckConstraintWithOptions(ctx, t, chk, targetSchema, driver.FinalizeOptions{})
+}
+
+// CreateCheckConstraintWithOptions creates a CHECK constraint using AI-generated
+// DDL, retrying on retryable DDL errors per opts.MaxRetries. See #29 PR B.
+func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for check constraint creation")
 	}
 
-	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+	req := driver.FinalizationDDLRequest{
 		Type:            driver.DDLTypeCheckConstraint,
 		SourceDBType:    w.sourceType,
 		TargetDBType:    "mysql",
@@ -593,13 +601,8 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 		CheckConstraint: chk,
 		TargetSchema:    targetSchema,
 		TargetContext:   w.dbContext,
-	})
-	if err != nil {
-		return fmt.Errorf("AI check constraint DDL generation failed for %s.%s: %w", t.Name, chk.Name, err)
 	}
-
-	_, err = w.db.ExecContext(ctx, ddl)
-	return err
+	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("CHECK %s.%s", t.Name, chk.Name))
 }
 
 // WriteBatch writes a batch of rows using multi-row INSERT.

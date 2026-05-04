@@ -1,10 +1,15 @@
 package postgres
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"smt/internal/driver"
+	"smt/internal/logging"
 )
 
 // isRetryableDDLError reports whether a CREATE TABLE / index / FK / CHECK
@@ -61,4 +66,50 @@ func isRetryableDDLError(err error) bool {
 	return strings.Contains(msg, "SQLSTATE 42601") ||
 		strings.Contains(msg, "SQLSTATE 42704") ||
 		strings.Contains(msg, "SQLSTATE 42P17")
+}
+
+// retryFinalize generates DDL via the finalization mapper and executes it,
+// retrying on retryable DDL errors up to maxRetries times. Each retry feeds
+// the prior failed DDL plus the database error back into the AI prompt via
+// FinalizationDDLRequest.PreviousAttempt — same validate-and-retry shape as
+// CreateTableWithOptions, applied to the index/FK/CHECK phases. See #29 PR B.
+//
+// Unlike the table-creation path, the finalization mapper has no cache, so
+// there's no cache-poisoning concern: a successful retry doesn't need to
+// re-prime anything. label is used for logging and the wrapping error message
+// (e.g. "index Orders.idx_customer", "FK Orders.fk_customer").
+func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, maxRetries int, label string) error {
+	var (
+		lastDDL string
+		lastErr error
+	)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			req.PreviousAttempt = &driver.FinalizationDDLAttempt{
+				DDL:   lastDDL,
+				Error: lastErr.Error(),
+			}
+			logging.Info("retry attempt %d/%d for %s after retryable DDL error: %v",
+				attempt, maxRetries, label, lastErr)
+		}
+
+		ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, req)
+		if err != nil {
+			return fmt.Errorf("AI DDL generation failed for %s: %w", label, err)
+		}
+
+		if _, execErr := w.pool.Exec(ctx, ddl); execErr == nil {
+			if attempt > 0 {
+				logging.Info("%s succeeded on retry attempt %d/%d", label, attempt, maxRetries)
+			}
+			return nil
+		} else {
+			lastDDL = ddl
+			lastErr = execErr
+			if !isRetryableDDLError(execErr) {
+				break
+			}
+		}
+	}
+	return fmt.Errorf("%s: %w\nDDL: %s", label, lastErr, lastDDL)
 }

@@ -262,13 +262,15 @@ type MigrationConfig struct {
 	AIConcurrency int `yaml:"ai_concurrency"`
 
 	// AIMaxRetries caps how many times the writer re-asks the AI to fix a
-	// CREATE TABLE that the database rejected with a syntactically-suspect
-	// error (parser error, missing type, non-immutable generation expression,
-	// MySQL Error 1064/1067/1101, MSSQL "Incorrect syntax near", etc.). On a
-	// retryable error the prior failed DDL plus the database's verbatim error
-	// are appended to the next AI prompt, giving the model exact corrective
+	// CREATE TABLE / CREATE INDEX / FOREIGN KEY / CHECK CONSTRAINT that the
+	// database rejected with a syntactically-suspect error (parser error,
+	// missing type, non-immutable generation expression, MySQL Error
+	// 1064/1067/1101, MSSQL "Incorrect syntax near", etc.). On a retryable
+	// error the prior failed DDL plus the database's verbatim error are
+	// appended to the next AI prompt, giving the model exact corrective
 	// context. Non-retryable errors (object already exists, FK violations,
 	// permission denied, etc.) bypass the loop and surface immediately.
+	// Applies to all four DDL phases — see #29 PR A (table) and PR B (finalize).
 	//
 	// Default 0 means "no retries" — preserves pre-#29 behavior. Set to 3
 	// for the recommended setting (variance experiment showed per-call

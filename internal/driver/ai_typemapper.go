@@ -2012,6 +2012,25 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 	return ddl, nil
 }
 
+// writeFinalizationPriorAttempt appends a "PRIOR ATTEMPT FAILED" section to a
+// finalization-DDL prompt when req.PreviousAttempt is set. Shared by the three
+// finalization prompt builders (index / FK / CHECK) so the retry-corrective
+// section has the same shape across all DDL types. See #29 PR B for the
+// validate-and-retry design; the table-creation equivalent is the inline block
+// in buildTableDDLPrompt.
+func writeFinalizationPriorAttempt(sb *strings.Builder, req FinalizationDDLRequest) {
+	if req.PreviousAttempt == nil {
+		return
+	}
+	sb.WriteString("\n=== PRIOR ATTEMPT FAILED ===\n")
+	sb.WriteString("The previous DDL you generated was rejected by the target database.\n\n")
+	sb.WriteString("Previous DDL (verbatim):\n")
+	sb.WriteString(req.PreviousAttempt.DDL)
+	sb.WriteString("\n\nDatabase error (verbatim):\n")
+	sb.WriteString(req.PreviousAttempt.Error)
+	sb.WriteString("\n\nGenerate a corrected DDL for the same target object. Keep the same identifiers, columns, and intent — only fix what the error indicates is wrong. Do not regenerate from scratch.\n")
+}
+
 // buildIndexDDLPrompt creates the AI prompt for index DDL generation.
 func (m *AITypeMapper) buildIndexDDLPrompt(req FinalizationDDLRequest) string {
 	var sb strings.Builder
@@ -2070,6 +2089,10 @@ func (m *AITypeMapper) buildIndexDDLPrompt(req FinalizationDDLRequest) string {
 			sb.WriteString(aug)
 		}
 	}
+
+	// Retry-corrective context — see #29 PR B. Appended last so the model
+	// gives the prior failure maximum weight when generating the next try.
+	writeFinalizationPriorAttempt(&sb, req)
 
 	return sb.String()
 }
@@ -2137,6 +2160,10 @@ func (m *AITypeMapper) buildForeignKeyDDLPrompt(req FinalizationDDLRequest) stri
 		}
 	}
 
+	// Retry-corrective context — see #29 PR B. Appended last so the model
+	// gives the prior failure maximum weight when generating the next try.
+	writeFinalizationPriorAttempt(&sb, req)
+
 	return sb.String()
 }
 
@@ -2197,6 +2224,10 @@ func (m *AITypeMapper) buildCheckConstraintDDLPrompt(req FinalizationDDLRequest)
 			sb.WriteString(aug)
 		}
 	}
+
+	// Retry-corrective context — see #29 PR B. Appended last so the model
+	// gives the prior failure maximum weight when generating the next try.
+	writeFinalizationPriorAttempt(&sb, req)
 
 	return sb.String()
 }
