@@ -9,6 +9,43 @@ import (
 
 func tbl(name string) source.Table { return source.Table{Name: name} }
 
+// TestAIMaxRetries pins the contract for the unset / explicit-zero /
+// positive / negative cases. The pointer type on Migration.AIMaxRetries
+// is the key to making "user didn't set it" (nil → default) distinguishable
+// from "user explicitly opted out" (set to 0 → no retries). See the
+// helper's docstring.
+func TestAIMaxRetries(t *testing.T) {
+	intp := func(n int) *int { return &n }
+
+	tests := []struct {
+		name     string
+		configIn *int
+		want     int
+	}{
+		{"unset (nil) → default", nil, defaultAIMaxRetries},
+		{"explicit zero is the opt-out → 0", intp(0), 0},
+		{"explicit 1", intp(1), 1},
+		{"explicit positive value passes through", intp(5), 5},
+		{"negative is treated as 0 (defensive clamp)", intp(-1), 0},
+		{"deeply negative still maps to 0", intp(-42), 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Migration.AIMaxRetries = tt.configIn
+			o := &Orchestrator{config: cfg}
+			if got := o.aiMaxRetries(); got != tt.want {
+				var in any = "nil"
+				if tt.configIn != nil {
+					in = *tt.configIn
+				}
+				t.Errorf("aiMaxRetries() with config=%v = %d, want %d", in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFilterTables_NoConfig(t *testing.T) {
 	o := &Orchestrator{config: &config.Config{}}
 	in := []source.Table{tbl("Users"), tbl("Posts"), tbl("__schema_versions")}

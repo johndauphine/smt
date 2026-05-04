@@ -27,8 +27,11 @@ type Writer interface {
 	// Constraint operations
 	CreatePrimaryKey(ctx context.Context, t *Table, targetSchema string) error
 	CreateIndex(ctx context.Context, t *Table, idx *Index, targetSchema string) error
+	CreateIndexWithOptions(ctx context.Context, t *Table, idx *Index, targetSchema string, opts FinalizeOptions) error
 	CreateForeignKey(ctx context.Context, t *Table, fk *ForeignKey, targetSchema string) error
+	CreateForeignKeyWithOptions(ctx context.Context, t *Table, fk *ForeignKey, targetSchema string, opts FinalizeOptions) error
 	CreateCheckConstraint(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string) error
+	CreateCheckConstraintWithOptions(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string, opts FinalizeOptions) error
 	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
 
 	// DDL introspection
@@ -85,6 +88,26 @@ type TableOptions struct {
 
 	// Note: Indexes and CHECK constraints are always created separately in Finalize,
 	// not included in the initial CREATE TABLE DDL.
+}
+
+// FinalizeOptions configures CreateIndex / CreateForeignKey / CreateCheckConstraint
+// retry behavior. Shared across the three finalize calls because today they only
+// differ in the metadata they need (Index vs FK vs Check), not in their retry
+// semantics. If a phase ever needs DDL-type-specific tunables (e.g. PG concurrent
+// index build) this can be split into per-phase structs without changing the
+// retry-loop helpers — the helpers only consume MaxRetries.
+type FinalizeOptions struct {
+	// MaxRetries caps validate-and-retry attempts when the AI's CREATE INDEX /
+	// FOREIGN KEY / CHECK CONSTRAINT DDL is rejected by the database with a
+	// retryable error (parser/binder class — see each driver's
+	// isRetryableDDLError). On a retryable failure the writer regenerates the
+	// DDL with the prior failed DDL + database error fed back into the prompt
+	// (FinalizationDDLRequest.PreviousAttempt) and retries up to this many
+	// times. Zero means no retries (current behavior); set in the orchestrator
+	// from migration.ai_max_retries. Non-retryable errors (object already
+	// exists, FK target missing, permissions) bypass the loop and surface
+	// immediately. See #29 PR B; PR A is the table-creation equivalent.
+	MaxRetries int
 }
 
 // WriteBatchOptions configures a bulk write operation.

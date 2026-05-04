@@ -245,6 +245,25 @@ type FinalizationDDLRequest struct {
 	// TargetTableDDL is the CREATE TABLE DDL for the target table.
 	// This helps AI understand the actual table structure when generating indexes/FKs.
 	TargetTableDDL string
+
+	// PreviousAttempt is set on retry calls (see #29 PR B) and carries the
+	// prior failed DDL plus the database error that rejected it. When non-nil,
+	// the per-DDL-type prompt builders append a "PRIOR ATTEMPT FAILED" section
+	// at the end of the prompt so the AI can correct the specific defect.
+	// The finalization mapper has no cache, so unlike TableDDLRequest there's
+	// no cache-skip / cache-reprime concern — retries just produce a fresh AI
+	// call with the corrective context.
+	PreviousAttempt *FinalizationDDLAttempt
+}
+
+// FinalizationDDLAttempt records a previous CREATE INDEX / FOREIGN KEY /
+// CHECK CONSTRAINT attempt that the database rejected. Mirrors
+// TableDDLAttempt's role for the table-creation phase. See #29.
+type FinalizationDDLAttempt struct {
+	// DDL is the verbatim DDL the AI emitted on the prior attempt.
+	DDL string
+	// Error is the verbatim text of the database error that rejected it.
+	Error string
 }
 
 // TableDropDDLMapper handles AI-driven DDL generation for dropping tables.

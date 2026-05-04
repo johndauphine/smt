@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -285,6 +286,13 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		TargetContext: w.dbContext,
 	}
 
+	// Defensive clamp — see retryFinalize. Negative MaxRetries would skip
+	// the loop entirely (no AI call, no exec) and surface a wrapped-nil
+	// error. Orchestrator already maps negatives to 0; this guard exists
+	// for direct WithOptions callers. (Copilot review on PR #31.)
+	if opts.MaxRetries < 0 {
+		opts.MaxRetries = 0
+	}
 	var (
 		lastDDL string
 		lastErr error
@@ -301,6 +309,13 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 
 		resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
 		if err != nil {
+			// AI examined the prior DB error and signalled NOT_RETRYABLE.
+			// Surface the original DB error to the user, not the AI wrapper —
+			// see internal/driver/retry.go for the design.
+			if errors.Is(err, driver.ErrNotRetryable) {
+				logging.Info("table %s: AI classified DB error as non-retryable (%v); surfacing original error", t.FullName(), err)
+				return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), lastErr, lastDDL)
+			}
 			return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
 		}
 
@@ -333,11 +348,18 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 			return nil
 		}
 
+		// Short-circuit on cancellation. Without this guard the AI-classifier
+		// path would re-prompt the model to "fix" a Ctrl-C and the user would
+		// see an AI wrapper error instead of the cancellation. (codex review
+		// on PR #31; the prior allowlist guarded against this incidentally.)
+		if driver.IsCanceled(ctx, err) {
+			return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+		}
+
 		lastDDL = execDDL
 		lastErr = err
-		if !isRetryableDDLError(err) {
-			break
-		}
+		// No classifier — let the next iteration ask the AI. If we've
+		// exhausted opts.MaxRetries the for condition exits the loop.
 	}
 	return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), lastErr, lastDDL)
 }
@@ -501,6 +523,12 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 
 // CreateIndex creates an index using AI-generated DDL.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
+	return w.CreateIndexWithOptions(ctx, t, idx, targetSchema, driver.FinalizeOptions{})
+}
+
+// CreateIndexWithOptions creates an index using AI-generated DDL, retrying
+// on retryable DDL errors per opts.MaxRetries. See retryFinalize and #29 PR B.
+func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for index creation")
 	}
@@ -527,7 +555,7 @@ func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.I
 	// Get target table DDL for AI context
 	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
 
-	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+	req := driver.FinalizationDDLRequest{
 		Type:           driver.DDLTypeIndex,
 		SourceDBType:   w.sourceType,
 		TargetDBType:   "postgres",
@@ -536,17 +564,18 @@ func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.I
 		TargetSchema:   targetSchema,
 		TargetContext:  w.dbContext,
 		TargetTableDDL: targetTableDDL,
-	})
-	if err != nil {
-		return fmt.Errorf("AI index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
 	}
-
-	_, err = w.pool.Exec(ctx, ddl)
-	return err
+	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("index %s.%s", t.Name, idx.Name))
 }
 
 // CreateForeignKey creates a foreign key constraint using AI-generated DDL.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
+	return w.CreateForeignKeyWithOptions(ctx, t, fk, targetSchema, driver.FinalizeOptions{})
+}
+
+// CreateForeignKeyWithOptions creates a foreign key using AI-generated DDL,
+// retrying on retryable DDL errors per opts.MaxRetries. See #29 PR B.
+func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for foreign key creation")
 	}
@@ -581,7 +610,7 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 	// Get target table DDL for AI context
 	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
 
-	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+	req := driver.FinalizationDDLRequest{
 		Type:           driver.DDLTypeForeignKey,
 		SourceDBType:   w.sourceType,
 		TargetDBType:   "postgres",
@@ -590,17 +619,18 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 		TargetSchema:   targetSchema,
 		TargetContext:  w.dbContext,
 		TargetTableDDL: targetTableDDL,
-	})
-	if err != nil {
-		return fmt.Errorf("AI FK DDL generation failed for %s.%s: %w", t.Name, fk.Name, err)
 	}
-
-	_, err = w.pool.Exec(ctx, ddl)
-	return err
+	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("FK %s.%s", t.Name, fk.Name))
 }
 
 // CreateCheckConstraint creates a check constraint using AI-generated DDL.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
+	return w.CreateCheckConstraintWithOptions(ctx, t, chk, targetSchema, driver.FinalizeOptions{})
+}
+
+// CreateCheckConstraintWithOptions creates a CHECK constraint using AI-generated
+// DDL, retrying on retryable DDL errors per opts.MaxRetries. See #29 PR B.
+func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for check constraint creation")
 	}
@@ -616,7 +646,7 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 	// Get target table DDL for AI context
 	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
 
-	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+	req := driver.FinalizationDDLRequest{
 		Type:            driver.DDLTypeCheckConstraint,
 		SourceDBType:    w.sourceType,
 		TargetDBType:    "postgres",
@@ -625,13 +655,8 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 		TargetSchema:    targetSchema,
 		TargetContext:   w.dbContext,
 		TargetTableDDL:  targetTableDDL,
-	})
-	if err != nil {
-		return fmt.Errorf("AI check constraint DDL generation failed for %s.%s: %w", t.Name, chk.Name, err)
 	}
-
-	_, err = w.pool.Exec(ctx, ddl)
-	return err
+	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("CHECK %s.%s", t.Name, chk.Name))
 }
 
 // HasPrimaryKey checks if a table has a primary key.

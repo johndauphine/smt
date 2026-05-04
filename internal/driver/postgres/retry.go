@@ -1,64 +1,81 @@
 package postgres
 
 import (
+	"context"
 	"errors"
-	"strings"
+	"fmt"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"smt/internal/driver"
+	"smt/internal/logging"
 )
 
-// isRetryableDDLError reports whether a CREATE TABLE / index / FK / CHECK
-// failure looks like the AI emitted bad DDL (parser rejected, type unknown,
-// generation expression non-immutable, etc.) and is therefore worth feeding
-// back to the AI for another attempt — versus a real schema-state error
-// (table already exists, FK target missing, permission denied) where retry
-// would just produce the same wrong outcome.
+// retryFinalize generates DDL via the finalization mapper and executes it,
+// retrying up to maxRetries times. Each retry feeds the prior failed DDL plus
+// the verbatim database error back into the AI prompt via PreviousAttempt;
+// the prompt invites the AI to either return corrected DDL or, if it judges
+// retry futile, emit NOT_RETRYABLE — which surfaces here as ErrNotRetryable
+// and breaks the loop early with the original DB error preserved.
 //
-// PostgreSQL surfaces parser/planner errors via pgconn.PgError.Code (5-char
-// SQLSTATE). We retry on:
+// This replaced the per-driver isRetryableDDLError SQLSTATE allowlist (#29
+// PR B follow-up): the allowlist needed manual maintenance and false negatives
+// kept appearing (e.g. PG 42883 undefined_function on mysql→pg). Delegating
+// the classification to the AI removes the list. See driver/retry.go for the
+// sentinel + parsing helper.
 //
-//	42601 — syntax_error                            (malformed DDL)
-//	42704 — undefined_object (used for type names)  (e.g. "type \"nvarchar\" does not exist")
-//	42P17 — invalid_object_definition               (e.g. generation expression not immutable)
-//	42P01 — undefined_table                         (rare in CREATE; appears when an FK references a table the AI assumed)
-//	42P16 — invalid_table_definition                (e.g. duplicate columns, conflicting clauses)
-//	42P11 — invalid_cursor_definition               (rare but DDL-shape)
-//	0A000 — feature_not_supported                   (AI used a syntax PG version doesn't support)
-//
-// We do NOT retry on:
-//
-//	42P07 — duplicate_table        (object already exists; retry won't help)
-//	42710 — duplicate_object       (constraint name conflict; retry won't help)
-//	23xxx — integrity_constraint_violation (real data/state issue)
-//	28xxx — invalid_authorization  (permission)
-//	08xxx — connection failures    (handled by retryableHTTPDo elsewhere)
-//
-// If the error isn't a *pgconn.PgError (some other Go-level error), we don't
-// retry — that's almost always a connection/transport issue that the
-// transport-level retry layer should have already handled.
-func isRetryableDDLError(err error) bool {
-	if err == nil {
-		return false
+// label is used for logging and the wrapping error message (e.g. "index
+// Orders.idx_customer", "FK Orders.fk_customer"). The finalization mapper
+// has no cache, so a successful retry doesn't need any re-prime step.
+func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, maxRetries int, label string) error {
+	// Defensive clamp: a negative budget would skip the loop body entirely
+	// (no AI call, no exec) and surface a confusing wrapped-nil error.
+	// Orchestrator.aiMaxRetries already maps negatives to 0; this guard
+	// exists for direct WithOptions callers. (Copilot review on PR #31.)
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		switch pgErr.Code {
-		case "42601", // syntax_error
-			"42704", // undefined_object (type names, sequences, etc.)
-			"42P17", // invalid_object_definition (e.g. non-immutable generation expression)
-			"42P01", // undefined_table (rare in CREATE; happens with mid-DDL identifier confusion)
-			"42P16", // invalid_table_definition (duplicate column, conflicting modifiers)
-			"42P11", // invalid_cursor_definition
-			"0A000": // feature_not_supported
-			return true
+	var (
+		lastDDL string
+		lastErr error
+	)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			req.PreviousAttempt = &driver.FinalizationDDLAttempt{
+				DDL:   lastDDL,
+				Error: lastErr.Error(),
+			}
+			logging.Info("retry attempt %d/%d for %s after DDL error: %v",
+				attempt, maxRetries, label, lastErr)
 		}
-		return false
+
+		ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, req)
+		if err != nil {
+			// AI examined the prior error and classified it as non-retryable.
+			// Surface the original DB error — that's what the user can act on.
+			if errors.Is(err, driver.ErrNotRetryable) {
+				logging.Info("%s: AI classified DB error as non-retryable (%v); surfacing original error", label, err)
+				return fmt.Errorf("%s: %w\nDDL: %s", label, lastErr, lastDDL)
+			}
+			return fmt.Errorf("AI DDL generation failed for %s: %w", label, err)
+		}
+
+		if _, execErr := w.pool.Exec(ctx, ddl); execErr == nil {
+			if attempt > 0 {
+				logging.Info("%s succeeded on retry attempt %d/%d", label, attempt, maxRetries)
+			}
+			return nil
+		} else {
+			// Short-circuit on cancellation — without this guard the next
+			// iteration would re-prompt the AI to "fix" a Ctrl-C against an
+			// already-canceled context, surfacing an AI wrapper error instead
+			// of the cancellation. (codex review on PR #31.)
+			if driver.IsCanceled(ctx, execErr) {
+				return fmt.Errorf("%s: %w", label, execErr)
+			}
+			lastDDL = ddl
+			lastErr = execErr
+			// No classifier — let the next iteration ask the AI. If we've
+			// exhausted maxRetries the for condition exits the loop naturally.
+		}
 	}
-	// Fallback: some PG drivers / wrappers return plain errors with the SQLSTATE
-	// embedded in the message. Be conservative — only match the syntax-error
-	// substring that's reliably present in pgx's error formatting.
-	msg := err.Error()
-	return strings.Contains(msg, "SQLSTATE 42601") ||
-		strings.Contains(msg, "SQLSTATE 42704") ||
-		strings.Contains(msg, "SQLSTATE 42P17")
+	return fmt.Errorf("%s: %w\nDDL: %s", label, lastErr, lastDDL)
 }

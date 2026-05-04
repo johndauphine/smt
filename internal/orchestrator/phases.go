@@ -170,31 +170,58 @@ func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 	})
 }
 
-// aiMaxRetries returns the configured Migration.AIMaxRetries value clamped to
-// [0, ∞). Negative values are treated as 0 (no retries) — silently sanitizing
-// rather than erroring keeps the default-zero / no-config case working without
-// a validation layer the callers don't need.
+// defaultAIMaxRetries is the per-DDL retry budget when the user has not set
+// migration.ai_max_retries. Picked at 3 because the empirical variance test
+// in #29 showed gpt-oss-20b producing correct DDL ~1 in 3 attempts on cases
+// where it's deterministically wrong on the first try; with 3 retries
+// per-call success climbs to ~99.9%, full-pipeline ~98% on 14-table fixtures.
+// Cloud Sonnet rarely triggers retries so the cost is essentially nil there.
+const defaultAIMaxRetries = 3
+
+// aiMaxRetries returns the per-DDL retry budget for this run. The contract:
+//
+//   - omitted (nil)    → defaultAIMaxRetries (3)
+//   - 0                → 0 (explicit opt-out)
+//   - positive integer → that exact value
+//   - negative integer → 0 (defensive clamp — config validation should
+//     reject this earlier, but we don't want a misconfiguration to make
+//     the helper surface a wrapped-nil error)
+//
+// The pointer type on Migration.AIMaxRetries lets us distinguish "user
+// didn't set it" (nil → use default) from "user explicitly set 0"
+// (non-nil pointer to 0 → opt out). A user who doesn't know about
+// retries gets the recommended budget automatically; a user who wants
+// the no-retry behavior of pre-#29 sets ai_max_retries: 0 explicitly.
 func (o *Orchestrator) aiMaxRetries() int {
-	if o.config.Migration.AIMaxRetries < 0 {
+	if o.config.Migration.AIMaxRetries == nil {
+		return defaultAIMaxRetries
+	}
+	n := *o.config.Migration.AIMaxRetries
+	if n < 0 {
 		return 0
 	}
-	return o.config.Migration.AIMaxRetries
+	return n
 }
 
 // CreateIndexes loads each table's indexes from the source and creates
 // them on the target. Each table's load+create work runs in its own
 // goroutine; indexes within one table are still applied sequentially
 // (typically only a handful per table, and they share AI cache hits).
+// Per-index AI calls go through CreateIndexWithOptions with the configured
+// max-retries (#29 PR B) so a parser-rejected DDL gets a corrective re-call
+// before the phase fails.
 func (o *Orchestrator) CreateIndexes(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateIndexes))
-	logging.Info("[%s] loading and creating indexes (concurrency=%d)", TaskCreateIndexes, o.aiConcurrency())
+	maxRetries := o.aiMaxRetries()
+	logging.Info("[%s] loading and creating indexes (concurrency=%d, max_retries=%d)", TaskCreateIndexes, o.aiConcurrency(), maxRetries)
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries}
 	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
 		if err := o.source.LoadIndexes(ctx, &t); err != nil {
 			return fmt.Errorf("loading indexes for %s: %w", t.Name, err)
 		}
 		for j := range t.Indexes {
 			idx := t.Indexes[j]
-			if err := o.target.CreateIndex(ctx, &t, &idx, o.config.Target.Schema); err != nil {
+			if err := o.target.CreateIndexWithOptions(ctx, &t, &idx, o.config.Target.Schema, opts); err != nil {
 				return fmt.Errorf("creating index %s: %w", idx.Name, err)
 			}
 		}
@@ -204,17 +231,19 @@ func (o *Orchestrator) CreateIndexes(ctx context.Context, runID string) error {
 
 // CreateForeignKeys loads each table's foreign keys from the source and
 // creates them on the target. Same parallelism shape as CreateIndexes:
-// per-table goroutines, sequential FKs within a table.
+// per-table goroutines, sequential FKs within a table. Retries via #29 PR B.
 func (o *Orchestrator) CreateForeignKeys(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateFKs))
-	logging.Info("[%s] loading and creating foreign keys (concurrency=%d)", TaskCreateFKs, o.aiConcurrency())
+	maxRetries := o.aiMaxRetries()
+	logging.Info("[%s] loading and creating foreign keys (concurrency=%d, max_retries=%d)", TaskCreateFKs, o.aiConcurrency(), maxRetries)
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries}
 	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
 		if err := o.source.LoadForeignKeys(ctx, &t); err != nil {
 			return fmt.Errorf("loading FKs for %s: %w", t.Name, err)
 		}
 		for j := range t.ForeignKeys {
 			fk := t.ForeignKeys[j]
-			if err := o.target.CreateForeignKey(ctx, &t, &fk, o.config.Target.Schema); err != nil {
+			if err := o.target.CreateForeignKeyWithOptions(ctx, &t, &fk, o.config.Target.Schema, opts); err != nil {
 				return fmt.Errorf("creating FK %s: %w", fk.Name, err)
 			}
 		}
@@ -224,17 +253,19 @@ func (o *Orchestrator) CreateForeignKeys(ctx context.Context, runID string) erro
 
 // CreateCheckConstraints loads each table's check constraints from the
 // source and creates them on the target. Same parallelism shape as the
-// other constraint phases.
+// other constraint phases. Retries via #29 PR B.
 func (o *Orchestrator) CreateCheckConstraints(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateChecks))
-	logging.Info("[%s] loading and creating check constraints (concurrency=%d)", TaskCreateChecks, o.aiConcurrency())
+	maxRetries := o.aiMaxRetries()
+	logging.Info("[%s] loading and creating check constraints (concurrency=%d, max_retries=%d)", TaskCreateChecks, o.aiConcurrency(), maxRetries)
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries}
 	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
 		if err := o.source.LoadCheckConstraints(ctx, &t); err != nil {
 			return fmt.Errorf("loading checks for %s: %w", t.Name, err)
 		}
 		for j := range t.CheckConstraints {
 			chk := t.CheckConstraints[j]
-			if err := o.target.CreateCheckConstraint(ctx, &t, &chk, o.config.Target.Schema); err != nil {
+			if err := o.target.CreateCheckConstraintWithOptions(ctx, &t, &chk, o.config.Target.Schema, opts); err != nil {
 				return fmt.Errorf("creating check %s: %w", chk.Name, err)
 			}
 		}
