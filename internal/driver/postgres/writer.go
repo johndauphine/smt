@@ -348,6 +348,14 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 			return nil
 		}
 
+		// Short-circuit on cancellation. Without this guard the AI-classifier
+		// path would re-prompt the model to "fix" a Ctrl-C and the user would
+		// see an AI wrapper error instead of the cancellation. (codex review
+		// on PR #31; the prior allowlist guarded against this incidentally.)
+		if driver.IsCanceled(ctx, err) {
+			return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+		}
+
 		lastDDL = execDDL
 		lastErr = err
 		// No classifier — let the next iteration ask the AI. If we've

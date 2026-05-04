@@ -354,6 +354,11 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 			return nil
 		}
 
+		// Short-circuit on cancellation — see postgres equivalent for rationale.
+		if driver.IsCanceled(ctx, err) {
+			return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+		}
+
 		lastDDL = ddl
 		lastErr = err
 		// No classifier — let the next iteration ask the AI.

@@ -1,10 +1,32 @@
 package driver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 )
+
+// IsCanceled reports whether a DDL exec failure should short-circuit the
+// retry loop because the operation is actually being canceled (parent
+// context canceled, deadline exceeded) rather than rejecting defective AI
+// output. Without this check, the retry loop would helpfully re-prompt the
+// AI to "fix" a Ctrl-C — wasting a call against an already-canceled context
+// and surfacing an AI wrapper error to the user instead of the cancellation.
+//
+// Checks both ctx.Err() (catches the case where the parent canceled between
+// iterations) and the error itself (covers driver-wrapped cancellation). See
+// codex review on PR #31 — the earlier SQLSTATE allowlist accidentally
+// guarded against this because context.Canceled isn't a *pgconn.PgError /
+// mssql.Error / mysql.MySQLError, so isRetryableDDLError returned false. The
+// AI-classifier conversion removed the classifier and therefore needs an
+// explicit check.
+func IsCanceled(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
 
 // ErrNotRetryable is returned by GenerateTableDDL / GenerateFinalizationDDL on
 // retry calls when the AI examines the prior attempt's database error and

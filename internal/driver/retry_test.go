@@ -1,8 +1,11 @@
 package driver
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 )
 
 // TestClassifyRetryResponse pins the parser for the AI's retry-classification
@@ -76,6 +79,63 @@ func TestWrapNotRetryable(t *testing.T) {
 		// Empty reason returns the sentinel directly, not a wrap.
 		if err != ErrNotRetryable {
 			t.Errorf("empty reason should return the sentinel directly, got %v", err)
+		}
+	})
+}
+
+// TestIsCanceled pins the cancellation guard the writer retry loops use to
+// short-circuit when the user hits Ctrl-C (or a deadline expires) mid-DDL,
+// instead of feeding the cancellation back to the AI as if it were a fixable
+// error. The earlier SQLSTATE allowlist guarded against this incidentally
+// (context.Canceled isn't a *pgconn.PgError); the AI-classifier conversion
+// removed that incidental guard, so we need an explicit one. See codex
+// review on PR #31.
+func TestIsCanceled(t *testing.T) {
+	t.Run("nil ctx error and nil err → false", func(t *testing.T) {
+		if IsCanceled(context.Background(), nil) {
+			t.Errorf("IsCanceled(Background, nil) should be false")
+		}
+	})
+
+	t.Run("nil ctx error, real DDL error → false", func(t *testing.T) {
+		if IsCanceled(context.Background(), errors.New("relation already exists")) {
+			t.Errorf("IsCanceled with non-cancel error and live ctx should be false")
+		}
+	})
+
+	t.Run("canceled ctx → true regardless of err", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if !IsCanceled(ctx, nil) {
+			t.Errorf("IsCanceled with canceled ctx should be true even when err is nil")
+		}
+		if !IsCanceled(ctx, errors.New("any other error")) {
+			t.Errorf("IsCanceled with canceled ctx should be true regardless of err")
+		}
+	})
+
+	t.Run("deadline-exceeded ctx → true", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		if !IsCanceled(ctx, nil) {
+			t.Errorf("IsCanceled with expired deadline should be true")
+		}
+	})
+
+	t.Run("context.Canceled wrapped in driver error → true", func(t *testing.T) {
+		// Simulates the case where the parent context's cancellation isn't
+		// reflected on this leaf ctx (rare, but possible) but the DB driver
+		// surfaces the canceled error from a connection pool.
+		err := fmt.Errorf("driver-level wrap: %w", context.Canceled)
+		if !IsCanceled(context.Background(), err) {
+			t.Errorf("IsCanceled should detect context.Canceled through error wrap")
+		}
+	})
+
+	t.Run("context.DeadlineExceeded wrapped → true", func(t *testing.T) {
+		err := fmt.Errorf("driver-level wrap: %w", context.DeadlineExceeded)
+		if !IsCanceled(context.Background(), err) {
+			t.Errorf("IsCanceled should detect context.DeadlineExceeded through error wrap")
 		}
 	})
 }

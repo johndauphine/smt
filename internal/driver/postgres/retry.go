@@ -64,6 +64,13 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 			}
 			return nil
 		} else {
+			// Short-circuit on cancellation — without this guard the next
+			// iteration would re-prompt the AI to "fix" a Ctrl-C against an
+			// already-canceled context, surfacing an AI wrapper error instead
+			// of the cancellation. (codex review on PR #31.)
+			if driver.IsCanceled(ctx, execErr) {
+				return fmt.Errorf("%s: %w", label, execErr)
+			}
 			lastDDL = ddl
 			lastErr = execErr
 			// No classifier — let the next iteration ask the AI. If we've

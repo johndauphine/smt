@@ -52,6 +52,10 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 			}
 			return nil
 		} else {
+			// Short-circuit on cancellation — see postgres equivalent for rationale.
+			if driver.IsCanceled(ctx, execErr) {
+				return fmt.Errorf("%s: %w", label, execErr)
+			}
 			lastDDL = ddl
 			lastErr = execErr
 		}
