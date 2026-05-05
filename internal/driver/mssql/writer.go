@@ -299,6 +299,16 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 // On retryable errors, regenerates with the prior failed DDL + error fed back
 // into the prompt up to opts.MaxRetries times. See #29 / postgres equivalent.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
+	// Skip if the target table already exists. Idempotent re-runs land here
+	// instead of failing on "There is already an object named ...". See
+	// postgres equivalent.
+	if exists, err := w.TableExists(ctx, targetSchema, t.Name); err != nil {
+		return fmt.Errorf("checking table existence for %s: %w", t.FullName(), err)
+	} else if exists {
+		logging.Info("  ✓ table %s already exists, skipping", t.FullName())
+		return nil
+	}
+
 	req := driver.TableDDLRequest{
 		SourceDBType:  w.sourceType,
 		TargetDBType:  "mssql",
@@ -408,6 +418,52 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 			AND TABLE_NAME = @table
 		) THEN 1 ELSE 0 END
 	`, sql.Named("schema", schema), sql.Named("table", table)).Scan(&exists)
+	return exists == 1, err
+}
+
+// IndexExists reports whether an index with the given name exists on the
+// given table. SQL Server scopes index names per table, so both schema
+// and table are required to disambiguate.
+func (w *Writer) IndexExists(ctx context.Context, schema, table, indexName string) (bool, error) {
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM sys.indexes i
+			JOIN sys.tables t ON i.object_id = t.object_id
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @schema AND t.name = @table AND i.name = @name
+		) THEN 1 ELSE 0 END
+	`, sql.Named("schema", schema), sql.Named("table", table), sql.Named("name", indexName)).Scan(&exists)
+	return exists == 1, err
+}
+
+// ForeignKeyExists reports whether an FK constraint with the given name
+// exists on the given table.
+func (w *Writer) ForeignKeyExists(ctx context.Context, schema, table, fkName string) (bool, error) {
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM sys.foreign_keys fk
+			JOIN sys.tables t ON fk.parent_object_id = t.object_id
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @schema AND t.name = @table AND fk.name = @name
+		) THEN 1 ELSE 0 END
+	`, sql.Named("schema", schema), sql.Named("table", table), sql.Named("name", fkName)).Scan(&exists)
+	return exists == 1, err
+}
+
+// CheckConstraintExists reports whether a CHECK constraint with the given
+// name exists on the given table.
+func (w *Writer) CheckConstraintExists(ctx context.Context, schema, table, checkName string) (bool, error) {
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM sys.check_constraints cc
+			JOIN sys.tables t ON cc.parent_object_id = t.object_id
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @schema AND t.name = @table AND cc.name = @name
+		) THEN 1 ELSE 0 END
+	`, sql.Named("schema", schema), sql.Named("table", table), sql.Named("name", checkName)).Scan(&exists)
 	return exists == 1, err
 }
 
@@ -573,6 +629,13 @@ func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, id
 		return fmt.Errorf("finalization mapper not available for index creation")
 	}
 
+	if exists, err := w.IndexExists(ctx, targetSchema, t.Name, idx.Name); err != nil {
+		return fmt.Errorf("checking index existence for %s.%s: %w", t.Name, idx.Name, err)
+	} else if exists {
+		logging.Info("  ✓ index %s.%s already exists, skipping", t.Name, idx.Name)
+		return nil
+	}
+
 	req := driver.FinalizationDDLRequest{
 		Type:          driver.DDLTypeIndex,
 		SourceDBType:  w.sourceType,
@@ -595,6 +658,13 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for foreign key creation")
+	}
+
+	if exists, err := w.ForeignKeyExists(ctx, targetSchema, t.Name, fk.Name); err != nil {
+		return fmt.Errorf("checking FK existence for %s.%s: %w", t.Name, fk.Name, err)
+	} else if exists {
+		logging.Info("  ✓ FK %s.%s already exists, skipping", t.Name, fk.Name)
+		return nil
 	}
 
 	// Override RefSchema with the target schema. The source FK metadata
@@ -627,6 +697,13 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for check constraint creation")
+	}
+
+	if exists, err := w.CheckConstraintExists(ctx, targetSchema, t.Name, chk.Name); err != nil {
+		return fmt.Errorf("checking CHECK existence for %s.%s: %w", t.Name, chk.Name, err)
+	} else if exists {
+		logging.Info("  ✓ CHECK %s.%s already exists, skipping", t.Name, chk.Name)
+		return nil
 	}
 
 	req := driver.FinalizationDDLRequest{

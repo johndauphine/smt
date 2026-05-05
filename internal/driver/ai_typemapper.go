@@ -1947,6 +1947,12 @@ func truncateString(s string, maxLen int) string {
 }
 
 // GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints using AI.
+//
+// Caching mirrors GenerateTableDDL (#32): cache is consulted only on first-try
+// calls; retry calls (PreviousAttempt != nil) bypass the cache so the model
+// gets a fresh chance with the corrective context. Cache writes happen
+// post-exec via CacheFinalizationDDL — never inside the mapper — so a DDL the
+// AI emits but the database rejects can't poison future runs.
 func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error) {
 	if req.Table == nil {
 		return "", fmt.Errorf("Table is required")
@@ -1994,6 +2000,19 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 		return "", fmt.Errorf("unknown DDL type: %s", req.Type)
 	}
 
+	cacheKey := m.finalizationCacheKey(req)
+	isRetry := req.PreviousAttempt != nil
+	if !isRetry {
+		m.cacheMu.RLock()
+		if cached, ok := m.cache.Get(cacheKey); ok {
+			m.cacheMu.RUnlock()
+			logging.Debug("AI finalization DDL cache hit: %s on %s.%s",
+				entityName, req.TargetSchema, req.Table.Name)
+			return cached, nil
+		}
+		m.cacheMu.RUnlock()
+	}
+
 	result, err := m.CallAI(ctx, prompt)
 	if err != nil {
 		return "", fmt.Errorf("AI DDL generation failed for %s.%s: %w",
@@ -2022,6 +2041,78 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 	logging.Debug("AI generated DDL:\n%s", ddl)
 
 	return ddl, nil
+}
+
+// finalizationCacheKey builds a cache key for finalization DDL (index / FK /
+// CHECK). Mirrors tableCacheKey: deterministic, prefixed by DDL type to
+// disambiguate from table:/drop: keys in the same shared cache file.
+//
+// The key intentionally excludes TargetTableDDL — that's prompt context, not
+// a fingerprint of the constraint being created. Including it would
+// re-invalidate every FK whenever any unrelated column on the parent table
+// changed, defeating the cache's purpose on incremental re-runs.
+//
+// SourceDBType is included even though current FK/index/check prompts don't
+// use it: defensive against future prompt changes that would leak via stale
+// cache. Same shape as tableCacheKey.
+func (m *AITypeMapper) finalizationCacheKey(req FinalizationDDLRequest) string {
+	switch req.Type {
+	case DDLTypeIndex:
+		idx := req.Index
+		if idx == nil {
+			return ""
+		}
+		return fmt.Sprintf("index:%s:%s:%s.%s:%s:unique=%v:cols=[%s]:incl=[%s]:filter=%s",
+			req.SourceDBType, req.TargetDBType, req.TargetSchema, req.Table.Name,
+			idx.Name, idx.IsUnique,
+			strings.Join(idx.Columns, ","),
+			strings.Join(idx.IncludeCols, ","),
+			idx.Filter)
+	case DDLTypeForeignKey:
+		fk := req.ForeignKey
+		if fk == nil {
+			return ""
+		}
+		return fmt.Sprintf("fk:%s:%s:%s.%s:%s:cols=[%s]:ref=%s.%s:refcols=[%s]:onDel=%s:onUpd=%s",
+			req.SourceDBType, req.TargetDBType, req.TargetSchema, req.Table.Name,
+			fk.Name,
+			strings.Join(fk.Columns, ","),
+			fk.RefSchema, fk.RefTable,
+			strings.Join(fk.RefColumns, ","),
+			fk.OnDelete, fk.OnUpdate)
+	case DDLTypeCheckConstraint:
+		chk := req.CheckConstraint
+		if chk == nil {
+			return ""
+		}
+		return fmt.Sprintf("check:%s:%s:%s.%s:%s:def=%s",
+			req.SourceDBType, req.TargetDBType, req.TargetSchema, req.Table.Name,
+			chk.Name, chk.Definition)
+	default:
+		return ""
+	}
+}
+
+// CacheFinalizationDDL stores a known-good DDL for the request, replacing any
+// prior cached value. This is the ONLY entry point that writes to the
+// finalization-DDL cache — the mapper itself is read-only on the cache
+// (see #32). Writers call this after every successful exec (first-try and
+// retry alike); a failed exec leaves the cache untouched.
+func (m *AITypeMapper) CacheFinalizationDDL(req FinalizationDDLRequest, ddl string) {
+	cacheKey := m.finalizationCacheKey(req)
+	if cacheKey == "" {
+		// Unknown DDL type or missing required entity — silently no-op rather
+		// than persist garbage. The Generate path already errors on these
+		// cases so this branch is defensive against direct CacheFinalizationDDL
+		// callers in tests.
+		return
+	}
+	m.cacheMu.Lock()
+	m.cache.Set(cacheKey, ddl)
+	m.cacheMu.Unlock()
+	if err := m.saveCache(); err != nil {
+		logging.Warn("Failed to save AI finalization DDL cache: %v", err)
+	}
 }
 
 // writeFinalizationPriorAttempt appends a "PRIOR ATTEMPT FAILED" section to a
@@ -2273,13 +2364,15 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 		return "", fmt.Errorf("TargetDBType is required")
 	}
 
-	// Build cache key
-	cacheKey := fmt.Sprintf("drop:%s:%s.%s", req.TargetDBType, req.TargetSchema, req.TableName)
+	cacheKey := m.dropTableCacheKey(req)
 
-	// Check cache first
+	// Check cache first (read-only on this path; cache writes happen in
+	// CacheDropTableDDL after the writer confirms exec succeeded — same
+	// post-exec pattern as CacheTableDDL / CacheFinalizationDDL, see #32).
 	m.cacheMu.RLock()
 	if cached, ok := m.cache.Get(cacheKey); ok {
 		m.cacheMu.RUnlock()
+		logging.Debug("AI drop table DDL cache hit: %s.%s", req.TargetSchema, req.TableName)
 		return cached, nil
 	}
 	m.cacheMu.RUnlock()
@@ -2304,19 +2397,29 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 		return "", fmt.Errorf("response does not contain valid DROP statement: %s", truncateString(ddl, 100))
 	}
 
-	// Cache the result
-	m.cacheMu.Lock()
-	m.cache.Set(cacheKey, ddl)
-	m.cacheMu.Unlock()
-
-	// Persist cache
-	if err := m.saveCache(); err != nil {
-		logging.Warn("Failed to save AI drop table DDL cache: %v", err)
-	}
-
+	// Cache writes are deferred to CacheDropTableDDL post-exec — see #32.
 	logging.Debug("AI generated DROP DDL:\n%s", ddl)
 
 	return ddl, nil
+}
+
+// dropTableCacheKey builds the cache key for DROP TABLE DDL. Includes target
+// db type so a re-target doesn't reuse a sibling-engine DDL.
+func (m *AITypeMapper) dropTableCacheKey(req DropTableDDLRequest) string {
+	return fmt.Sprintf("drop:%s:%s.%s", req.TargetDBType, req.TargetSchema, req.TableName)
+}
+
+// CacheDropTableDDL stores a known-good DROP TABLE DDL post-exec. Mirrors
+// CacheTableDDL / CacheFinalizationDDL — only validated DDL ever reaches the
+// cache, so a failed exec can't poison subsequent runs (#32).
+func (m *AITypeMapper) CacheDropTableDDL(req DropTableDDLRequest, ddl string) {
+	cacheKey := m.dropTableCacheKey(req)
+	m.cacheMu.Lock()
+	m.cache.Set(cacheKey, ddl)
+	m.cacheMu.Unlock()
+	if err := m.saveCache(); err != nil {
+		logging.Warn("Failed to save AI drop table DDL cache: %v", err)
+	}
 }
 
 // buildDropTableDDLPrompt creates the AI prompt for DROP TABLE DDL generation.

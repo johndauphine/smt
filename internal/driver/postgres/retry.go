@@ -59,6 +59,10 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 		}
 
 		if _, execErr := w.pool.Exec(ctx, ddl); execErr == nil {
+			// Cache the validated DDL post-exec — same #32 pattern as
+			// CacheTableDDL. Only validated DDL ever reaches the cache, so a
+			// failed-but-not-corrected DDL can't poison subsequent runs.
+			w.finalizationMapper.CacheFinalizationDDL(req, ddl)
 			if attempt > 0 {
 				logging.Info("%s succeeded on retry attempt %d/%d", label, attempt, maxRetries)
 			}

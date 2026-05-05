@@ -47,6 +47,8 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 		}
 
 		if _, execErr := w.db.ExecContext(ctx, ddl); execErr == nil {
+			// Cache the validated DDL post-exec — see postgres equivalent / #32.
+			w.finalizationMapper.CacheFinalizationDDL(req, ddl)
 			if attempt > 0 {
 				logging.Info("%s succeeded on retry attempt %d/%d", label, attempt, maxRetries)
 			}
