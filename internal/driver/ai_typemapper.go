@@ -1864,7 +1864,7 @@ func (m *AITypeMapper) parseTableDDLResponse(response string, sourceTable *Table
 		return nil, WrapNotRetryable(reason)
 	}
 
-	ddl := strings.TrimSpace(response)
+	ddl := stripMarkdownFence(response)
 
 	// Basic validation - should start with CREATE TABLE
 	upperDDL := strings.ToUpper(ddl)
@@ -1944,6 +1944,25 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// stripMarkdownFence removes a leading ```lang fence and matching trailing
+// ``` from an AI response. Local models (qwen, gpt-oss, llama) frequently
+// wrap DDL in markdown despite explicit "no markdown" prompt instructions.
+// No-op when the response isn't fenced. Idempotent.
+func stripMarkdownFence(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+		s = s[nl+1:]
+	} else {
+		return s
+	}
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
 }
 
 // GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints using AI.
@@ -2026,7 +2045,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 		return "", WrapNotRetryable(reason)
 	}
 
-	ddl := strings.TrimSpace(result)
+	ddl := stripMarkdownFence(result)
 
 	// Validate response starts with expected prefix
 	upperDDL := strings.ToUpper(ddl)
@@ -2389,7 +2408,7 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 			req.TargetSchema, req.TableName, err)
 	}
 
-	ddl := strings.TrimSpace(result)
+	ddl := stripMarkdownFence(result)
 
 	// Validate: must contain DROP and must be idempotent (IF EXISTS).
 	// All three target dialects' AIDropTablePromptAugmentation already mandate

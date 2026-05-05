@@ -405,6 +405,31 @@ func TestAITypeMapper_OpenAIAPI(t *testing.T) {
 	// In a real test, we'd inject the mock server URL
 }
 
+func TestStripMarkdownFence(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no fence", "CREATE TABLE foo (id int);", "CREATE TABLE foo (id int);"},
+		{"sql fence", "```sql\nCREATE TABLE foo (id int);\n```", "CREATE TABLE foo (id int);"},
+		{"bare fence", "```\nCREATE TABLE foo (id int);\n```", "CREATE TABLE foo (id int);"},
+		{"uppercase tag", "```SQL\nCREATE TABLE foo (id int);\n```", "CREATE TABLE foo (id int);"},
+		{"leading whitespace", "  \n  ```sql\nCREATE TABLE foo (id int);\n```  ", "CREATE TABLE foo (id int);"},
+		{"no trailing fence", "```sql\nCREATE TABLE foo (id int);", "CREATE TABLE foo (id int);"},
+		{"single-line fenced", "```", "```"},
+		{"empty", "", ""},
+		{"already trimmed multi-line ddl", "CREATE TABLE foo (\n  id int\n);", "CREATE TABLE foo (\n  id int\n);"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripMarkdownFence(tt.input); got != tt.want {
+				t.Errorf("stripMarkdownFence(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSanitizeSampleValue(t *testing.T) {
 	tests := []struct {
 		name     string
