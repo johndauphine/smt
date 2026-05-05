@@ -357,6 +357,11 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 				logging.Info("table %s succeeded on retry attempt %d/%d", t.FullName(), attempt, opts.MaxRetries)
 			}
 			return nil
+		} else if isAlreadyExists(err) {
+			// Pre-exec TableExists catches most re-run cases. Belt-and-braces
+			// for race / drift / inconsistent quoting between probe and exec.
+			logging.Info("  ✓ table %s already exists (post-exec catch); treating as no-op", t.FullName())
+			return nil
 		}
 
 		// Short-circuit on cancellation. Without this guard the AI-classifier

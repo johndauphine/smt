@@ -362,6 +362,10 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 				logging.Info("table %s succeeded on retry attempt %d/%d", t.FullName(), attempt, opts.MaxRetries)
 			}
 			return nil
+		} else if isAlreadyExists(err) {
+			// Pre-exec TableExists catches most re-run cases — belt-and-braces.
+			logging.Info("  ✓ table %s already exists (post-exec catch); treating as no-op", t.FullName())
+			return nil
 		}
 
 		// Short-circuit on cancellation — see postgres equivalent for rationale.
