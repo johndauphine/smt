@@ -304,6 +304,15 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 // On retryable errors, regenerates with the prior failed DDL + error fed back
 // into the prompt up to opts.MaxRetries times. See #29 / postgres equivalent.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
+	// Skip if the target table already exists. Idempotent re-runs land here
+	// instead of failing on "Table ... already exists". See postgres equivalent.
+	if exists, err := w.TableExists(ctx, targetSchema, t.Name); err != nil {
+		return fmt.Errorf("checking table existence for %s: %w", t.FullName(), err)
+	} else if exists {
+		logging.Info("  ✓ table %s already exists, skipping", t.FullName())
+		return nil
+	}
+
 	req := driver.TableDDLRequest{
 		SourceDBType:  w.sourceType,
 		TargetDBType:  "mysql",
@@ -354,6 +363,8 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 			}
 			return nil
 		}
+		// No post-exec already-exists catch on the CREATE TABLE path —
+		// see postgres equivalent for rationale.
 
 		// Short-circuit on cancellation — see postgres equivalent for rationale.
 		if driver.IsCanceled(ctx, err) {
@@ -371,18 +382,26 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	// Use AI-generated DROP DDL if available
 	if w.dropDDLMapper != nil {
-		ddl, err := w.dropDDLMapper.GenerateDropTableDDL(ctx, driver.DropTableDDLRequest{
+		req := driver.DropTableDDLRequest{
 			TargetDBType:  "mysql",
 			TargetSchema:  schema,
 			TableName:     table,
 			TargetContext: w.dbContext,
-		})
+		}
+		ddl, err := w.dropDDLMapper.GenerateDropTableDDL(ctx, req)
 		if err != nil {
 			logging.Warn("AI DROP DDL generation failed, using fallback: %v", err)
 		} else {
 			logging.Debug("Executing AI-generated DROP DDL: %s", ddl)
-			_, err := w.db.ExecContext(ctx, ddl)
-			return err
+			if _, execErr := w.db.ExecContext(ctx, ddl); execErr == nil {
+				// Cache the validated DDL post-exec — same #32 pattern as
+				// CacheTableDDL / CacheFinalizationDDL. Only validated DDL
+				// reaches the cache.
+				w.dropDDLMapper.CacheDropTableDDL(req, ddl)
+				return nil
+			} else {
+				return execErr
+			}
 		}
 	}
 
@@ -445,6 +464,75 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 		WHERE CONSTRAINT_TYPE = 'PRIMARY KEY'
 		AND TABLE_SCHEMA = ? AND TABLE_NAME = ?
 	`, dbName, table).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// IndexExists reports whether an index with the given name exists on the
+// given table.
+func (w *Writer) IndexExists(ctx context.Context, schema, table, indexName string) (bool, error) {
+	dbName := schema
+	if dbName == "" {
+		dbName = w.config.Database
+	}
+
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT 1 FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?
+		LIMIT 1
+	`, dbName, table, indexName).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// ForeignKeyExists reports whether an FK constraint with the given name
+// exists on the given table.
+func (w *Writer) ForeignKeyExists(ctx context.Context, schema, table, fkName string) (bool, error) {
+	dbName := schema
+	if dbName == "" {
+		dbName = w.config.Database
+	}
+
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
+		WHERE CONSTRAINT_TYPE = 'FOREIGN KEY'
+		AND TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = ?
+	`, dbName, table, fkName).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// CheckConstraintExists reports whether a CHECK constraint with the given
+// name exists on the given table.
+//
+// Uses information_schema.TABLE_CONSTRAINTS (available on every MySQL
+// version) rather than information_schema.CHECK_CONSTRAINTS (8.0.16+ only).
+// Older MySQL targets that lack the CHECK_CONSTRAINTS view would error out
+// of the existence check and block the create path entirely, even though
+// CHECK semantics aren't supported there at all (the AI/exec path further
+// down is already broken in the same way per CLAUDE.md). On pre-8.0.16
+// MySQL, TABLE_CONSTRAINTS simply returns no rows for CHECK — falling
+// through to the existing AI/exec path, same as before this PR.
+func (w *Writer) CheckConstraintExists(ctx context.Context, schema, table, checkName string) (bool, error) {
+	dbName := schema
+	if dbName == "" {
+		dbName = w.config.Database
+	}
+
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
+		WHERE CONSTRAINT_TYPE = 'CHECK'
+		AND TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = ?
+	`, dbName, table, checkName).Scan(&exists)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -549,6 +637,13 @@ func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, id
 		return fmt.Errorf("finalization mapper not available for index creation")
 	}
 
+	if exists, err := w.IndexExists(ctx, targetSchema, t.Name, idx.Name); err != nil {
+		return fmt.Errorf("checking index existence for %s.%s: %w", t.Name, idx.Name, err)
+	} else if exists {
+		logging.Info("  ✓ index %s.%s already exists, skipping", t.Name, idx.Name)
+		return nil
+	}
+
 	req := driver.FinalizationDDLRequest{
 		Type:          driver.DDLTypeIndex,
 		SourceDBType:  w.sourceType,
@@ -571,6 +666,13 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for foreign key creation")
+	}
+
+	if exists, err := w.ForeignKeyExists(ctx, targetSchema, t.Name, fk.Name); err != nil {
+		return fmt.Errorf("checking FK existence for %s.%s: %w", t.Name, fk.Name, err)
+	} else if exists {
+		logging.Info("  ✓ FK %s.%s already exists, skipping", t.Name, fk.Name)
+		return nil
 	}
 
 	// Override RefSchema with the target schema. The source FK metadata
@@ -605,6 +707,13 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string, opts driver.FinalizeOptions) error {
 	if w.finalizationMapper == nil {
 		return fmt.Errorf("finalization mapper not available for check constraint creation")
+	}
+
+	if exists, err := w.CheckConstraintExists(ctx, targetSchema, t.Name, chk.Name); err != nil {
+		return fmt.Errorf("checking CHECK existence for %s.%s: %w", t.Name, chk.Name, err)
+	} else if exists {
+		logging.Info("  ✓ CHECK %s.%s already exists, skipping", t.Name, chk.Name)
+		return nil
 	}
 
 	req := driver.FinalizationDDLRequest{

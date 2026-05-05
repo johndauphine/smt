@@ -277,6 +277,16 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 // DDL is re-cached so future first-try calls for the same table-shape get
 // the good DDL instead of the cached failure. See #29 for the full design.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
+	// Skip if the target table already exists. Idempotent re-runs land here
+	// instead of failing on "relation already exists" inside the AI/exec path.
+	// Drift detection is out of scope — that's `smt sync`.
+	if exists, err := w.TableExists(ctx, targetSchema, t.Name); err != nil {
+		return fmt.Errorf("checking table existence for %s: %w", t.FullName(), err)
+	} else if exists {
+		logging.Info("  ✓ table %s already exists, skipping", t.FullName())
+		return nil
+	}
+
 	req := driver.TableDDLRequest{
 		SourceDBType:  w.sourceType,
 		TargetDBType:  "postgres",
@@ -348,6 +358,13 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 			}
 			return nil
 		}
+		// No post-exec already-exists catch on the CREATE TABLE path:
+		// PG SQLSTATE 42710 fires for inline constraint-name conflicts
+		// inside a CREATE TABLE, which means the table was *not* created
+		// — swallowing that error would silently skip the table and break
+		// later phases. Pre-exec TableExists is the table-level idempotency
+		// mechanism. The post-exec catch only makes semantic sense for
+		// retryFinalize where the failing object IS the constraint/index.
 
 		// Short-circuit on cancellation. Without this guard the AI-classifier
 		// path would re-prompt the model to "fix" a Ctrl-C and the user would
@@ -553,6 +570,15 @@ func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, id
 		}
 	}
 
+	// Skip if the index already exists. Re-runs hit this path; without it
+	// the cached DDL would be sent to the database and fail.
+	if exists, err := w.IndexExists(ctx, targetSchema, sanitizedTableName, sanitizedIdx.Name); err != nil {
+		return fmt.Errorf("checking index existence for %s.%s: %w", t.Name, idx.Name, err)
+	} else if exists {
+		logging.Info("  ✓ index %s.%s already exists, skipping", t.Name, idx.Name)
+		return nil
+	}
+
 	// Get target table DDL for AI context
 	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
 
@@ -608,6 +634,14 @@ func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Tabl
 		sanitizedFK.RefColumns[i] = sanitizePGIdentifier(col)
 	}
 
+	// Skip if the FK already exists.
+	if exists, err := w.ForeignKeyExists(ctx, targetSchema, sanitizedTableName, sanitizedFK.Name); err != nil {
+		return fmt.Errorf("checking FK existence for %s.%s: %w", t.Name, fk.Name, err)
+	} else if exists {
+		logging.Info("  ✓ FK %s.%s already exists, skipping", t.Name, fk.Name)
+		return nil
+	}
+
 	// Get target table DDL for AI context
 	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
 
@@ -644,6 +678,14 @@ func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver
 		Definition: chk.Definition,
 	}
 
+	// Skip if the CHECK already exists.
+	if exists, err := w.CheckConstraintExists(ctx, targetSchema, sanitizedTableName, sanitizedChk.Name); err != nil {
+		return fmt.Errorf("checking CHECK existence for %s.%s: %w", t.Name, chk.Name, err)
+	} else if exists {
+		logging.Info("  ✓ CHECK %s.%s already exists, skipping", t.Name, chk.Name)
+		return nil
+	}
+
 	// Get target table DDL for AI context
 	targetTableDDL := w.GetTableDDL(ctx, targetSchema, sanitizedTableName)
 
@@ -672,6 +714,48 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 			WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2
 		)
 	`, schema, sanitizedTable).Scan(&exists)
+	return exists, err
+}
+
+// IndexExists reports whether an index with the given name exists in the
+// schema. Postgres index names are unique per schema, so the table argument
+// is unused but kept to match the Writer interface across drivers.
+func (w *Writer) IndexExists(ctx context.Context, schema, table, indexName string) (bool, error) {
+	var exists bool
+	err := w.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE schemaname = $1 AND indexname = $2
+		)
+	`, schema, sanitizePGIdentifier(indexName)).Scan(&exists)
+	return exists, err
+}
+
+// ForeignKeyExists reports whether an FK constraint with the given name
+// exists on the given table.
+func (w *Writer) ForeignKeyExists(ctx context.Context, schema, table, fkName string) (bool, error) {
+	var exists bool
+	err := w.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.table_constraints
+			WHERE table_schema = $1 AND table_name = $2 AND constraint_name = $3
+			  AND constraint_type = 'FOREIGN KEY'
+		)
+	`, schema, sanitizePGTableName(table), sanitizePGIdentifier(fkName)).Scan(&exists)
+	return exists, err
+}
+
+// CheckConstraintExists reports whether a CHECK constraint with the given
+// name exists on the given table.
+func (w *Writer) CheckConstraintExists(ctx context.Context, schema, table, checkName string) (bool, error) {
+	var exists bool
+	err := w.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.table_constraints
+			WHERE table_schema = $1 AND table_name = $2 AND constraint_name = $3
+			  AND constraint_type = 'CHECK'
+		)
+	`, schema, sanitizePGTableName(table), sanitizePGIdentifier(checkName)).Scan(&exists)
 	return exists, err
 }
 

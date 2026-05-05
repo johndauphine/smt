@@ -205,6 +205,16 @@ type TypeInfo struct {
 type FinalizationDDLMapper interface {
 	// GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints.
 	GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error)
+
+	// CacheFinalizationDDL stores a known-good DDL for the request, replacing
+	// any prior cached value. This is the ONLY entry point that writes to the
+	// finalization-DDL cache — the mapper itself never caches because it only
+	// sees AI output, not validated DDL. The writer calls this after every
+	// successful CREATE INDEX / FOREIGN KEY / CHECK CONSTRAINT execution
+	// (first-try and retry alike); a failed exec leaves the cache untouched
+	// so the next call gets a fresh AI invocation rather than a poisoned hit.
+	// Mirrors TableTypeMapper.CacheTableDDL — see #32 for the rationale.
+	CacheFinalizationDDL(req FinalizationDDLRequest, ddl string)
 }
 
 // DDLType specifies the type of DDL to generate.
@@ -276,6 +286,12 @@ type TableDropDDLMapper interface {
 	// The AI will generate database-specific syntax that properly handles
 	// foreign key constraints and other database-specific requirements.
 	GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error)
+
+	// CacheDropTableDDL stores a known-good DDL for the request, replacing any
+	// prior cached value. The DROP prompt mandates IF EXISTS so the cached DDL
+	// is naturally idempotent across re-runs; this method is the writer's
+	// post-exec hook. Mirrors TableTypeMapper.CacheTableDDL — see #32.
+	CacheDropTableDDL(req DropTableDDLRequest, ddl string)
 }
 
 // DropTableDDLRequest contains information needed to generate DROP TABLE DDL.

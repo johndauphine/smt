@@ -34,6 +34,22 @@ type Writer interface {
 	CreateCheckConstraintWithOptions(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string, opts FinalizeOptions) error
 	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
 
+	// IndexExists reports whether an index with the given name exists on the
+	// target table. Used by CreateIndexWithOptions to short-circuit re-runs
+	// without invoking the AI or executing DDL that would fail with "already
+	// exists". Catalog query, no AI involved.
+	IndexExists(ctx context.Context, schema, table, indexName string) (bool, error)
+
+	// ForeignKeyExists reports whether a foreign key with the given name
+	// exists on the target table. Used by CreateForeignKeyWithOptions for
+	// idempotent re-runs.
+	ForeignKeyExists(ctx context.Context, schema, table, fkName string) (bool, error)
+
+	// CheckConstraintExists reports whether a CHECK constraint with the given
+	// name exists on the target table. Used by CreateCheckConstraintWithOptions
+	// for idempotent re-runs.
+	CheckConstraintExists(ctx context.Context, schema, table, checkName string) (bool, error)
+
 	// DDL introspection
 	// GetTableDDL returns the CREATE TABLE DDL for an existing table.
 	// Returns empty string if DDL cannot be retrieved (non-fatal).

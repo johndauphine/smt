@@ -5,9 +5,31 @@ import (
 	"errors"
 	"fmt"
 
+	mysqldrv "github.com/go-sql-driver/mysql"
+
 	"smt/internal/driver"
 	"smt/internal/logging"
 )
+
+// isAlreadyExists reports whether err is a MySQL "object already exists"
+// error class. See postgres equivalent for the rationale.
+//
+//	1050 = Table '...' already exists.
+//	1061 = Duplicate key name (CREATE INDEX with existing name).
+//	1826 = Duplicate foreign key constraint name.
+//	1068 = Multiple primary key defined.
+//	1022 = Can't write; duplicate key in table.
+func isAlreadyExists(err error) bool {
+	var mErr *mysqldrv.MySQLError
+	if !errors.As(err, &mErr) {
+		return false
+	}
+	switch mErr.Number {
+	case 1050, 1061, 1826, 1068, 1022:
+		return true
+	}
+	return false
+}
 
 // retryFinalize generates DDL via the finalization mapper and executes it,
 // retrying up to maxRetries times. Each retry feeds the prior failed DDL plus
@@ -47,9 +69,15 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 		}
 
 		if _, execErr := w.db.ExecContext(ctx, ddl); execErr == nil {
+			// Cache the validated DDL post-exec — see postgres equivalent / #32.
+			w.finalizationMapper.CacheFinalizationDDL(req, ddl)
 			if attempt > 0 {
 				logging.Info("%s succeeded on retry attempt %d/%d", label, attempt, maxRetries)
 			}
+			return nil
+		} else if isAlreadyExists(execErr) {
+			// See postgres equivalent.
+			logging.Info("  ✓ %s already exists (post-exec catch); treating as no-op", label)
 			return nil
 		} else {
 			// Short-circuit on cancellation — see postgres equivalent for rationale.
