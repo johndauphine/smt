@@ -2391,10 +2391,18 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 
 	ddl := strings.TrimSpace(result)
 
-	// Basic validation - should contain DROP
+	// Validate: must contain DROP and must be idempotent (IF EXISTS).
+	// All three target dialects' AIDropTablePromptAugmentation already mandate
+	// IF EXISTS, but the cache replays the exact AI output — so a model that
+	// disregards the prompt and emits a bare "DROP TABLE foo" would succeed
+	// once, get cached, and fail every subsequent run with "table not found".
+	// Rejecting non-idempotent DDL here keeps the cache contract honest.
 	upperDDL := strings.ToUpper(ddl)
 	if !strings.Contains(upperDDL, "DROP") {
 		return "", fmt.Errorf("response does not contain valid DROP statement: %s", truncateString(ddl, 100))
+	}
+	if !strings.Contains(upperDDL, "IF EXISTS") {
+		return "", fmt.Errorf("response does not contain idempotent DROP (missing IF EXISTS): %s", truncateString(ddl, 100))
 	}
 
 	// Cache writes are deferred to CacheDropTableDDL post-exec — see #32.

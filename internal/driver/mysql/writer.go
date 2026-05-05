@@ -509,10 +509,16 @@ func (w *Writer) ForeignKeyExists(ctx context.Context, schema, table, fkName str
 }
 
 // CheckConstraintExists reports whether a CHECK constraint with the given
-// name exists on the given table. Requires MySQL 8.0.16+ (the version that
-// added CHECK enforcement and the information_schema.CHECK_CONSTRAINTS view);
-// older targets return ErrNoRows → false here, which matches the broader
-// behavior of #18 / CLAUDE.md's MySQL 8.0.16+ note for check support.
+// name exists on the given table.
+//
+// Uses information_schema.TABLE_CONSTRAINTS (available on every MySQL
+// version) rather than information_schema.CHECK_CONSTRAINTS (8.0.16+ only).
+// Older MySQL targets that lack the CHECK_CONSTRAINTS view would error out
+// of the existence check and block the create path entirely, even though
+// CHECK semantics aren't supported there at all (the AI/exec path further
+// down is already broken in the same way per CLAUDE.md). On pre-8.0.16
+// MySQL, TABLE_CONSTRAINTS simply returns no rows for CHECK — falling
+// through to the existing AI/exec path, same as before this PR.
 func (w *Writer) CheckConstraintExists(ctx context.Context, schema, table, checkName string) (bool, error) {
 	dbName := schema
 	if dbName == "" {
@@ -521,14 +527,9 @@ func (w *Writer) CheckConstraintExists(ctx context.Context, schema, table, check
 
 	var exists int
 	err := w.db.QueryRowContext(ctx, `
-		SELECT 1 FROM information_schema.CHECK_CONSTRAINTS cc
-		JOIN information_schema.TABLE_CONSTRAINTS tc
-		  ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
-		 AND cc.CONSTRAINT_NAME   = tc.CONSTRAINT_NAME
-		WHERE tc.CONSTRAINT_SCHEMA = ?
-		  AND tc.TABLE_NAME       = ?
-		  AND tc.CONSTRAINT_NAME  = ?
-		  AND tc.CONSTRAINT_TYPE  = 'CHECK'
+		SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
+		WHERE CONSTRAINT_TYPE = 'CHECK'
+		AND TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = ?
 	`, dbName, table, checkName).Scan(&exists)
 	if err == sql.ErrNoRows {
 		return false, nil

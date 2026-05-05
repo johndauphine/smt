@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -493,5 +494,40 @@ func TestGenerateDropTableDDL_FailedFirstTryDoesNotPoison(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Errorf("BUG: second GenerateDropTableDDL hit cache; got %d AI calls, want 2", got)
+	}
+}
+
+// TestGenerateDropTableDDL_RejectsNonIdempotent guards the validator: AI
+// output without IF EXISTS must not be returned (and therefore must not be
+// cached). All dialect prompts mandate IF EXISTS, but the cache replays the
+// exact AI output — a model that ignores the prompt would otherwise produce
+// a non-idempotent DDL that succeeds once and fails on every subsequent run.
+func TestGenerateDropTableDDL_RejectsNonIdempotent(t *testing.T) {
+	var calls atomic.Int32
+	// AI returns a bare "DROP TABLE" with no IF EXISTS.
+	server := finalizationDDLServer(t, "DROP TABLE public.foo;", &calls)
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "lmstudio", &secrets.Provider{
+		APIKey: "", Model: "test-model", BaseURL: server.URL,
+	})
+	mapper.client = server.Client()
+
+	req := DropTableDDLRequest{TargetDBType: "postgres", TargetSchema: "public", TableName: "foo"}
+	_, err := mapper.GenerateDropTableDDL(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for non-idempotent DROP, got nil")
+	}
+	if !strings.Contains(err.Error(), "IF EXISTS") {
+		t.Errorf("expected error to mention IF EXISTS, got: %v", err)
+	}
+
+	// And nothing should have been cached as a side effect.
+	cacheKey := mapper.dropTableCacheKey(req)
+	mapper.cacheMu.RLock()
+	_, hit := mapper.cache.Get(cacheKey)
+	mapper.cacheMu.RUnlock()
+	if hit {
+		t.Error("non-idempotent DROP must not populate cache")
 	}
 }
