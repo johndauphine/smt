@@ -357,12 +357,14 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 				logging.Info("table %s succeeded on retry attempt %d/%d", t.FullName(), attempt, opts.MaxRetries)
 			}
 			return nil
-		} else if isAlreadyExists(err) {
-			// Pre-exec TableExists catches most re-run cases. Belt-and-braces
-			// for race / drift / inconsistent quoting between probe and exec.
-			logging.Info("  ✓ table %s already exists (post-exec catch); treating as no-op", t.FullName())
-			return nil
 		}
+		// No post-exec already-exists catch on the CREATE TABLE path:
+		// PG SQLSTATE 42710 fires for inline constraint-name conflicts
+		// inside a CREATE TABLE, which means the table was *not* created
+		// — swallowing that error would silently skip the table and break
+		// later phases. Pre-exec TableExists is the table-level idempotency
+		// mechanism. The post-exec catch only makes semantic sense for
+		// retryFinalize where the failing object IS the constraint/index.
 
 		// Short-circuit on cancellation. Without this guard the AI-classifier
 		// path would re-prompt the model to "fix" a Ctrl-C and the user would
