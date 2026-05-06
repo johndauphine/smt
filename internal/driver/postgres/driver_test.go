@@ -239,6 +239,54 @@ func TestAIPromptAugmentation(t *testing.T) {
 	}
 }
 
+// TestAIPromptAugmentation_TimezoneAwareness pins the PG TZ mapping table
+// added in PR #45. The regression that motivated this test: gemma-4-e4b
+// emitted `TIMESTAMP WITH TIME ZONE` for a source MSSQL `datetime2`
+// (TZ-naive). Without this rule explicit, sub-Sonnet models silently add
+// timezone semantics the source doesn't have.
+func TestAIPromptAugmentation_TimezoneAwareness(t *testing.T) {
+	dialect := &Dialect{}
+	aug := dialect.AIPromptAugmentation()
+
+	for _, needle := range []string{
+		"timezone-awareness",
+		"WITHOUT timezone",
+		"WITH timezone",
+		"TIMESTAMP", // the right TZ-naive PG type
+		"TIMESTAMPTZ",
+		"MSSQL `datetime`",
+		"MSSQL `datetime2(N)`",
+		"MSSQL `datetimeoffset(N)`",
+		"MySQL `datetime(N)`",
+		"MySQL `timestamp(N)`",
+	} {
+		if !strings.Contains(aug, needle) {
+			t.Errorf("AIPromptAugmentation missing TZ-rule phrase %q", needle)
+		}
+	}
+}
+
+// TestAIPromptAugmentation_VarcharLengthRule pins the VARCHAR length-
+// preservation rule added in PR #45. mssql/mysql dialects already had
+// length rules; PG was missing one, which let sub-Sonnet models halve
+// `varchar(20)` to `varchar(10)`.
+func TestAIPromptAugmentation_VarcharLengthRule(t *testing.T) {
+	dialect := &Dialect{}
+	aug := dialect.AIPromptAugmentation()
+
+	for _, needle := range []string{
+		"VARCHAR length rule",
+		"varchar(20)",
+		"VARCHAR(20)",
+		"Do NOT round, halve, double, substitute",
+		"count CHARACTERS",
+	} {
+		if !strings.Contains(aug, needle) {
+			t.Errorf("AIPromptAugmentation missing length-rule phrase %q", needle)
+		}
+	}
+}
+
 // TestReaderDatabaseContext_Populated is the regression guard for issue #13.
 // The orchestrator passes Reader.DatabaseContext() into TableOptions.SourceContext;
 // returning nil here would silently produce one-sided AI prompts (full TARGET

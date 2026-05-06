@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # verify_columns.sh — column-level metadata equivalence check between MSSQL
 # source and PG target after an `smt create` run. Implements pass criteria
-# 1–7 from CLAUDE.md "Cross-engine coverage status." Exits non-zero with a
-# diff report on any mismatch.
+# 1–6 from CLAUDE.md "Cross-engine coverage status." Criterion 7 (computed-
+# column presence + storage class) is a TODO — needs cross-dialect
+# expression normalization. Exits non-zero with a diff report on any mismatch.
 #
 # Usage:
 #   ./verify_columns.sh <mssql_db> <mssql_schema> <pg_db> <pg_schema> [table_filter]
@@ -48,7 +49,13 @@ SELECT
   LOWER(c.TABLE_NAME) AS t,
   LOWER(c.COLUMN_NAME) AS c,
   LOWER(c.DATA_TYPE) AS dt,
-  CASE WHEN c.CHARACTER_MAXIMUM_LENGTH IS NULL THEN '' ELSE CAST(c.CHARACTER_MAXIMUM_LENGTH AS VARCHAR) END AS len,
+  -- Normalize MSSQL's MAX sentinel (-1) to '' so it equates to unbounded PG
+  -- targets (text, etc.) where character_maximum_length is NULL → ''.
+  CASE
+    WHEN c.CHARACTER_MAXIMUM_LENGTH IS NULL THEN ''
+    WHEN c.CHARACTER_MAXIMUM_LENGTH = -1     THEN ''
+    ELSE CAST(c.CHARACTER_MAXIMUM_LENGTH AS VARCHAR)
+  END AS len,
   CASE WHEN c.NUMERIC_PRECISION IS NULL THEN '' ELSE CAST(c.NUMERIC_PRECISION AS VARCHAR) END AS prec,
   CASE WHEN c.NUMERIC_SCALE IS NULL THEN '' ELSE CAST(c.NUMERIC_SCALE AS VARCHAR) END AS scl,
   CASE WHEN c.IS_NULLABLE = 'YES' THEN 'Y' ELSE 'N' END AS nul,
@@ -69,8 +76,11 @@ ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION;
 # --- Target extraction --------------------------------------------------------
 PGPASSWORD="$PG_PASS" docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -At -F '|' -c "
 SELECT
-  table_name,
-  column_name,
+  -- Lowercase the PG side too, even though PG folds unquoted identifiers to
+  -- lowercase already, to defend against quoted/mixed-case identifiers in any
+  -- AI-emitted DDL. Keeps the join symmetric with the MSSQL side.
+  lower(table_name)  AS t,
+  lower(column_name) AS c,
   CASE
     WHEN data_type = 'character varying' THEN 'varchar'
     WHEN data_type = 'character'         THEN 'char'
