@@ -215,31 +215,6 @@ func TestCloudProviderRequiresKey(t *testing.T) {
 	}
 }
 
-func TestNativeProviderNoInput(t *testing.T) {
-	s := NewState()
-	s.Process("no_ai")
-	s.Process("y")
-	s.Process("windows")
-
-	// StepAIKey for a native provider must be auto-action — the wizard
-	// must not prompt for a key or URL, since windows has neither.
-	info := s.Prompt()
-	if !info.IsAutoAction {
-		t.Fatal("StepAIKey should be IsAutoAction for windows")
-	}
-
-	s.Process("")
-	if s.CurrentStep != StepWriteSecrets {
-		t.Fatalf("expected StepWriteSecrets, got %d", s.CurrentStep)
-	}
-	if s.AIKey != "" {
-		t.Fatalf("expected empty AIKey for native provider, got %q", s.AIKey)
-	}
-	if !s.AIConfigured {
-		t.Fatal("expected AIConfigured")
-	}
-}
-
 func TestLocalProviderDefaultURL(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")

@@ -116,10 +116,6 @@ var KnownProviders = map[string]struct {
 	"gemini":    {ProviderTypeCloud, "https://generativelanguage.googleapis.com"},
 	"ollama":    {ProviderTypeLocal, "http://localhost:11434"},
 	"lmstudio":  {ProviderTypeLocal, "http://localhost:1234"},
-	// Windows AI runs on-device via the Windows Copilot Runtime (Phi Silica
-	// on Copilot+ PCs). It is a native API rather than an HTTP endpoint, so
-	// it has no DefaultURL — the dispatch path is provider-specific.
-	"windows": {ProviderTypeLocal, ""},
 }
 
 // DefaultModels maps providers to their default models.
@@ -135,7 +131,6 @@ var DefaultModels = map[string]string{
 	"gemini":    "gemini-2.0-flash",
 	"ollama":    "llama3",
 	"lmstudio":  "local-model",
-	"windows":   "phi-silica",
 }
 
 var (
@@ -434,8 +429,8 @@ func (c *Config) GetMigrationDefaults() *MigrationDefaults {
 	// enable it by default when an AI provider is configured
 	if defaults.AIAdjust == nil && defaults.AIAdjustInterval == "" {
 		// Neither ai_adjust nor ai_adjust_interval was set - apply default
-		if provider, name, err := c.GetDefaultProvider(); err == nil && provider != nil {
-			if provider.IsConfigured(name) {
+		if provider, _, err := c.GetDefaultProvider(); err == nil && provider != nil {
+			if provider.APIKey != "" || provider.BaseURL != "" {
 				aiAdjust := true
 				defaults.AIAdjust = &aiAdjust
 				defaults.AIAdjustInterval = "30s"
@@ -519,27 +514,6 @@ func IsLocalProvider(name string) bool {
 	return false
 }
 
-// IsNativeProvider reports whether the provider runs on-device without an
-// HTTP endpoint (e.g. `windows` via the Windows Copilot Runtime). Such
-// providers need neither an API key nor a base URL — being a registered
-// known provider is sufficient. The discriminator is a registered local
-// provider with no DefaultURL.
-func IsNativeProvider(name string) bool {
-	known, ok := KnownProviders[name]
-	return ok && known.Type == ProviderTypeLocal && known.DefaultURL == ""
-}
-
-// IsConfigured reports whether p has enough information to be used as the
-// active AI provider. HTTP-based providers (cloud, ollama, lmstudio,
-// custom OpenAI-compatible local servers) need APIKey or BaseURL set.
-// Native providers like `windows` need neither.
-func (p *Provider) IsConfigured(name string) bool {
-	if p.APIKey != "" || p.BaseURL != "" {
-		return true
-	}
-	return IsNativeProvider(name)
-}
-
 // SecretsNotFoundError is returned when the secrets file doesn't exist
 type SecretsNotFoundError struct {
 	Path string
@@ -607,13 +581,6 @@ ai:
       model: "local-model"
       # context_window: 8192  # optional, configure based on your model
       # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
-
-    # Windows AI (on-device). Runs Phi Silica via the Windows Copilot Runtime
-    # on Copilot+ PCs. No API key, no base_url — uses the native WinRT API.
-    # Requires Windows 11 with the Windows AI components installed.
-    windows:
-      model: "phi-silica"
-      # max_tokens: 16000  # optional, on-device output cap
 
 encryption:
   master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32
