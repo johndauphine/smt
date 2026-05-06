@@ -147,7 +147,7 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 	// Determine API timeout: user-configured > local provider default > cloud default.
 	// Local providers and thinking models need more time for inference.
 	timeoutSec := 60
-	if IsLocalProvider(providerName) {
+	if secrets.IsLocalProvider(providerName) {
 		timeoutSec = 120
 	}
 	if provider.TimeoutSeconds > 0 {
@@ -1278,12 +1278,6 @@ func (m *AITypeMapper) ProviderName() string {
 // TimeoutSeconds returns the configured API timeout.
 func (m *AITypeMapper) TimeoutSeconds() int {
 	return m.timeoutSeconds
-}
-
-// IsLocalProvider returns true if the provider runs inference locally
-// (Ollama or LMStudio) rather than calling a cloud API.
-func IsLocalProvider(providerName string) bool {
-	return providerName == string(ProviderOllama) || providerName == string(ProviderLMStudio)
 }
 
 // Model returns the model being used.
