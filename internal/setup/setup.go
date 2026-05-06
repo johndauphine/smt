@@ -362,13 +362,16 @@ func (s *State) Process(input string) string {
 		s.CurrentStep = StepAIKey
 
 	case StepAIKey:
-		if secrets.IsLocalProvider(s.AIProvider) {
+		switch {
+		case secrets.IsNativeProvider(s.AIProvider):
+			s.AIKey = ""
+		case secrets.IsLocalProvider(s.AIProvider):
 			if input == "" {
 				known := secrets.KnownProviders[s.AIProvider]
 				input = known.DefaultURL
 			}
 			s.AIKey = input
-		} else {
+		default:
 			if input == "" {
 				return "API key is required for cloud providers"
 			}

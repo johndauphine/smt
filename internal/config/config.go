@@ -774,8 +774,11 @@ func (c *Config) applyDefaults() error {
 		}
 	}
 
-	// AI features: apply defaults when api_key is configured
-	if c.AI != nil && c.AI.APIKey != "" {
+	// AI features: apply defaults when the provider has enough to dispatch
+	// (cloud needs APIKey; local-HTTP needs BaseURL via secrets; native
+	// providers like `windows` need neither — being a registered native
+	// provider is sufficient).
+	if c.AI != nil && (c.AI.APIKey != "" || secrets.IsNativeProvider(c.AI.Provider)) {
 		// Default provider to anthropic if not specified
 		if c.AI.Provider == "" {
 			c.AI.Provider = "anthropic"

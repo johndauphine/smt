@@ -238,33 +238,25 @@ func TestIsNativeProvider(t *testing.T) {
 
 func TestProvider_IsConfigured(t *testing.T) {
 	tests := []struct {
-		name     string
-		provider Provider
-		want     bool
+		name         string
+		providerName string
+		provider     Provider
+		want         bool
 	}{
-		{"anthropic with key", Provider{APIKey: "sk-..."}, true},
-		{"anthropic without key", Provider{}, false},
-		{"ollama with base url", Provider{BaseURL: "http://localhost:11434"}, true},
-		{"ollama without base url", Provider{}, false},
-		{"windows with nothing set", Provider{}, true},
-		{"windows with model only", Provider{Model: "phi-silica"}, true},
-		{"unknown provider with nothing", Provider{}, false},
+		{"anthropic with key", "anthropic", Provider{APIKey: "sk-..."}, true},
+		{"anthropic without key", "anthropic", Provider{}, false},
+		{"ollama with base url", "ollama", Provider{BaseURL: "http://localhost:11434"}, true},
+		{"ollama without base url", "ollama", Provider{}, false},
+		{"windows with nothing set", "windows", Provider{}, true},
+		{"windows with model only", "windows", Provider{Model: "phi-silica"}, true},
+		{"unknown provider with nothing", "unknown", Provider{}, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			providerName := "anthropic"
-			switch {
-			case tt.name == "ollama with base url" || tt.name == "ollama without base url":
-				providerName = "ollama"
-			case tt.name == "windows with nothing set" || tt.name == "windows with model only":
-				providerName = "windows"
-			case tt.name == "unknown provider with nothing":
-				providerName = "unknown"
-			}
-			got := tt.provider.IsConfigured(providerName)
+			got := tt.provider.IsConfigured(tt.providerName)
 			if got != tt.want {
-				t.Errorf("IsConfigured(%q) = %v, want %v", providerName, got, tt.want)
+				t.Errorf("IsConfigured(%q) = %v, want %v", tt.providerName, got, tt.want)
 			}
 		})
 	}
