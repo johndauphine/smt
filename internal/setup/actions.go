@@ -11,9 +11,12 @@ import (
 // It uses secrets.Save() which merges into any existing secrets config.
 func (s *State) WriteSecretsFile() error {
 	provider := &secrets.Provider{}
-	if secrets.IsLocalProvider(s.AIProvider) {
+	switch {
+	case secrets.IsNativeProvider(s.AIProvider):
+		// Native providers (e.g. windows) need neither key nor URL.
+	case secrets.IsLocalProvider(s.AIProvider):
 		provider.BaseURL = s.AIKey
-	} else {
+	default:
 		provider.APIKey = s.AIKey
 	}
 	if model, ok := secrets.DefaultModels[s.AIProvider]; ok {
@@ -57,7 +60,7 @@ func CheckExistingSecrets() string {
 	}
 
 	p, ok := cfg.AI.Providers[cfg.AI.DefaultProvider]
-	if !ok || (p.APIKey == "" && p.BaseURL == "") {
+	if !ok || !p.IsConfigured(cfg.AI.DefaultProvider) {
 		return "no_ai"
 	}
 
