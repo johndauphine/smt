@@ -50,6 +50,28 @@ func mustContain(t *testing.T, haystack string, needles ...string) {
 	}
 }
 
+// TestAIPromptAugmentation_TimezoneAwareness pins the MSSQL TZ mapping
+// table added in PR #45. Without this, future prompt edits could drop the
+// guidance that PG `timestamp` (no TZ) → MSSQL `DATETIME2`, while
+// PG `timestamptz` → MSSQL `DATETIMEOFFSET`. Sub-Sonnet models reach for the
+// wrong type when the rule isn't explicit.
+func TestAIPromptAugmentation_TimezoneAwareness(t *testing.T) {
+	d := &Dialect{}
+	aug := d.AIPromptAugmentation()
+
+	mustContain(t, aug,
+		"timezone-awareness",
+		"DATETIME2",
+		"DATETIMEOFFSET",
+		"WITHOUT timezone",
+		"WITH timezone",
+		"PG `timestamp(N)`",
+		"PG `timestamptz(N)`",
+		"MySQL `datetime(N)`",
+		"MySQL `timestamp(N)`",
+	)
+}
+
 // TestAIPromptAugmentation_ComputedColumnNullability is the regression test
 // for the gpt-oss-20b mssql → mssql failure mode where the model emitted
 // `line_total AS (...) PERSISTED NULL`. SQL Server rejects any nullability

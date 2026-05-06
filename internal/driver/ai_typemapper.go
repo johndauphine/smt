@@ -1440,7 +1440,7 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	}
 	sb.WriteString("- Use the EXACT column names from the REQUIRED TARGET COLUMN NAMES section above\n")
 	sb.WriteString("- Include all columns with appropriate target types\n")
-
+	sb.WriteString("- Preserve `max_length`, `precision`, and `scale` exactly as reported. max_length=20 -> VARCHAR(20); precision=18, scale=4 -> NUMERIC(18,4). Do not round to a 'friendly' size, halve, or substitute different values.\n")
 	sb.WriteString("- Preserve nullability exactly as reported in the introspection metadata — emit NOT NULL when nullable=false, allow NULL when nullable=true. SMT migrates schema, not data; do not relax nullability for loading flexibility.\n")
 	sb.WriteString("- Primary key columns must be NOT NULL\n")
 	sb.WriteString("- Include PRIMARY KEY constraint\n")
@@ -1616,6 +1616,8 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	// every column that has them — these rules force the AI to carry them
 	// through to the target instead of silently dropping them.
 	sb.WriteString("\nColumn-attribute preservation:\n")
+	sb.WriteString("- Preserve `max_length`, `precision`, and `scale` EXACTLY as reported in the introspection metadata. When `max_length: 20` is reported for a varchar/char/binary column, emit the target type with that exact length argument: VARCHAR(20). When `precision` and `scale` are reported for a numeric/decimal column, emit them exactly: precision=18, scale=4 -> NUMERIC(18,4). Do NOT round up or down to a 'friendlier' bucket size (10, 25, 50, 100, 1000), do NOT halve or double, do NOT substitute a different length, and do NOT drop the size argument and rely on the target's default. SMT migrates schema, not data; shrinking column capacity silently breaks insert paths on real workloads, and growing it wastes storage.\n")
+	sb.WriteString("- Preserve timezone-awareness exactly. A source type without TZ information must map to a target type without TZ; a source type with TZ must map to a target type with TZ. Engine-specific mapping tables for each target appear below.\n")
 	sb.WriteString("- Preserve every NOT NULL constraint (nullable=false in the introspection metadata). Do not change a non-nullable column to nullable.\n")
 	sb.WriteString("- Preserve every default_expression reported in the introspection metadata. Translate dialect-specific function defaults to the target's equivalent:\n")
 	sb.WriteString("  * GETDATE() / GETUTCDATE() / SYSDATETIMEOFFSET() / SYSDATETIME() (MSSQL) -> CURRENT_TIMESTAMP (postgres/mysql)\n")

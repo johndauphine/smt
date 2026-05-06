@@ -281,6 +281,25 @@ CRITICAL MySQL VARCHAR / charset rules:
   When in doubt prefer the larger type — silent truncation on insert is much
   worse than a few extra bytes of pointer overhead.
 
+CRITICAL MySQL timezone-awareness rules:
+- Source datetime types WITHOUT timezone — MSSQL ` + "`datetime`" + `, ` + "`datetime2`" + `, ` + "`smalldatetime`" + `;
+  PG ` + "`timestamp`" + ` / ` + "`timestamp without time zone`" + ` — MUST map to MySQL ` + "`DATETIME`" + `.
+  Do NOT use ` + "`TIMESTAMP`" + ` for these — MySQL's ` + "`TIMESTAMP`" + ` stores values in UTC and
+  converts on read using the session timezone, adding TZ semantics the source lacks.
+- Source datetime types WITH timezone — MSSQL ` + "`datetimeoffset`" + `; PG ` + "`timestamptz`" + ` /
+  ` + "`timestamp with time zone`" + ` — MUST map to MySQL ` + "`TIMESTAMP`" + ` (which provides the
+  TZ-conversion semantics).
+- Quick mapping table:
+    MSSQL ` + "`datetime`" + `         -> MySQL ` + "`DATETIME`" + `
+    MSSQL ` + "`datetime2(N)`" + `     -> MySQL ` + "`DATETIME(N)`" + `
+    MSSQL ` + "`smalldatetime`" + `    -> MySQL ` + "`DATETIME`" + `
+    MSSQL ` + "`datetimeoffset(N)`" + ` -> MySQL ` + "`TIMESTAMP(N)`" + `
+    PG ` + "`timestamp(N)`" + `        -> MySQL ` + "`DATETIME(N)`" + `
+    PG ` + "`timestamptz(N)`" + `      -> MySQL ` + "`TIMESTAMP(N)`" + `
+- Note: MySQL ` + "`TIMESTAMP`" + ` has a smaller range (1970–2038) than ` + "`DATETIME`" + ` (1000–9999).
+  The narrowing is acceptable for TZ-aware columns since modern data fits the range; if the
+  source data could include pre-1970 timestamps with TZ, this is a known fidelity limitation.
+
 CRITICAL MySQL fractional-second precision rule:
 - When mapping any source column with ` + "`scale > 0`" + ` (per the introspection metadata) to a
   MySQL ` + "`DATETIME(N)`" + ` / ` + "`TIMESTAMP(N)`" + ` / ` + "`TIME(N)`" + ` target — regardless of the

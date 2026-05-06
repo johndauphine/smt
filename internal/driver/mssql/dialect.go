@@ -272,6 +272,18 @@ CRITICAL SQL Server NVARCHAR length rules:
   text that has no mapping in the code page is silently lossy — characters
   become ` + "`?`" + `. NVARCHAR uses UTF-16 and round-trips Unicode safely.
 
+CRITICAL SQL Server timezone-awareness rules:
+- Source datetime types WITHOUT timezone — PG ` + "`timestamp`" + ` / ` + "`timestamp without time zone`" + `;
+  MySQL ` + "`datetime`" + ` — MUST map to MSSQL ` + "`DATETIME2`" + `. Do NOT use ` + "`DATETIMEOFFSET`" + ` for
+  these — that silently adds TZ semantics the source never had.
+- Source datetime types WITH timezone — PG ` + "`timestamptz`" + ` / ` + "`timestamp with time zone`" + `;
+  MySQL ` + "`timestamp`" + ` — MUST map to MSSQL ` + "`DATETIMEOFFSET`" + `.
+- Quick mapping table:
+    PG ` + "`timestamp(N)`" + `       -> MSSQL ` + "`DATETIME2(N)`" + `   (preserve N from scale)
+    PG ` + "`timestamptz(N)`" + `     -> MSSQL ` + "`DATETIMEOFFSET(N)`" + `
+    MySQL ` + "`datetime(N)`" + `     -> MSSQL ` + "`DATETIME2(N)`" + `
+    MySQL ` + "`timestamp(N)`" + `    -> MSSQL ` + "`DATETIMEOFFSET(N)`" + `
+
 CRITICAL SQL Server computed column nullability rule:
 - Computed columns (` + "`<col> AS (<expr>) PERSISTED`" + `) are implicitly nullable in SQL
   Server — their nullability is derived from the expression. NEVER append ` + "`NULL`" + ` or

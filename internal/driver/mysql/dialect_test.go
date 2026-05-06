@@ -74,6 +74,32 @@ func TestAIPromptAugmentation_VarcharLengthAndCharset(t *testing.T) {
 	}
 }
 
+// TestAIPromptAugmentation_TimezoneAwareness pins the MySQL TZ mapping
+// table added in PR #45. MySQL's `TIMESTAMP` carries TZ semantics (UTC
+// stored, session-TZ converted on read) while `DATETIME` does not, so a
+// source `datetime2` (TZ-naive MSSQL) must NOT map to MySQL `TIMESTAMP`.
+// Without explicit guidance, sub-Sonnet models conflate the two.
+func TestAIPromptAugmentation_TimezoneAwareness(t *testing.T) {
+	d := &Dialect{}
+	aug := d.AIPromptAugmentation()
+
+	for _, needle := range []string{
+		"timezone-awareness",
+		"WITHOUT timezone",
+		"WITH timezone",
+		"DATETIME`",
+		"TIMESTAMP`",
+		"MSSQL `datetime`",
+		"MSSQL `datetimeoffset(N)`",
+		"PG `timestamp(N)`",
+		"PG `timestamptz(N)`",
+	} {
+		if !strings.Contains(aug, needle) {
+			t.Errorf("prompt missing required phrase %q", needle)
+		}
+	}
+}
+
 // TestAIPromptAugmentation_FractionalSecondPrecision is the regression test
 // for issue #19. The mssql → mysql pair on the CRM fixture used to fail at
 // the first table containing `DATETIME2(N) DEFAULT GETUTCDATE()` because the

@@ -1524,6 +1524,76 @@ func TestBuildTableDDLPrompt_TypeValidityRule(t *testing.T) {
 	}
 }
 
+// TestBuildTableDDLPrompt_LengthPreservationRule pins the explicit length /
+// precision / scale preservation rule added in PR #45 to the
+// Column-attribute preservation block and OUTPUT REQUIREMENTS. Without
+// these phrases sub-Sonnet models reach for "round to a friendly bucket"
+// heuristics and silently halve varchar lengths — the regression that
+// motivated PR #45.
+func TestBuildTableDDLPrompt_LengthPreservationRule(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	req := TableDDLRequest{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		SourceTable: &Table{
+			Name: "T",
+			Columns: []Column{
+				{Name: "id", DataType: "int", IsNullable: false},
+				{Name: "code", DataType: "varchar", MaxLength: 20, IsNullable: false},
+			},
+			PrimaryKey: []string{"id"},
+		},
+	}
+	prompt := mapper.buildTableDDLPrompt(req)
+
+	for _, needle := range []string{
+		// Engine-agnostic rule in OUTPUT REQUIREMENTS
+		"max_length=20 -> VARCHAR(20)",
+		"precision=18, scale=4 -> NUMERIC(18,4)",
+		// Emphatic rule in Column-attribute preservation
+		"Preserve `max_length`, `precision`, and `scale` EXACTLY",
+		"Do NOT round up or down",
+		"do NOT halve or double",
+		"do NOT drop the size argument",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Errorf("prompt missing length-rule phrase %q", needle)
+		}
+	}
+}
+
+// TestBuildTableDDLPrompt_TimezoneAwarenessRule pins the engine-agnostic
+// TZ-awareness one-liner in writeMigrationRules. The dialect-specific
+// mapping tables live in each driver's AIPromptAugmentation (per the
+// #19 / #27 convention) and have their own pinning tests.
+func TestBuildTableDDLPrompt_TimezoneAwarenessRule(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	req := TableDDLRequest{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		SourceTable: &Table{
+			Name: "T",
+			Columns: []Column{
+				{Name: "id", DataType: "int", IsNullable: false},
+			},
+			PrimaryKey: []string{"id"},
+		},
+	}
+	prompt := mapper.buildTableDDLPrompt(req)
+
+	for _, needle := range []string{
+		"Preserve timezone-awareness exactly",
+		"source type without TZ information must map to a target type without TZ",
+		"source type with TZ must map to a target type with TZ",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Errorf("prompt missing TZ-awareness phrase %q", needle)
+		}
+	}
+}
+
 // Make sure the prompt does not regress into a hand-coded translation table.
 // The whole point is that SMT delegates type mapping to the AI — if a per-pair
 // "MSSQL X -> PG Y" enumeration shows up here again, it should be deleted in
