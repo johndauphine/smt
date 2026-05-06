@@ -178,6 +178,24 @@ func NewAITypeMapperFromSecrets() (*AITypeMapper, error) {
 	return NewAITypeMapper(name, provider)
 }
 
+// NewAITypeMapperByName creates an AI type mapper for a specific provider
+// entry in the secrets file. Used by the orchestrator to build the verifier
+// mapper from migration.ai_verifier_model. Errors if the provider name is
+// not found in the secrets config.
+func NewAITypeMapperByName(name string) (*AITypeMapper, error) {
+	config, err := secrets.Load()
+	if err != nil {
+		return nil, fmt.Errorf("loading secrets: %w", err)
+	}
+
+	provider, err := config.GetProvider(name)
+	if err != nil {
+		return nil, fmt.Errorf("getting AI provider %q: %w", name, err)
+	}
+
+	return NewAITypeMapper(name, provider)
+}
+
 // MapType maps a source type to the target type using AI.
 // This method is safe to call concurrently - it uses in-flight request tracking
 // to avoid duplicate API calls for the same type.

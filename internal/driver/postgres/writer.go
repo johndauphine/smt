@@ -44,9 +44,17 @@ type Writer struct {
 	typeMapper         driver.TypeMapper
 	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
 	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
-	dbContext          *driver.DatabaseContext      // Cached database context for AI
-	cachedDB           *sql.DB                      // Cached database/sql wrapper for tuning analysis
-	copyBatchBytes     int                          // Max bytes per CopyFrom call (derived from TCP buffer size)
+
+	// Optional override mappers used for the AI self-check pass when
+	// migration.ai_verifier_model is set. Nil falls back to tableMapper /
+	// finalizationMapper, preserving the Phase 1 same-model verify behavior.
+	// Use the tableVerifier()/finalizationVerifier() helpers at callsites
+	// instead of branching inline. See WriterOptions.VerifierTypeMapper.
+	verifierTableMapper        driver.TableTypeMapper
+	verifierFinalizationMapper driver.FinalizationDDLMapper
+	dbContext                  *driver.DatabaseContext // Cached database context for AI
+	cachedDB                   *sql.DB                 // Cached database/sql wrapper for tuning analysis
+	copyBatchBytes             int                     // Max bytes per CopyFrom call (derived from TCP buffer size)
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -99,22 +107,51 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Check if type mapper also implements finalization DDL mapper
 	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
 
+	verifierTableMapper, verifierFinalizationMapper := driver.ResolveVerifierMappers(opts)
+	if verifierTableMapper != nil {
+		if aiMapper, ok := opts.VerifierTypeMapper.(*driver.AITypeMapper); ok {
+			logging.Debug("AI Verifier provider enabled (provider: %s, model: %s)",
+				aiMapper.ProviderName(), aiMapper.Model())
+		}
+	}
+
 	w := &Writer{
-		pool:               pool,
-		config:             cfg,
-		maxConns:           maxConns,
-		sourceType:         opts.SourceType,
-		dialect:            dialect,
-		typeMapper:         opts.TypeMapper,
-		tableMapper:        tableMapper,
-		finalizationMapper: finalizationMapper,
-		copyBatchBytes:     probeCopyBatchBytes(pool),
+		pool:                       pool,
+		config:                     cfg,
+		maxConns:                   maxConns,
+		sourceType:                 opts.SourceType,
+		dialect:                    dialect,
+		typeMapper:                 opts.TypeMapper,
+		tableMapper:                tableMapper,
+		finalizationMapper:         finalizationMapper,
+		verifierTableMapper:        verifierTableMapper,
+		verifierFinalizationMapper: verifierFinalizationMapper,
+		copyBatchBytes:             probeCopyBatchBytes(pool),
 	}
 
 	// Gather database context for AI
 	w.dbContext = w.gatherDatabaseContext()
 
 	return w, nil
+}
+
+// tableVerifier returns the mapper to use for VerifyTableDDL: the configured
+// cross-model verifier if WriterOptions.VerifierTypeMapper was non-nil and
+// implemented TableTypeMapper, else falls back to the generator mapper.
+// Same-mapper fallback preserves Phase 1's same-model verify behavior.
+func (w *Writer) tableVerifier() driver.TableTypeMapper {
+	if w.verifierTableMapper != nil {
+		return w.verifierTableMapper
+	}
+	return w.tableMapper
+}
+
+// finalizationVerifier mirrors tableVerifier for finalization DDL.
+func (w *Writer) finalizationVerifier() driver.FinalizationDDLMapper {
+	if w.verifierFinalizationMapper != nil {
+		return w.verifierFinalizationMapper
+	}
+	return w.finalizationMapper
 }
 
 // gatherDatabaseContext collects PostgreSQL database metadata for AI context.
@@ -364,7 +401,7 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 				SourceContext: req.SourceContext, TargetContext: req.TargetContext,
 				ProposedDDL: aiDDL,
 			}
-			verdict, vErr := w.tableMapper.VerifyTableDDL(ctx, vReq)
+			verdict, vErr := w.tableVerifier().VerifyTableDDL(ctx, vReq)
 			if vErr != nil {
 				return fmt.Errorf("AI verify failed for table %s: %w", t.FullName(), vErr)
 			}

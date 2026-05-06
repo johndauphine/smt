@@ -50,6 +50,22 @@ migration:
   # hits skip verify (cached DDL was already verified). Defaults to false.
   ai_verify: false
 
+  # Optional verifier-provider override. Names a provider entry in the
+  # secrets file (~/.secrets/smt-config.yaml under ai.providers). When set,
+  # the AI self-check pass uses this provider instead of ai.default_provider
+  # — the canonical use case is a cheap/local generator paired with a strong
+  # cloud auditor. Empty (the default) means same-model verify (Phase 1).
+  # Has no effect unless ai_verify is true. Validated at startup; an unknown
+  # provider name is a fatal error.
+  #
+  # Example pairing — Haiku generates, Sonnet audits:
+  #   ai.providers:
+  #     anthropic-haiku: { provider: anthropic, model: claude-haiku-4-5, api_key: ... }
+  #     anthropic-sonnet: { provider: anthropic, model: claude-sonnet-4-6, api_key: ... }
+  #   ai.default_provider: anthropic-haiku
+  #   migration.ai_verifier_model: anthropic-sonnet
+  # ai_verifier_model: ""
+
   # Where SMT keeps its state DB (run history, snapshots, encrypted profiles)
   data_dir: ~/.smt
 

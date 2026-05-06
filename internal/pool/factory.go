@@ -43,7 +43,10 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 //   - maxConns: Maximum number of connections in the pool
 //   - sourceType: Source database type for cross-engine type handling
 //   - typeMapper: AI type mapper for database type conversions (required)
-func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, typeMapper driver.TypeMapper) (TargetPool, error) {
+//   - verifierTypeMapper: optional second mapper for the AI self-check pass
+//     (cross-model verify, see migration.ai_verifier_model). Nil falls back
+//     to typeMapper for both gen and verify.
+func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, typeMapper driver.TypeMapper, verifierTypeMapper driver.TypeMapper) (TargetPool, error) {
 	// Normalize empty type to default
 	dbType := cfg.Type
 	if dbType == "" {
@@ -59,9 +62,10 @@ func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, ty
 	// Create the writer using the driver's factory method
 	// This is truly pluggable - no switch statement needed
 	opts := driver.WriterOptions{
-		BatchSize:  cfg.ChunkSize,
-		SourceType: sourceType,
-		TypeMapper: typeMapper,
+		BatchSize:          cfg.ChunkSize,
+		SourceType:         sourceType,
+		TypeMapper:         typeMapper,
+		VerifierTypeMapper: verifierTypeMapper,
 	}
 	return d.NewWriter((*dbconfig.TargetConfig)(cfg), maxConns, opts)
 }

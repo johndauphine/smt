@@ -70,7 +70,24 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 
 	if !opts.SourceOnly {
 		mapper, _ := driver.GetAITypeMapper()
-		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, mapper)
+
+		// Build the verifier mapper if migration.ai_verifier_model names a
+		// non-default provider — enables cross-model verify (cheap/local
+		// generator + strong cloud auditor). Empty config string keeps the
+		// Phase 1 same-model behavior. The verifier mapper is only consulted
+		// when ai_verify is on; we still construct it eagerly so a typo in
+		// the provider name fails loudly at startup, not mid-run.
+		var verifierMapper driver.TypeMapper
+		if name := cfg.Migration.AIVerifierModel; name != "" {
+			vm, err := driver.NewAITypeMapperByName(name)
+			if err != nil {
+				src.Close()
+				return nil, fmt.Errorf("loading verifier AI provider %q: %w", name, err)
+			}
+			verifierMapper = vm
+		}
+
+		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, mapper, verifierMapper)
 		if err != nil {
 			src.Close()
 			return nil, fmt.Errorf("opening target: %w", err)

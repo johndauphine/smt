@@ -299,10 +299,39 @@ type MigrationConfig struct {
 	// Defaults to false (opt-in). To force re-verification of cached
 	// entries after enabling, clear ~/.smt/type-cache.json.
 	//
-	// Phase 1 uses the same model for generation and verification. A
-	// future `ai_verifier_model` override (Phase 2) will allow strong-
-	// verifier + cheap-generator pairing.
+	// By default uses the same provider/model for generation and
+	// verification. Set `ai_verifier_model` to a different provider entry
+	// (see below) to pair a cheap/local generator with a strong cloud
+	// auditor — recommended pattern when generation is local but the
+	// generator is sub-20B and same-model verify produces correlated
+	// false positives (see CLAUDE.md). Cross-model verify avoids the
+	// correlated-bias trap entirely.
 	AIVerify bool `yaml:"ai_verify"`
+
+	// AIVerifierModel names a provider entry in the secrets file
+	// (~/.secrets/smt-config.yaml under `ai.providers`) to use for the
+	// AI self-check pass. The value is a provider name (the key in the
+	// providers map), not a literal model string — the underlying model
+	// comes from that provider's `model` field.
+	//
+	// Empty (the default) means "use the same provider as generation"
+	// (i.e. ai.default_provider) — preserves Phase 1 behavior.
+	//
+	// Has no effect unless ai_verify is true. Cross-engine config example:
+	//
+	//   ai:
+	//     default_provider: anthropic-haiku   # cheap generator
+	//     providers:
+	//       anthropic-haiku: { provider: anthropic, model: claude-haiku-4-5, api_key: ... }
+	//       anthropic-sonnet: { provider: anthropic, model: claude-sonnet-4-6, api_key: ... }
+	//
+	//   migration:
+	//     ai_verify: true
+	//     ai_verifier_model: anthropic-sonnet  # strong auditor
+	//
+	// Validated at orchestrator startup — referencing a provider that
+	// isn't in the secrets file is a fatal config error.
+	AIVerifierModel string `yaml:"ai_verifier_model"`
 
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)

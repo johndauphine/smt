@@ -84,7 +84,7 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 				Index: req.Index, ForeignKey: req.ForeignKey, CheckConstraint: req.CheckConstraint,
 				ProposedDDL: ddl,
 			}
-			verdict, vErr := w.finalizationMapper.VerifyFinalizationDDL(ctx, vReq)
+			verdict, vErr := w.finalizationVerifier().VerifyFinalizationDDL(ctx, vReq)
 			if vErr != nil {
 				return fmt.Errorf("AI verify failed for %s: %w", label, vErr)
 			}

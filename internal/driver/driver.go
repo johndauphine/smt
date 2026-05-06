@@ -83,4 +83,34 @@ type WriterOptions struct {
 	// TypeMapper is the AI-powered type mapper for database type conversions.
 	// This is required for all migrations.
 	TypeMapper TypeMapper
+
+	// VerifierTypeMapper, when non-nil, is used for the AI self-check pass
+	// (VerifyTableDDL / VerifyFinalizationDDL) instead of TypeMapper. Lets a
+	// caller pair a cheap/local generator with a strong cloud auditor — see
+	// migration.ai_verifier_model in config. Nil means "use TypeMapper for
+	// both gen and verify" (the default; preserves Phase 1 behavior).
+	//
+	// The mapper is stored on the writer as verifierTableMapper /
+	// verifierFinalizationMapper after the same TableTypeMapper /
+	// FinalizationDDLMapper type assertions applied to TypeMapper. Has no
+	// effect unless TableOptions.AIVerify or FinalizeOptions.AIVerify is set
+	// on the call.
+	VerifierTypeMapper TypeMapper
+}
+
+// ResolveVerifierMappers extracts the TableTypeMapper and FinalizationDDLMapper
+// from WriterOptions.VerifierTypeMapper. Called by each driver's NewWriter to
+// populate its verifier fields. Both return values are nil when the option is
+// nil — callsites must fall back to the generator mappers in that case.
+//
+// Type assertions are non-fatal: a verifier that doesn't implement one of the
+// interfaces just leaves that field nil. In practice AITypeMapper implements
+// both, so a fully configured verifier is always complete.
+func ResolveVerifierMappers(opts WriterOptions) (TableTypeMapper, FinalizationDDLMapper) {
+	if opts.VerifierTypeMapper == nil {
+		return nil, nil
+	}
+	tm, _ := opts.VerifierTypeMapper.(TableTypeMapper)
+	fm, _ := opts.VerifierTypeMapper.(FinalizationDDLMapper)
+	return tm, fm
 }
