@@ -172,7 +172,9 @@ Counts (tables / FKs / CHECKs match source) are necessary but **not sufficient**
 6. **Default-expression class preserved.** Source `GETUTCDATE()` → target `CURRENT_TIMESTAMP`; source `NEWID()` → target's UUID generator. Drop / substitute / hardcode is a fail.
 7. **Computed columns preserved** (storage class included: STORED vs VIRTUAL where applicable).
 
-Counts alone hid the regression that surfaced after PR #16 (introspection-facts migration), where local models silently halved `varchar` lengths and the matrix still showed ✓. The harness now applies criteria 1–7 column-by-column.
+Counts alone hid the regression that surfaced after PR #16 (introspection-facts migration), where local models silently halved `varchar` lengths and the matrix still showed ✓. The harness in `testdata/crm/verify_columns.sh` applies criteria 1–6 column-by-column. Criterion 7 (computed-column presence + storage class) is a TODO — needs cross-dialect expression normalization.
+
+Criterion 6 is currently a binary "has-default Y/N" check, not full expression equivalence. It catches the most common regression (dropped default) but a target that translates `GETUTCDATE()` to a wrong-but-plausible target expression (e.g. `now()` instead of `CURRENT_TIMESTAMP`) would pass. Tightening to expression equivalence requires per-dialect normalization tables and is a follow-up.
 
 When editing prompts, re-run the CRM fixture end-to-end with the column-diff harness; do not trust count-only checks.
 
