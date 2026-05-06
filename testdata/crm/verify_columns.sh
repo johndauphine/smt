@@ -54,8 +54,9 @@ SELECT
   CASE WHEN c.IS_NULLABLE = 'YES' THEN 'Y' ELSE 'N' END AS nul,
   CASE WHEN COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') = 1 THEN 'Y' ELSE 'N' END AS ident,
   CASE
-    WHEN c.DATA_TYPE IN ('datetime','datetime2','smalldatetime') THEN 'naive'
-    WHEN c.DATA_TYPE = 'datetimeoffset' THEN 'tzaware'
+    WHEN c.DATA_TYPE IN ('datetime','datetime2','smalldatetime') THEN 'naive_dt'
+    WHEN c.DATA_TYPE = 'datetimeoffset' THEN 'tzaware_dt'
+    WHEN c.DATA_TYPE = 'time' THEN 'naive_t'
     ELSE 'na'
   END AS tz,
   CASE WHEN c.COLUMN_DEFAULT IS NULL THEN 'N' ELSE 'Y' END AS deflt
@@ -83,8 +84,10 @@ SELECT
   CASE WHEN is_nullable = 'YES' THEN 'Y' ELSE 'N' END AS nul,
   CASE WHEN is_identity = 'YES' OR column_default LIKE 'nextval(%' THEN 'Y' ELSE 'N' END AS ident,
   CASE
-    WHEN data_type IN ('timestamp without time zone','time without time zone') THEN 'naive'
-    WHEN data_type IN ('timestamp with time zone','time with time zone') THEN 'tzaware'
+    WHEN data_type = 'timestamp without time zone' THEN 'naive_dt'
+    WHEN data_type = 'timestamp with time zone'    THEN 'tzaware_dt'
+    WHEN data_type = 'time without time zone'      THEN 'naive_t'
+    WHEN data_type = 'time with time zone'         THEN 'tzaware_t'
     ELSE 'na'
   END AS tz,
   CASE WHEN column_default IS NULL OR column_default LIKE 'nextval(%' THEN 'N' ELSE 'Y' END AS deflt
@@ -156,8 +159,10 @@ BEGIN {
     if (s_nul[key] != t_nul[key]) {
       printf("  FAIL %s nullable: source=%s target=%s\n", key, s_nul[key], t_nul[key]); fail++
     }
-    # 4: TZ-awareness CLASS — covers all source datetime types via the tz_class
-    # field, not just the two we used to spot-check (datetime2/datetimeoffset).
+    # 4: TZ-awareness CLASS — covers all source temporal types. The class
+    # encodes both TZ-awareness AND temporal family (dt vs t) so a datetime
+    # accidentally mapped to time (or vice versa) fails: naive_dt != naive_t
+    # even though both are TZ-naive.
     if (s_tz[key] != "na" && s_tz[key] != t_tz[key]) {
       printf("  FAIL %s tz-awareness: source=%s target=%s\n", key, s_tz[key], t_tz[key]); fail++
     }
