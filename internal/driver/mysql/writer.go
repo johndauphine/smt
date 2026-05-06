@@ -32,6 +32,13 @@ type Writer struct {
 	dropDDLMapper      driver.TableDropDDLMapper    // AI-driven DROP TABLE DDL
 	dbContext          *driver.DatabaseContext      // Cached database context for AI
 	isMariaDB          bool
+
+	// Optional override mappers used for the AI self-check pass when
+	// migration.ai_verifier_model is set. Nil falls back to tableMapper /
+	// finalizationMapper. Use tableVerifier()/finalizationVerifier() at the
+	// callsites. See driver.WriterOptions.VerifierTypeMapper.
+	verifierTableMapper        driver.TableTypeMapper
+	verifierFinalizationMapper driver.FinalizationDDLMapper
 }
 
 // NewWriter creates a new MySQL/MariaDB writer.
@@ -97,24 +104,53 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Check if type mapper implements drop DDL mapper
 	dropDDLMapper, _ := opts.TypeMapper.(driver.TableDropDDLMapper)
 
+	verifierTableMapper, verifierFinalizationMapper := driver.ResolveVerifierMappers(opts)
+	if verifierTableMapper != nil {
+		// INFO not Debug — see postgres writer for rationale.
+		if aiMapper, ok := opts.VerifierTypeMapper.(*driver.AITypeMapper); ok {
+			logging.Info("AI Verifier provider enabled (provider: %s, model: %s)",
+				aiMapper.ProviderName(), aiMapper.Model())
+		}
+	}
+
 	w := &Writer{
-		db:                 db,
-		config:             cfg,
-		maxConns:           maxConns,
-		defaultBatchSize:   opts.BatchSize,
-		sourceType:         opts.SourceType,
-		dialect:            dialect,
-		typeMapper:         opts.TypeMapper,
-		tableMapper:        tableMapper,
-		finalizationMapper: finalizationMapper,
-		dropDDLMapper:      dropDDLMapper,
-		isMariaDB:          isMariaDB,
+		db:                         db,
+		config:                     cfg,
+		maxConns:                   maxConns,
+		defaultBatchSize:           opts.BatchSize,
+		sourceType:                 opts.SourceType,
+		dialect:                    dialect,
+		typeMapper:                 opts.TypeMapper,
+		tableMapper:                tableMapper,
+		finalizationMapper:         finalizationMapper,
+		dropDDLMapper:              dropDDLMapper,
+		isMariaDB:                  isMariaDB,
+		verifierTableMapper:        verifierTableMapper,
+		verifierFinalizationMapper: verifierFinalizationMapper,
 	}
 
 	// Gather database context for AI
 	w.dbContext = w.gatherDatabaseContext(version)
 
 	return w, nil
+}
+
+// tableVerifier returns the mapper to use for VerifyTableDDL: the configured
+// cross-model verifier if WriterOptions.VerifierTypeMapper was non-nil, else
+// the generator mapper. Same-mapper fallback preserves Phase 1 behavior.
+func (w *Writer) tableVerifier() driver.TableTypeMapper {
+	if w.verifierTableMapper != nil {
+		return w.verifierTableMapper
+	}
+	return w.tableMapper
+}
+
+// finalizationVerifier mirrors tableVerifier for finalization DDL.
+func (w *Writer) finalizationVerifier() driver.FinalizationDDLMapper {
+	if w.verifierFinalizationMapper != nil {
+		return w.verifierFinalizationMapper
+	}
+	return w.finalizationMapper
 }
 
 // gatherDatabaseContext collects MySQL/MariaDB database metadata for AI context.
@@ -365,7 +401,7 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 				SourceContext: req.SourceContext, TargetContext: req.TargetContext,
 				ProposedDDL: ddl,
 			}
-			verdict, vErr := w.tableMapper.VerifyTableDDL(ctx, vReq)
+			verdict, vErr := w.tableVerifier().VerifyTableDDL(ctx, vReq)
 			if vErr != nil {
 				return fmt.Errorf("AI verify failed for table %s: %w", t.FullName(), vErr)
 			}

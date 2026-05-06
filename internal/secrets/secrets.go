@@ -74,6 +74,21 @@ type AIConfig struct {
 
 // Provider represents an AI provider configuration
 type Provider struct {
+	// Type optionally aliases this entry to a known provider type ("anthropic",
+	// "openai", "gemini", "ollama", "lmstudio"). When set, the YAML key is
+	// just a label and dispatch uses Type. Lets you have multiple entries that
+	// share a backend — e.g. "anthropic-haiku" and "anthropic-sonnet" both
+	// with provider: anthropic but different model fields. Empty (the common
+	// case) means the YAML key IS the dispatch type — backward-compatible.
+	//
+	// Caveat: when aliasing, set Model explicitly. The Model fallback is keyed
+	// on the dispatch type (DefaultModels[Type]), not the YAML label, so
+	// `anthropic-haiku: { provider: anthropic }` with no `model:` field gets
+	// Anthropic's default model (Sonnet) — not Haiku as the label suggests.
+	// Always set `model:` on aliased entries so the label and the actual
+	// model agree.
+	Type string `yaml:"provider,omitempty"`
+
 	APIKey           string   `yaml:"api_key,omitempty"`           // Required for cloud providers
 	BaseURL          string   `yaml:"base_url,omitempty"`          // Required for local providers, optional for cloud
 	Model            string   `yaml:"model,omitempty"`             // Optional, uses smart defaults
@@ -81,6 +96,17 @@ type Provider struct {
 	MaxTokens        int      `yaml:"max_tokens,omitempty"`        // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
 	TimeoutSeconds   int      `yaml:"timeout_seconds,omitempty"`   // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
 	ModelTemperature *float64 `yaml:"model_temperature,omitempty"` // Optional sampling temperature for the model. Defaults to 0 (deterministic). Some providers reject 0 for certain models — e.g. OpenAI reasoning models (o-series, gpt-5.x) require model_temperature: 1.
+}
+
+// EffectiveType returns the dispatch-type for this provider entry: Type if
+// set (alias case), else providerName (the YAML key, the legacy contract).
+// Used by AI typemapper construction to decide which API client to invoke
+// without forcing the YAML key to match a known provider name.
+func (p *Provider) EffectiveType(providerName string) string {
+	if p.Type != "" {
+		return p.Type
+	}
+	return providerName
 }
 
 // EncryptionConfig holds encryption-related secrets
