@@ -106,8 +106,9 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 
 	verifierTableMapper, verifierFinalizationMapper := driver.ResolveVerifierMappers(opts)
 	if verifierTableMapper != nil {
+		// INFO not Debug — see postgres writer for rationale.
 		if aiMapper, ok := opts.VerifierTypeMapper.(*driver.AITypeMapper); ok {
-			logging.Debug("AI Verifier provider enabled (provider: %s, model: %s)",
+			logging.Info("AI Verifier provider enabled (provider: %s, model: %s)",
 				aiMapper.ProviderName(), aiMapper.Model())
 		}
 	}

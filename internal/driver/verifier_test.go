@@ -2,7 +2,12 @@ package driver
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"smt/internal/secrets"
 )
 
 // TestResolveVerifierMappers_Nil pins the no-override path: with no verifier
@@ -78,4 +83,66 @@ func (f *fakeTableOnlyMapper) GenerateTableDDL(context.Context, TableDDLRequest)
 func (f *fakeTableOnlyMapper) CacheTableDDL(TableDDLRequest, string) { panic("unused") }
 func (f *fakeTableOnlyMapper) VerifyTableDDL(context.Context, VerifyTableDDLRequest) (*VerifyResult, error) {
 	panic("unused")
+}
+
+// writeTestSecrets drops a minimal secrets file at a temp path and points
+// SMT_SECRETS_FILE at it for the duration of the calling test. The fixture
+// has one cloud provider ("anthropic") and one local provider ("ollama") so
+// both code paths in NewAITypeMapper are reachable.
+func writeTestSecrets(t *testing.T) {
+	t.Helper()
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "secrets.yaml")
+	const content = `
+ai:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: "test-key"
+      model: "claude-haiku-4-5-20251001"
+    ollama:
+      base_url: "http://localhost:11434"
+      model: "llama3"
+encryption:
+  master_key: "test-master-key"
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write fixture secrets: %v", err)
+	}
+	t.Setenv(secrets.SecretsFileEnvVar, path)
+	secrets.Reset()
+	t.Cleanup(secrets.Reset)
+}
+
+// TestNewAITypeMapperByName_UnknownProviderFails pins the orchestrator-side
+// validation contract: when migration.ai_verifier_model names a provider
+// that's not in the secrets file, NewAITypeMapperByName must fail with an
+// error mentioning the bad name. The orchestrator wraps the error and aborts
+// startup before any DDL runs, which is the design intent of #48 (catch
+// typos at startup, not mid-run).
+func TestNewAITypeMapperByName_UnknownProviderFails(t *testing.T) {
+	writeTestSecrets(t)
+
+	_, err := NewAITypeMapperByName("not-a-real-provider")
+	if err == nil {
+		t.Fatal("expected error for unknown provider name, got nil")
+	}
+	if !strings.Contains(err.Error(), "not-a-real-provider") {
+		t.Errorf("expected error to mention the bad name, got: %v", err)
+	}
+}
+
+// TestNewAITypeMapperByName_KnownProviderSucceeds is the happy path — a
+// provider that exists in the secrets file constructs successfully and the
+// resulting mapper carries the right identity (providerName == YAML key).
+func TestNewAITypeMapperByName_KnownProviderSucceeds(t *testing.T) {
+	writeTestSecrets(t)
+
+	mapper, err := NewAITypeMapperByName("anthropic")
+	if err != nil {
+		t.Fatalf("expected success for known provider, got error: %v", err)
+	}
+	if mapper.ProviderName() != "anthropic" {
+		t.Errorf("ProviderName() = %q, want %q", mapper.ProviderName(), "anthropic")
+	}
 }

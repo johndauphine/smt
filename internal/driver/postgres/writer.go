@@ -109,8 +109,13 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 
 	verifierTableMapper, verifierFinalizationMapper := driver.ResolveVerifierMappers(opts)
 	if verifierTableMapper != nil {
+		// INFO not Debug — cross-model verify is a distinct deployment
+		// posture (a second AI provider sees every DDL) so a user who
+		// configures it should see confirmation in default-verbosity logs
+		// rather than having to enable --verbosity debug to verify their
+		// config took effect.
 		if aiMapper, ok := opts.VerifierTypeMapper.(*driver.AITypeMapper); ok {
-			logging.Debug("AI Verifier provider enabled (provider: %s, model: %s)",
+			logging.Info("AI Verifier provider enabled (provider: %s, model: %s)",
 				aiMapper.ProviderName(), aiMapper.Model())
 		}
 	}

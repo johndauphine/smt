@@ -80,6 +80,13 @@ type Provider struct {
 	// share a backend — e.g. "anthropic-haiku" and "anthropic-sonnet" both
 	// with provider: anthropic but different model fields. Empty (the common
 	// case) means the YAML key IS the dispatch type — backward-compatible.
+	//
+	// Caveat: when aliasing, set Model explicitly. The Model fallback is keyed
+	// on the dispatch type (DefaultModels[Type]), not the YAML label, so
+	// `anthropic-haiku: { provider: anthropic }` with no `model:` field gets
+	// Anthropic's default model (Sonnet) — not Haiku as the label suggests.
+	// Always set `model:` on aliased entries so the label and the actual
+	// model agree.
 	Type string `yaml:"provider,omitempty"`
 
 	APIKey           string   `yaml:"api_key,omitempty"`           // Required for cloud providers
