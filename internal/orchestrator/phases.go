@@ -160,6 +160,7 @@ func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 		opts := driver.TableOptions{
 			SourceContext: sourceCtx,
 			MaxRetries:    maxRetries,
+			AIVerify:      o.config.Migration.AIVerify,
 		}
 		if err := o.target.CreateTableWithOptions(ctx, &t, o.config.Target.Schema, opts); err != nil {
 			return fmt.Errorf("creating table %s: %w", t.Name, err)
@@ -214,7 +215,7 @@ func (o *Orchestrator) CreateIndexes(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateIndexes))
 	maxRetries := o.aiMaxRetries()
 	logging.Info("[%s] loading and creating indexes (concurrency=%d, max_retries=%d)", TaskCreateIndexes, o.aiConcurrency(), maxRetries)
-	opts := driver.FinalizeOptions{MaxRetries: maxRetries}
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify}
 	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
 		if err := o.source.LoadIndexes(ctx, &t); err != nil {
 			return fmt.Errorf("loading indexes for %s: %w", t.Name, err)
@@ -236,7 +237,7 @@ func (o *Orchestrator) CreateForeignKeys(ctx context.Context, runID string) erro
 	_ = o.state.UpdatePhase(runID, string(TaskCreateFKs))
 	maxRetries := o.aiMaxRetries()
 	logging.Info("[%s] loading and creating foreign keys (concurrency=%d, max_retries=%d)", TaskCreateFKs, o.aiConcurrency(), maxRetries)
-	opts := driver.FinalizeOptions{MaxRetries: maxRetries}
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify}
 	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
 		if err := o.source.LoadForeignKeys(ctx, &t); err != nil {
 			return fmt.Errorf("loading FKs for %s: %w", t.Name, err)
@@ -258,7 +259,7 @@ func (o *Orchestrator) CreateCheckConstraints(ctx context.Context, runID string)
 	_ = o.state.UpdatePhase(runID, string(TaskCreateChecks))
 	maxRetries := o.aiMaxRetries()
 	logging.Info("[%s] loading and creating check constraints (concurrency=%d, max_retries=%d)", TaskCreateChecks, o.aiConcurrency(), maxRetries)
-	opts := driver.FinalizeOptions{MaxRetries: maxRetries}
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify}
 	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
 		if err := o.source.LoadCheckConstraints(ctx, &t); err != nil {
 			return fmt.Errorf("loading checks for %s: %w", t.Name, err)

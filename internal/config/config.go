@@ -283,6 +283,27 @@ type MigrationConfig struct {
 	// an earlier draft did with negatives. YAML unmarshalling reads an
 	// omitted key as nil and a present key as a non-nil *int.
 	AIMaxRetries *int `yaml:"ai_max_retries"`
+
+	// AIVerify enables the AI self-check pass: between generation and exec,
+	// the just-generated DDL is sent back to the AI as an audit prompt
+	// listing six per-column criteria (max_length / precision / scale,
+	// nullability, identity, timezone-awareness, default-class, type
+	// semantics). If the auditor flags issues, the writer feeds them back
+	// as PreviousAttempt and retries generation, sharing the
+	// `ai_max_retries` budget with exec-fail retries.
+	//
+	// Cost shape: cold-cache runs roughly double per-table AI calls
+	// (gen + verify). Cache hits skip verify (cached DDL was previously
+	// verified and executed). Re-runs are unaffected.
+	//
+	// Defaults to false (opt-in). To force re-verification of cached
+	// entries after enabling, clear ~/.smt/type-cache.json.
+	//
+	// Phase 1 uses the same model for generation and verification. A
+	// future `ai_verifier_model` override (Phase 2) will allow strong-
+	// verifier + cheap-generator pairing.
+	AIVerify bool `yaml:"ai_verify"`
+
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 	// AI-driven real-time parameter adjustment

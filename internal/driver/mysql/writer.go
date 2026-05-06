@@ -328,14 +328,16 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		opts.MaxRetries = 0
 	}
 	var (
-		lastDDL string
-		lastErr error
+		lastDDL          string
+		lastErr          error
+		lastFromVerifier bool
 	)
 	for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
 		if attempt > 0 {
 			req.PreviousAttempt = &driver.TableDDLAttempt{
-				DDL:   lastDDL,
-				Error: lastErr.Error(),
+				DDL:          lastDDL,
+				Error:        lastErr.Error(),
+				FromVerifier: lastFromVerifier,
 			}
 			logging.Info("retry attempt %d/%d for table %s after retryable DDL error: %v",
 				attempt, opts.MaxRetries, t.FullName(), lastErr)
@@ -353,6 +355,29 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		logging.Debug("AI generated DDL for %s (attempt %d):\n%s", t.FullName(), attempt+1, ddl)
 		for colName, colType := range resp.ColumnTypes {
 			logging.Debug("  Column %s -> %s", colName, colType)
+		}
+
+		// AI self-check — see postgres equivalent for design.
+		if opts.AIVerify && !resp.FromCache {
+			vReq := driver.VerifyTableDDLRequest{
+				SourceDBType: req.SourceDBType, TargetDBType: req.TargetDBType,
+				SourceTable: req.SourceTable, TargetSchema: req.TargetSchema,
+				SourceContext: req.SourceContext, TargetContext: req.TargetContext,
+				ProposedDDL: ddl,
+			}
+			verdict, vErr := w.tableMapper.VerifyTableDDL(ctx, vReq)
+			if vErr != nil {
+				return fmt.Errorf("AI verify failed for table %s: %w", t.FullName(), vErr)
+			}
+			if !verdict.OK {
+				logging.Warn("verify flagged %d issue(s) on table %s, retrying:\n  %s",
+					len(verdict.Issues), t.FullName(), strings.Join(verdict.Issues, "\n  "))
+				lastDDL = ddl
+				lastErr = fmt.Errorf("%s", strings.Join(verdict.Issues, "\n"))
+				lastFromVerifier = true
+				continue
+			}
+			logging.Debug("verify OK: table %s", t.FullName())
 		}
 
 		if _, err = w.db.ExecContext(ctx, ddl); err == nil {
@@ -373,6 +398,7 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 
 		lastDDL = ddl
 		lastErr = err
+		lastFromVerifier = false
 		// No classifier — let the next iteration ask the AI.
 	}
 	return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), lastErr, lastDDL)
@@ -653,7 +679,7 @@ func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, id
 		TargetSchema:  targetSchema,
 		TargetContext: w.dbContext,
 	}
-	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("index %s.%s", t.Name, idx.Name))
+	return w.retryFinalize(ctx, req, opts, fmt.Sprintf("index %s.%s", t.Name, idx.Name))
 }
 
 // CreateForeignKey creates a foreign key constraint using AI-generated DDL.
@@ -693,7 +719,7 @@ func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Tabl
 		TargetSchema:  targetSchema,
 		TargetContext: w.dbContext,
 	}
-	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("FK %s.%s", t.Name, fk.Name))
+	return w.retryFinalize(ctx, req, opts, fmt.Sprintf("FK %s.%s", t.Name, fk.Name))
 }
 
 // CreateCheckConstraint creates a check constraint using AI-generated DDL.
@@ -725,7 +751,7 @@ func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver
 		TargetSchema:    targetSchema,
 		TargetContext:   w.dbContext,
 	}
-	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("CHECK %s.%s", t.Name, chk.Name))
+	return w.retryFinalize(ctx, req, opts, fmt.Sprintf("CHECK %s.%s", t.Name, chk.Name))
 }
 
 // WriteBatch writes a batch of rows using multi-row INSERT.

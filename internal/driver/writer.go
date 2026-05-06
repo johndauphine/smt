@@ -102,6 +102,21 @@ type TableOptions struct {
 	// conflicts) bypass the loop and surface immediately. See #29.
 	MaxRetries int
 
+	// AIVerify enables the AI self-check pass between generation and exec.
+	// When true, every newly-generated DDL is sent back to the AI as an
+	// audit prompt; if the auditor flags issues, the writer retries
+	// generation with the issue list fed in as PreviousAttempt.
+	// Defaults to false (opt-in via migration.ai_verify in config).
+	//
+	// Cache hits skip the verify call. Note that this presumes the cache
+	// was populated with verify ENABLED — entries cached before
+	// migration.ai_verify was turned on were never audited, but they are
+	// known to have executed successfully against the target. Users who
+	// want the older cache re-verified after enabling the flag should
+	// clear ~/.smt/type-cache.json. (Same shape as #44's prompt-version
+	// concern.)
+	AIVerify bool
+
 	// Note: Indexes and CHECK constraints are always created separately in Finalize,
 	// not included in the initial CREATE TABLE DDL.
 }
@@ -124,6 +139,10 @@ type FinalizeOptions struct {
 	// exists, FK target missing, permissions) bypass the loop and surface
 	// immediately. See #29 PR B; PR A is the table-creation equivalent.
 	MaxRetries int
+
+	// AIVerify enables the AI self-check pass between generation and exec
+	// for finalization DDL. See TableOptions.AIVerify for semantics.
+	AIVerify bool
 }
 
 // WriteBatchOptions configures a bulk write operation.

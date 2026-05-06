@@ -174,6 +174,10 @@ Counts (tables / FKs / CHECKs match source) are necessary but **not sufficient**
 
 Counts alone hid the regression that surfaced after PR #16 (introspection-facts migration), where local models silently halved `varchar` lengths and the matrix still showed ✓. The harness in `testdata/crm/verify_columns.sh` applies criteria 1–6 column-by-column. Criterion 7 (computed-column presence + storage class) is a TODO — needs cross-dialect expression normalization.
 
+#### In-loop verification (opt-in)
+
+`migration.ai_verify: true` adds an AI self-check pass between DDL generation and exec. The auditor receives the source introspection block plus the proposed DDL and reports OK or ISSUES against the same six criteria the harness applies. Verifier-flagged issues are fed back into the next generation attempt as `PreviousAttempt`, sharing the `ai_max_retries` budget with exec-fail retries. Cache hits skip verify (cached DDL was already verified and executed). Phase 1 uses the same AI provider for generation and verification; future `ai_verifier_model` (Phase 2) will allow strong-verifier + cheap-generator pairing. Opt-in default — set the flag to enable. To force re-verification of cached entries after enabling, clear `~/.smt/type-cache.json`.
+
 Criterion 6 is currently a binary "has-default Y/N" check, not full expression equivalence. It catches the most common regression (dropped default) but a target that translates `GETUTCDATE()` to a wrong-but-plausible target expression (e.g. `now()` instead of `CURRENT_TIMESTAMP`) would pass. Tightening to expression equivalence requires per-dialect normalization tables and is a follow-up.
 
 When editing prompts, re-run the CRM fixture end-to-end with the column-diff harness; do not trust count-only checks.

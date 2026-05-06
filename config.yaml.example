@@ -41,6 +41,15 @@ migration:
   create_foreign_keys: true
   create_check_constraints: true
 
+  # AI self-check (opt-in). When true, every newly-generated DDL is sent
+  # back to the AI as an audit prompt that compares it against the source
+  # introspection metadata (max_length, precision, scale, nullability,
+  # identity, timezone-awareness, default-class, type semantics). If the
+  # auditor flags issues, generation is retried with the issue list fed
+  # in. Cost: cold-cache runs roughly double per-table AI calls. Cache
+  # hits skip verify (cached DDL was already verified). Defaults to false.
+  ai_verify: false
+
   # Where SMT keeps its state DB (run history, snapshots, encrypted profiles)
   data_dir: ~/.smt
 

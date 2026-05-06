@@ -1477,17 +1477,34 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	// PRIOR ATTEMPT FAILED — last in the prompt so the corrective context is the
 	// most recent thing the model sees before generating. Only present when this
 	// is a retry call (PreviousAttempt != nil); see #29 for the validate-and-retry
-	// design. Verbatim DDL + verbatim error give the model the exact ground truth
-	// of what it produced and what the database said about it.
+	// design. Two shapes: a database-error block (the original #29 form) and an
+	// auditor-feedback block when FromVerifier=true (Phase 1 verify). They have
+	// different framings because mixing them confuses the generator: a verifier
+	// complaint ("max_length 20 vs 10") doesn't look like a database error, and
+	// presenting it as one leads models to emit prose ("OK, that's fine") instead
+	// of corrected DDL.
 	if req.PreviousAttempt != nil {
 		sb.WriteString("\n=== PRIOR ATTEMPT FAILED ===\n")
-		sb.WriteString("The previous CREATE TABLE you generated was rejected by the target database.\n\n")
-		sb.WriteString("Previous DDL (verbatim):\n")
-		sb.WriteString(req.PreviousAttempt.DDL)
-		sb.WriteString("\n\nDatabase error (verbatim):\n")
-		sb.WriteString(req.PreviousAttempt.Error)
-		sb.WriteString("\n\nGenerate a corrected CREATE TABLE for the same source table. Use the same target column names, types, and constraints — only fix what the error indicates is wrong. Do not regenerate from scratch.\n")
-		writeRetryClassificationInstruction(&sb)
+		if req.PreviousAttempt.FromVerifier {
+			sb.WriteString("An AI auditor reviewed your previous CREATE TABLE and flagged the issues below. The auditor checks whether the target DDL preserves source column attributes (max_length, precision, scale, nullability, identity, timezone-awareness, default-class, type semantics).\n\n")
+			sb.WriteString("Previous DDL (verbatim):\n")
+			sb.WriteString(req.PreviousAttempt.DDL)
+			sb.WriteString("\n\nAuditor's flagged issues:\n")
+			sb.WriteString(req.PreviousAttempt.Error)
+			sb.WriteString("\n\nGenerate a corrected CREATE TABLE that addresses each flagged issue. Output rules:\n")
+			sb.WriteString("- Your response MUST start with CREATE TABLE and end with a semicolon. Do not respond with prose, opinions, or rebuttals — emit DDL only.\n")
+			sb.WriteString("- Keep every column the auditor did not flag exactly as-is.\n")
+			sb.WriteString("- Fix only the flagged attributes. Do not re-architect the schema.\n")
+			sb.WriteString("- If the auditor flagged something that is actually correct (false positive), still emit corrected DDL — repeat the prior column form. The auditor will re-evaluate.\n")
+		} else {
+			sb.WriteString("The previous CREATE TABLE you generated was rejected by the target database.\n\n")
+			sb.WriteString("Previous DDL (verbatim):\n")
+			sb.WriteString(req.PreviousAttempt.DDL)
+			sb.WriteString("\n\nDatabase error (verbatim):\n")
+			sb.WriteString(req.PreviousAttempt.Error)
+			sb.WriteString("\n\nGenerate a corrected CREATE TABLE for the same source table. Use the same target column names, types, and constraints — only fix what the error indicates is wrong. Do not regenerate from scratch.\n")
+			writeRetryClassificationInstruction(&sb)
+		}
 	}
 
 	return sb.String()
@@ -1894,6 +1911,7 @@ func (m *AITypeMapper) parseTableDDLFromCache(cachedDDL string, sourceTable *Tab
 		CreateTableDDL: cachedDDL,
 		ColumnTypes:    columnTypes,
 		Notes:          "(from cache)",
+		FromCache:      true,
 	}, nil
 }
 
@@ -1976,12 +1994,12 @@ func stripMarkdownFence(s string) string {
 // gets a fresh chance with the corrective context. Cache writes happen
 // post-exec via CacheFinalizationDDL — never inside the mapper — so a DDL the
 // AI emits but the database rejects can't poison future runs.
-func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error) {
+func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (*FinalizationDDLResponse, error) {
 	if req.Table == nil {
-		return "", fmt.Errorf("Table is required")
+		return nil, fmt.Errorf("Table is required")
 	}
 	if req.TargetDBType == "" {
-		return "", fmt.Errorf("TargetDBType is required")
+		return nil, fmt.Errorf("TargetDBType is required")
 	}
 
 	var prompt string
@@ -1991,7 +2009,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 	switch req.Type {
 	case DDLTypeIndex:
 		if req.Index == nil {
-			return "", fmt.Errorf("Index is required for DDLTypeIndex")
+			return nil, fmt.Errorf("Index is required for DDLTypeIndex")
 		}
 		prompt = m.buildIndexDDLPrompt(req)
 		entityName = req.Index.Name
@@ -2001,7 +2019,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 
 	case DDLTypeForeignKey:
 		if req.ForeignKey == nil {
-			return "", fmt.Errorf("ForeignKey is required for DDLTypeForeignKey")
+			return nil, fmt.Errorf("ForeignKey is required for DDLTypeForeignKey")
 		}
 		prompt = m.buildForeignKeyDDLPrompt(req)
 		entityName = req.ForeignKey.Name
@@ -2011,7 +2029,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 
 	case DDLTypeCheckConstraint:
 		if req.CheckConstraint == nil {
-			return "", fmt.Errorf("CheckConstraint is required for DDLTypeCheckConstraint")
+			return nil, fmt.Errorf("CheckConstraint is required for DDLTypeCheckConstraint")
 		}
 		prompt = m.buildCheckConstraintDDLPrompt(req)
 		entityName = req.CheckConstraint.Name
@@ -2020,7 +2038,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 			req.CheckConstraint.Name, req.TargetSchema, req.Table.Name, req.TargetDBType)
 
 	default:
-		return "", fmt.Errorf("unknown DDL type: %s", req.Type)
+		return nil, fmt.Errorf("unknown DDL type: %s", req.Type)
 	}
 
 	cacheKey := m.finalizationCacheKey(req)
@@ -2031,14 +2049,14 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 			m.cacheMu.RUnlock()
 			logging.Debug("AI finalization DDL cache hit: %s on %s.%s",
 				entityName, req.TargetSchema, req.Table.Name)
-			return cached, nil
+			return &FinalizationDDLResponse{DDL: cached, FromCache: true}, nil
 		}
 		m.cacheMu.RUnlock()
 	}
 
 	result, err := m.CallAI(ctx, prompt)
 	if err != nil {
-		return "", fmt.Errorf("AI DDL generation failed for %s.%s: %w",
+		return nil, fmt.Errorf("AI DDL generation failed for %s.%s: %w",
 			req.Table.Name, entityName, err)
 	}
 
@@ -2048,22 +2066,22 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 	// Strip fences first so a fenced NOT_RETRYABLE marker is still detected.
 	ddl := stripMarkdownFence(result)
 	if abort, reason := classifyRetryResponse(ddl); abort {
-		return "", WrapNotRetryable(reason)
+		return nil, WrapNotRetryable(reason)
 	}
 
 	// Validate response starts with expected prefix
 	upperDDL := strings.ToUpper(ddl)
 	if req.Type == DDLTypeIndex {
 		if !strings.HasPrefix(upperDDL, "CREATE") || !strings.Contains(upperDDL, "INDEX") {
-			return "", fmt.Errorf("response does not contain valid CREATE INDEX statement: %s", truncateString(ddl, 100))
+			return nil, fmt.Errorf("response does not contain valid CREATE INDEX statement: %s", truncateString(ddl, 100))
 		}
 	} else if !strings.HasPrefix(upperDDL, validatePrefix) {
-		return "", fmt.Errorf("response does not contain valid %s statement: %s", validatePrefix, truncateString(ddl, 100))
+		return nil, fmt.Errorf("response does not contain valid %s statement: %s", validatePrefix, truncateString(ddl, 100))
 	}
 
 	logging.Debug("AI generated DDL:\n%s", ddl)
 
-	return ddl, nil
+	return &FinalizationDDLResponse{DDL: ddl, FromCache: false}, nil
 }
 
 // finalizationCacheKey builds a cache key for finalization DDL (index / FK /
@@ -2149,6 +2167,18 @@ func writeFinalizationPriorAttempt(sb *strings.Builder, req FinalizationDDLReque
 		return
 	}
 	sb.WriteString("\n=== PRIOR ATTEMPT FAILED ===\n")
+	if req.PreviousAttempt.FromVerifier {
+		sb.WriteString("An AI auditor reviewed your previous DDL and flagged the issues below.\n\n")
+		sb.WriteString("Previous DDL (verbatim):\n")
+		sb.WriteString(req.PreviousAttempt.DDL)
+		sb.WriteString("\n\nAuditor's flagged issues:\n")
+		sb.WriteString(req.PreviousAttempt.Error)
+		sb.WriteString("\n\nGenerate corrected DDL addressing each flagged issue. Output rules:\n")
+		sb.WriteString("- Emit DDL only — no prose, no opinions, no rebuttals.\n")
+		sb.WriteString("- Keep everything the auditor did not flag exactly as-is.\n")
+		sb.WriteString("- Fix only the flagged attributes.\n")
+		return
+	}
 	sb.WriteString("The previous DDL you generated was rejected by the target database.\n\n")
 	sb.WriteString("Previous DDL (verbatim):\n")
 	sb.WriteString(req.PreviousAttempt.DDL)

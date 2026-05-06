@@ -48,6 +48,20 @@ type TableTypeMapper interface {
 	// on subsequent runs against the same source-table shape. Moving the cache
 	// write to post-exec eliminates the entire failure mode.
 	CacheTableDDL(req TableDDLRequest, ddl string)
+
+	// VerifyTableDDL asks the AI to audit the just-generated CREATE TABLE
+	// against the source introspection facts. Returns OK or ISSUES with a
+	// list of attribute mismatches (max_length, nullability, identity,
+	// timezone-awareness, default expression, type semantics). The writer
+	// calls this between Generate and Exec when migration.ai_verify is on.
+	//
+	// Phase 1 uses the same model for generation and verification — useful
+	// for catching numerical/exact-attribute regressions (halved varchars,
+	// dropped NOT NULL, swapped TZ) where comparison-mode reasoning differs
+	// from generation-mode reasoning enough to spot the model's own slip.
+	// Cross-model verify (Phase 2) addresses correlated-bias gaps where the
+	// generator's misconception isn't caught by the same model rereading.
+	VerifyTableDDL(ctx context.Context, req VerifyTableDDLRequest) (*VerifyResult, error)
 }
 
 // DatabaseContext contains metadata about a database for AI context.
@@ -162,6 +176,18 @@ type TableDDLAttempt struct {
 
 	// Error is the verbatim text of the database error that rejected the DDL.
 	Error string
+
+	// FromVerifier is true when this attempt failed an AI self-check pass
+	// rather than a database execution. The prompt builder uses this flag
+	// to switch the "PRIOR ATTEMPT FAILED" section between database-error
+	// shape ("rejected by the target database") and verifier-feedback shape
+	// ("an AI auditor reviewed your DDL and flagged the issues below").
+	// Mixing the two would confuse the generator: a verifier complaint
+	// ("max_length 20 vs 10") looks nothing like a database error, and
+	// presenting it as one leads models to either emit prose ("OK, that's
+	// fine") instead of corrected DDL or to classify the "error" as
+	// NOT_RETRYABLE. Phase 1 fix on top of #29's PreviousAttempt design.
+	FromVerifier bool
 }
 
 // TableDDLResponse contains the generated DDL and metadata.
@@ -174,6 +200,16 @@ type TableDDLResponse struct {
 
 	// Notes contains any AI-generated notes about the mapping decisions.
 	Notes string
+
+	// FromCache is true when the DDL came from the on-disk cache rather
+	// than a fresh AI call. The writer uses this to skip the AI self-check
+	// pass on cache hits — cached DDL was previously verified-and-executed,
+	// so re-verifying would just double cost without catching anything.
+	// The skip-on-cache-hit semantic for verify presumes the cache was
+	// populated with verify enabled; entries cached pre-verify-enable
+	// won't be re-verified until the cache is cleared. Documented in
+	// migration.ai_verify config.
+	FromCache bool
 }
 
 // TypeInfo contains metadata about a column type.
@@ -201,10 +237,19 @@ type TypeInfo struct {
 	SampleValues []string
 }
 
+// FinalizationDDLResponse contains the generated DDL plus cache-hit metadata
+// (mirrors TableDDLResponse). The cache-hit flag lets the writer skip the AI
+// self-check pass on cache hits, since cached DDL was previously verified
+// and executed.
+type FinalizationDDLResponse struct {
+	DDL       string
+	FromCache bool
+}
+
 // FinalizationDDLMapper handles AI-driven DDL generation for finalization phase.
 type FinalizationDDLMapper interface {
 	// GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints.
-	GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error)
+	GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (*FinalizationDDLResponse, error)
 
 	// CacheFinalizationDDL stores a known-good DDL for the request, replacing
 	// any prior cached value. This is the ONLY entry point that writes to the
@@ -215,6 +260,12 @@ type FinalizationDDLMapper interface {
 	// so the next call gets a fresh AI invocation rather than a poisoned hit.
 	// Mirrors TableTypeMapper.CacheTableDDL — see #32 for the rationale.
 	CacheFinalizationDDL(req FinalizationDDLRequest, ddl string)
+
+	// VerifyFinalizationDDL audits a generated finalization DDL (index, FK,
+	// or CHECK) against the source metadata. Same self-check pattern as
+	// VerifyTableDDL — verifies that columns, ref-table, FK actions,
+	// uniqueness, filter expressions, and CHECK predicates were preserved.
+	VerifyFinalizationDDL(ctx context.Context, req VerifyFinalizationDDLRequest) (*VerifyResult, error)
 }
 
 // DDLType specifies the type of DDL to generate.
@@ -278,6 +329,59 @@ type FinalizationDDLAttempt struct {
 	DDL string
 	// Error is the verbatim text of the database error that rejected it.
 	Error string
+	// FromVerifier — see TableDDLAttempt.FromVerifier.
+	FromVerifier bool
+}
+
+// VerifyTableDDLRequest is the input to VerifyTableDDL. Carries the same
+// source metadata the generator used plus the proposed target DDL so the
+// auditor can compare attribute-by-attribute.
+type VerifyTableDDLRequest struct {
+	SourceDBType  string
+	TargetDBType  string
+	SourceTable   *Table
+	TargetSchema  string
+	SourceContext *DatabaseContext
+	TargetContext *DatabaseContext
+
+	// ProposedDDL is the just-generated CREATE TABLE statement under audit.
+	ProposedDDL string
+}
+
+// VerifyFinalizationDDLRequest is the input to VerifyFinalizationDDL. The
+// shape mirrors FinalizationDDLRequest plus the proposed DDL.
+type VerifyFinalizationDDLRequest struct {
+	Type            DDLType
+	SourceDBType    string
+	TargetDBType    string
+	Table           *Table
+	TargetSchema    string
+	TargetContext   *DatabaseContext
+	Index           *Index
+	ForeignKey      *ForeignKey
+	CheckConstraint *CheckConstraint
+	ProposedDDL     string
+}
+
+// VerifyResult is the auditor's verdict.
+//
+// OK=true means the proposed DDL preserves all six audit criteria
+// (max_length / precision / scale, nullability, identity, timezone-
+// awareness, default-class, type semantics) for every column.
+//
+// OK=false means at least one criterion failed; Issues carries one human-
+// readable line per failure ("column_name: criterion — expected vs
+// emitted"). The writer feeds Issues back into the next generation
+// attempt as PreviousAttempt.Error.
+//
+// On a malformed AI response that's neither parseable as OK nor as ISSUES,
+// the parser returns OK=false with a single synthetic issue containing the
+// raw response (truncated). Fail-closed by design — surfacing a malformed
+// response as a hard verify failure forces a retry rather than letting
+// possibly-bad DDL through.
+type VerifyResult struct {
+	OK     bool
+	Issues []string
 }
 
 // TableDropDDLMapper handles AI-driven DDL generation for dropping tables.

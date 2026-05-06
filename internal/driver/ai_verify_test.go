@@ -1,0 +1,365 @@
+package driver
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"smt/internal/secrets"
+)
+
+// TestParseVerifyResponse exercises the OK/ISSUES parser against the
+// adversarial inputs we expect from real models — bare OK, OK with trailing
+// prose, ISSUES with markdown fences, lowercase, missing header, empty
+// response. The parser is fail-closed by contract: anything that doesn't
+// clearly say OK is treated as a failure.
+func TestParseVerifyResponse(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     string
+		wantOK    bool
+		wantNonil bool // expect at least one issue when !OK
+	}{
+		// --- OK paths ---
+		{"bare OK", "OK", true, false},
+		{"lowercase ok", "ok", true, false},
+		{"OK with period", "OK.", true, false},
+		{"OK with trailing prose", "OK\n\nNotes: looks fine", true, false},
+		{"OK with em-dash and prose", "OK — every column preserves source semantics", true, false},
+		{"OK with leading whitespace", "  OK\n", true, false},
+		{"OK in markdown fence", "```\nOK\n```", true, false},
+		// Unicode-uppercase-byte-length sanity: ß uppercases to SS, expanding
+		// the byte length of any prefix containing it. With the previous
+		// substring-on-uppercase implementation, the recovered slice index
+		// would mis-align. Verify the line-based parser gets it right:
+		// "OK" stands alone on the first line, prose follows.
+		{"OK with non-ASCII prose", "OK\nWeißbier comment that uppercases to expand bytes", true, false},
+
+		// --- ISSUES paths ---
+		{"ISSUES with one line", "ISSUES\ncode: max_length — 20 vs 10", false, true},
+		{"ISSUES with multiple lines", "ISSUES\ncode: max_length — 20 vs 10\nname: max_length — 200 vs 100", false, true},
+		{"ISSUES with bullet markers", "ISSUES\n- code: max_length — 20 vs 10\n* name: max_length — 200 vs 100", false, true},
+		{"ISSUES in markdown fence", "```\nISSUES\ncode: max_length — 20 vs 10\n```", false, true},
+		{"lowercase issues", "issues\ncode: max_length — 20 vs 10", false, true},
+		{"ISSUES with no body", "ISSUES", false, true},
+		{"ISSUES with only blank lines after", "ISSUES\n\n\n", false, true},
+
+		// --- Malformed / fail-closed paths ---
+		{"empty response", "", false, true},
+		{"only whitespace", "   \n\n  ", false, true},
+		{"random prose", "I think this looks fine, but...", false, true},
+		{"OKAY (not OK)", "OKAY\nlooks fine", false, true},
+
+		// --- Edge: OK followed by issues should still be OK (the model
+		// committed to passing on the first line) — fail-closed parser
+		// would re-flag this, but real models that say OK first don't
+		// then enumerate issues. Keep first-line semantics.
+		{"OK overrides trailing issue-ish text", "OK\nIssues: none worth mentioning", true, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseVerifyResponse(tc.input)
+			if got.OK != tc.wantOK {
+				t.Errorf("OK = %v, want %v\nresponse:\n%s\nissues: %v", got.OK, tc.wantOK, tc.input, got.Issues)
+			}
+			if !tc.wantOK && tc.wantNonil && len(got.Issues) == 0 {
+				t.Errorf("expected at least one issue for fail case, got none\nresponse:\n%s", tc.input)
+			}
+		})
+	}
+}
+
+// verifyMockServer returns an httptest server that responds to every
+// chat-completion request with the supplied content and increments the
+// counter on each call.
+func verifyMockServer(t *testing.T, content string, calls *atomic.Int32) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(openAIResponse{
+			Choices: []struct {
+				Message struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			}{
+				{
+					Message: struct {
+						Content          string `json:"content"`
+						ReasoningContent string `json:"reasoning_content"`
+					}{Content: content},
+					FinishReason: "stop",
+				},
+			},
+		})
+	}))
+}
+
+// TestVerifyTableDDL_OK is the happy path: the auditor returns OK,
+// VerifyTableDDL returns a verdict with OK=true.
+func TestVerifyTableDDL_OK(t *testing.T) {
+	var calls atomic.Int32
+	server := verifyMockServer(t, "OK", &calls)
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "lmstudio", &secrets.Provider{
+		APIKey: "", Model: "test-model", BaseURL: server.URL,
+	})
+	mapper.client = server.Client()
+
+	req := VerifyTableDDLRequest{
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		SourceTable: &Table{
+			Schema:     "dbo",
+			Name:       "Companies",
+			PrimaryKey: []string{"id"},
+			Columns: []Column{
+				{Name: "id", DataType: "int", IsNullable: false, IsIdentity: true},
+				{Name: "code", DataType: "varchar", MaxLength: 20, IsNullable: false},
+			},
+		},
+		TargetSchema: "public",
+		ProposedDDL:  "CREATE TABLE public.companies (id integer NOT NULL GENERATED BY DEFAULT AS IDENTITY, code varchar(20) NOT NULL);",
+	}
+	verdict, err := mapper.VerifyTableDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyTableDDL: %v", err)
+	}
+	if !verdict.OK {
+		t.Errorf("expected OK=true, got OK=false with issues: %v", verdict.Issues)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("expected 1 AI call, got %d", calls.Load())
+	}
+}
+
+// TestVerifyTableDDL_FlagsIssues exercises the failure path: the auditor
+// reports a halved varchar; VerifyTableDDL surfaces it in Issues.
+func TestVerifyTableDDL_FlagsIssues(t *testing.T) {
+	var calls atomic.Int32
+	server := verifyMockServer(t,
+		"ISSUES\ncode: max_length — 20 vs 10\nindustry: max_length — 50 vs 25",
+		&calls)
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "lmstudio", &secrets.Provider{
+		APIKey: "", Model: "test-model", BaseURL: server.URL,
+	})
+	mapper.client = server.Client()
+
+	req := VerifyTableDDLRequest{
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		SourceTable: &Table{
+			Schema: "dbo", Name: "Companies", PrimaryKey: []string{"id"},
+			Columns: []Column{{Name: "id", DataType: "int"}},
+		},
+		TargetSchema: "public",
+		ProposedDDL:  "CREATE TABLE public.companies (id integer, code varchar(10), industry varchar(25));",
+	}
+	verdict, err := mapper.VerifyTableDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyTableDDL: %v", err)
+	}
+	if verdict.OK {
+		t.Errorf("expected OK=false, got OK=true")
+	}
+	if len(verdict.Issues) != 2 {
+		t.Errorf("expected 2 issues, got %d: %v", len(verdict.Issues), verdict.Issues)
+	}
+}
+
+// TestVerifyTableDDL_RequiresTable + TestVerifyTableDDL_RequiresProposedDDL
+// pin the input-validation contract.
+func TestVerifyTableDDL_RequiresTable(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+	_, err := mapper.VerifyTableDDL(context.Background(), VerifyTableDDLRequest{
+		ProposedDDL: "CREATE TABLE x (id int);",
+	})
+	if err == nil {
+		t.Error("expected error when SourceTable nil, got nil")
+	}
+}
+
+func TestVerifyTableDDL_RequiresProposedDDL(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+	_, err := mapper.VerifyTableDDL(context.Background(), VerifyTableDDLRequest{
+		SourceTable: &Table{Name: "x"},
+	})
+	if err == nil {
+		t.Error("expected error when ProposedDDL empty, got nil")
+	}
+}
+
+// TestBuildVerifyTableDDLPrompt_PinsAuditCriteria is the regression guard
+// that prevents prompt edits from silently dropping the criteria. Without
+// these phrases the auditor lacks the rules to enforce — the very
+// regressions PR #45 chased would slip through.
+func TestBuildVerifyTableDDLPrompt_PinsAuditCriteria(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+
+	req := VerifyTableDDLRequest{
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		SourceTable: &Table{
+			Schema: "dbo", Name: "Companies", PrimaryKey: []string{"id"},
+			Columns: []Column{{Name: "id", DataType: "int", IsNullable: false}},
+		},
+		TargetSchema: "public",
+		ProposedDDL:  "CREATE TABLE public.companies (id integer NOT NULL);",
+	}
+	prompt := mapper.buildVerifyTableDDLPrompt(req)
+
+	for _, needle := range []string{
+		"AUDIT CRITERIA",
+		"max_length / precision / scale not preserved exactly",
+		"nullability differs",
+		"identity / auto-increment dropped",
+		"timezone-awareness CLASS changed",
+		"default expression dropped",
+		"data_type is not a semantic equivalent",
+		// Acceptable / equivalences list — protects against the false-positive
+		// failure mode that surfaced on the first end-to-end test.
+		"ACCEPTABLE — DO NOT FLAG THESE",
+		"GETUTCDATE() ≡ GETDATE()",
+		"NEWID() ≡ gen_random_uuid()",
+		"ISNULL(a,b) ≡ COALESCE(a,b)",
+		"((0)) ≡ 0",
+		// Output contract + few-shot examples (without these, models tend to
+		// emit per-criterion checklists with PASS/FAIL instead of OK/ISSUES).
+		"OUTPUT FORMAT",
+		"EXACTLY the literal text: OK",
+		"ISSUES",
+		"Do NOT wrap in markdown",
+		"EXAMPLES",
+		"Example A",
+		"Example C — halved varchar",
+		"Example D — TZ semantics added",
+		// Codex P2 fix: examples must distinguish "Your response" from rationale
+		// so the model doesn't include explanatory prose in its output.
+		"Your response:",
+		"Rationale (not part of your output)",
+		// Codex P2 fix: REQUIRED TARGET COLUMN NAMES section so verifier
+		// doesn't false-positive on identifier normalization (e.g. PG
+		// lowercasing CamelCase → snake_case).
+		"REQUIRED TARGET COLUMN NAMES",
+		"casing/quoting/identifier-normalization difference between source and target name is NOT a failure",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Errorf("verify prompt missing required phrase %q", needle)
+		}
+	}
+
+	// The prompt must include the source DDL and the proposed DDL so the
+	// auditor can compare them. Failing this means the auditor is being
+	// asked to rule on something it can't see.
+	if !strings.Contains(prompt, req.ProposedDDL) {
+		t.Error("verify prompt missing the proposed DDL")
+	}
+	if !strings.Contains(prompt, "Companies") {
+		t.Error("verify prompt missing the source table name")
+	}
+}
+
+// TestBuildVerifyFinalizationDDLPrompt_Index pins the index-audit prompt.
+func TestBuildVerifyFinalizationDDLPrompt_Index(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+
+	req := VerifyFinalizationDDLRequest{
+		Type:         DDLTypeIndex,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Table:        &Table{Name: "orders"},
+		TargetSchema: "public",
+		Index: &Index{
+			Name: "idx_customer", Columns: []string{"customer_id"},
+			IsUnique: true, Filter: "deleted_at IS NULL",
+		},
+		ProposedDDL: "CREATE UNIQUE INDEX idx_customer ON public.orders (customer_id) WHERE deleted_at IS NULL;",
+	}
+	prompt := mapper.buildVerifyIndexDDLPrompt(req)
+
+	for _, needle := range []string{
+		"AUDIT CRITERIA",
+		"exact column list",
+		"UNIQUE-ness",
+		"INCLUDE columns",
+		"Filter / WHERE clause",
+		"OUTPUT FORMAT",
+		"OK",
+		"ISSUES",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Errorf("verify index prompt missing required phrase %q", needle)
+		}
+	}
+}
+
+// TestBuildVerifyFinalizationDDLPrompt_FK pins the FK-audit prompt.
+func TestBuildVerifyFinalizationDDLPrompt_FK(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+
+	req := VerifyFinalizationDDLRequest{
+		Type:         DDLTypeForeignKey,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Table:        &Table{Name: "orders"},
+		TargetSchema: "public",
+		ForeignKey: &ForeignKey{
+			Name: "fk_customer", Columns: []string{"customer_id"},
+			RefSchema: "public", RefTable: "customers", RefColumns: []string{"id"},
+			OnDelete: "CASCADE", OnUpdate: "NO ACTION",
+		},
+		ProposedDDL: "ALTER TABLE public.orders ADD CONSTRAINT fk_customer FOREIGN KEY (customer_id) REFERENCES public.customers (id) ON DELETE CASCADE;",
+	}
+	prompt := mapper.buildVerifyForeignKeyDDLPrompt(req)
+
+	for _, needle := range []string{
+		"AUDIT CRITERIA",
+		"local column list",
+		"referenced column list",
+		"referenced table name",
+		"ON DELETE action",
+		"ON UPDATE action",
+		"NO ACTION and RESTRICT as equivalent",
+		"OUTPUT FORMAT",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Errorf("verify FK prompt missing required phrase %q", needle)
+		}
+	}
+}
+
+// TestBuildVerifyFinalizationDDLPrompt_Check pins the CHECK-audit prompt.
+func TestBuildVerifyFinalizationDDLPrompt_Check(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+
+	req := VerifyFinalizationDDLRequest{
+		Type:         DDLTypeCheckConstraint,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Table:        &Table{Name: "orders"},
+		TargetSchema: "public",
+		CheckConstraint: &CheckConstraint{
+			Name:       "chk_total_positive",
+			Definition: "total >= 0",
+		},
+		ProposedDDL: "ALTER TABLE public.orders ADD CONSTRAINT chk_total_positive CHECK (total >= 0);",
+	}
+	prompt := mapper.buildVerifyCheckConstraintDDLPrompt(req)
+
+	for _, needle := range []string{
+		"AUDIT CRITERIA",
+		"semantics of the source predicate",
+		"ISNULL(a,b)",
+		"COALESCE(a,b)",
+		"constraint name",
+		"OUTPUT FORMAT",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Errorf("verify CHECK prompt missing required phrase %q", needle)
+		}
+	}
+}

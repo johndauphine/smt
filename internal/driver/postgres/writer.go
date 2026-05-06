@@ -304,14 +304,16 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		opts.MaxRetries = 0
 	}
 	var (
-		lastDDL string
-		lastErr error
+		lastDDL          string
+		lastErr          error
+		lastFromVerifier bool
 	)
 	for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
 		if attempt > 0 {
 			req.PreviousAttempt = &driver.TableDDLAttempt{
-				DDL:   lastDDL,
-				Error: lastErr.Error(),
+				DDL:          lastDDL,
+				Error:        lastErr.Error(),
+				FromVerifier: lastFromVerifier,
 			}
 			logging.Info("retry attempt %d/%d for table %s after retryable DDL error: %v",
 				attempt, opts.MaxRetries, t.FullName(), lastErr)
@@ -346,6 +348,37 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 			logging.Debug("  Column %s -> %s", colName, colType)
 		}
 
+		// AI self-check between gen and exec (opt-in via migration.ai_verify).
+		// Audit the AI-returned form (aiDDL), not the Unlogged-rewritten exec
+		// form: the Unlogged rewrite is a writer-side post-process the auditor
+		// shouldn't see. Skip verify on cache hits — cached DDL was previously
+		// verified-and-executed (modulo the documented "may be unverified if
+		// cached pre-flag-enable" caveat in TableDDLResponse.FromCache).
+		// On ISSUES, retry generation with the verifier's complaints fed back
+		// as PreviousAttempt with FromVerifier=true so the generator's prompt
+		// switches from "DB-error" framing to "auditor-feedback" framing.
+		if opts.AIVerify && !resp.FromCache {
+			vReq := driver.VerifyTableDDLRequest{
+				SourceDBType: req.SourceDBType, TargetDBType: req.TargetDBType,
+				SourceTable: req.SourceTable, TargetSchema: req.TargetSchema,
+				SourceContext: req.SourceContext, TargetContext: req.TargetContext,
+				ProposedDDL: aiDDL,
+			}
+			verdict, vErr := w.tableMapper.VerifyTableDDL(ctx, vReq)
+			if vErr != nil {
+				return fmt.Errorf("AI verify failed for table %s: %w", t.FullName(), vErr)
+			}
+			if !verdict.OK {
+				logging.Warn("verify flagged %d issue(s) on table %s, retrying:\n  %s",
+					len(verdict.Issues), t.FullName(), strings.Join(verdict.Issues, "\n  "))
+				lastDDL = aiDDL
+				lastErr = fmt.Errorf("%s", strings.Join(verdict.Issues, "\n"))
+				lastFromVerifier = true
+				continue
+			}
+			logging.Debug("verify OK: table %s", t.FullName())
+		}
+
 		if _, err = w.pool.Exec(ctx, execDDL); err == nil {
 			// Success — cache the validated DDL (#32). Mapper no longer caches
 			// AI output on its own, so this is the only path that populates
@@ -376,6 +409,7 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 
 		lastDDL = execDDL
 		lastErr = err
+		lastFromVerifier = false
 		// No classifier — let the next iteration ask the AI. If we've
 		// exhausted opts.MaxRetries the for condition exits the loop.
 	}
@@ -592,7 +626,7 @@ func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, id
 		TargetContext:  w.dbContext,
 		TargetTableDDL: targetTableDDL,
 	}
-	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("index %s.%s", t.Name, idx.Name))
+	return w.retryFinalize(ctx, req, opts, fmt.Sprintf("index %s.%s", t.Name, idx.Name))
 }
 
 // CreateForeignKey creates a foreign key constraint using AI-generated DDL.
@@ -655,7 +689,7 @@ func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Tabl
 		TargetContext:  w.dbContext,
 		TargetTableDDL: targetTableDDL,
 	}
-	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("FK %s.%s", t.Name, fk.Name))
+	return w.retryFinalize(ctx, req, opts, fmt.Sprintf("FK %s.%s", t.Name, fk.Name))
 }
 
 // CreateCheckConstraint creates a check constraint using AI-generated DDL.
@@ -699,7 +733,7 @@ func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver
 		TargetContext:   w.dbContext,
 		TargetTableDDL:  targetTableDDL,
 	}
-	return w.retryFinalize(ctx, req, opts.MaxRetries, fmt.Sprintf("CHECK %s.%s", t.Name, chk.Name))
+	return w.retryFinalize(ctx, req, opts, fmt.Sprintf("CHECK %s.%s", t.Name, chk.Name))
 }
 
 // HasPrimaryKey checks if a table has a primary key.
