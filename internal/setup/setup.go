@@ -127,6 +127,12 @@ func (s *State) Prompt() PromptInfo {
 			Choices: providers,
 		}
 	case StepAIKey:
+		if secrets.IsNativeProvider(s.AIProvider) {
+			return PromptInfo{
+				Text:         "On-device provider — no key or URL needed.",
+				IsAutoAction: true,
+			}
+		}
 		if secrets.IsLocalProvider(s.AIProvider) {
 			known := secrets.KnownProviders[s.AIProvider]
 			return PromptInfo{

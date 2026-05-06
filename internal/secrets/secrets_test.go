@@ -199,6 +199,7 @@ func TestIsLocalProvider(t *testing.T) {
 		{"gemini", false},
 		{"ollama", true},
 		{"lmstudio", true},
+		{"windows", true},
 		{"unknown", false},
 	}
 
@@ -207,6 +208,63 @@ func TestIsLocalProvider(t *testing.T) {
 			got := IsLocalProvider(tt.name)
 			if got != tt.expected {
 				t.Errorf("IsLocalProvider(%q) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsNativeProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected bool
+	}{
+		{"anthropic", false},
+		{"openai", false},
+		{"ollama", false},
+		{"lmstudio", false},
+		{"windows", true},
+		{"unknown", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsNativeProvider(tt.name)
+			if got != tt.expected {
+				t.Errorf("IsNativeProvider(%q) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestProvider_IsConfigured(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider Provider
+		want     bool
+	}{
+		{"anthropic with key", Provider{APIKey: "sk-..."}, true},
+		{"anthropic without key", Provider{}, false},
+		{"ollama with base url", Provider{BaseURL: "http://localhost:11434"}, true},
+		{"ollama without base url", Provider{}, false},
+		{"windows with nothing set", Provider{}, true},
+		{"windows with model only", Provider{Model: "phi-silica"}, true},
+		{"unknown provider with nothing", Provider{}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			providerName := "anthropic"
+			switch {
+			case tt.name == "ollama with base url" || tt.name == "ollama without base url":
+				providerName = "ollama"
+			case tt.name == "windows with nothing set" || tt.name == "windows with model only":
+				providerName = "windows"
+			case tt.name == "unknown provider with nothing":
+				providerName = "unknown"
+			}
+			got := tt.provider.IsConfigured(providerName)
+			if got != tt.want {
+				t.Errorf("IsConfigured(%q) = %v, want %v", providerName, got, tt.want)
 			}
 		})
 	}

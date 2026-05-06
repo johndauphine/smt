@@ -749,7 +749,7 @@ func (c *Config) applyDefaults() error {
 		secretsCfg, err := secrets.Load()
 		if err == nil && secretsCfg.AI.DefaultProvider != "" {
 			provider, provErr := secretsCfg.GetProvider(secretsCfg.AI.DefaultProvider)
-			if provErr == nil && provider.APIKey != "" {
+			if provErr == nil && provider.IsConfigured(secretsCfg.AI.DefaultProvider) {
 				c.AI = &AIConfig{
 					Provider: secretsCfg.AI.DefaultProvider,
 					APIKey:   provider.APIKey,
@@ -1354,8 +1354,8 @@ func (c *Config) DebugDump() string {
 	b.WriteString("\nAI Features:\n")
 	if secretsErr == nil {
 		provider, providerName, err := secretsCfg.GetDefaultProvider()
-		// Check for valid provider: API-key-based (Anthropic, OpenAI) or local with BaseURL (Ollama, LMStudio)
-		if err == nil && provider != nil && (provider.APIKey != "" || provider.BaseURL != "") {
+		// Check for valid provider: API-key-based (Anthropic, OpenAI), local with BaseURL (Ollama, LMStudio), or native (Windows)
+		if err == nil && provider != nil && provider.IsConfigured(providerName) {
 			b.WriteString(fmt.Sprintf("  Provider: %s\n", providerName))
 			if provider.APIKey != "" {
 				b.WriteString("  APIKey: [REDACTED]\n")

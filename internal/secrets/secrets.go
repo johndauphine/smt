@@ -434,8 +434,8 @@ func (c *Config) GetMigrationDefaults() *MigrationDefaults {
 	// enable it by default when an AI provider is configured
 	if defaults.AIAdjust == nil && defaults.AIAdjustInterval == "" {
 		// Neither ai_adjust nor ai_adjust_interval was set - apply default
-		if provider, _, err := c.GetDefaultProvider(); err == nil && provider != nil {
-			if provider.APIKey != "" || provider.BaseURL != "" {
+		if provider, name, err := c.GetDefaultProvider(); err == nil && provider != nil {
+			if provider.IsConfigured(name) {
 				aiAdjust := true
 				defaults.AIAdjust = &aiAdjust
 				defaults.AIAdjustInterval = "30s"
@@ -517,6 +517,27 @@ func IsLocalProvider(name string) bool {
 		return known.Type == ProviderTypeLocal
 	}
 	return false
+}
+
+// IsNativeProvider reports whether the provider runs on-device without an
+// HTTP endpoint (e.g. `windows` via the Windows Copilot Runtime). Such
+// providers need neither an API key nor a base URL — being a registered
+// known provider is sufficient. The discriminator is a registered local
+// provider with no DefaultURL.
+func IsNativeProvider(name string) bool {
+	known, ok := KnownProviders[name]
+	return ok && known.Type == ProviderTypeLocal && known.DefaultURL == ""
+}
+
+// IsConfigured reports whether p has enough information to be used as the
+// active AI provider. HTTP-based providers (cloud, ollama, lmstudio,
+// custom OpenAI-compatible local servers) need APIKey or BaseURL set.
+// Native providers like `windows` need neither.
+func (p *Provider) IsConfigured(name string) bool {
+	if p.APIKey != "" || p.BaseURL != "" {
+		return true
+	}
+	return IsNativeProvider(name)
 }
 
 // SecretsNotFoundError is returned when the secrets file doesn't exist
