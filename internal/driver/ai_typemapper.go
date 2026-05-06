@@ -1860,11 +1860,13 @@ func columnIntrospection(col Column) map[string]any {
 // and surfaced as ErrNotRetryable so the writer can break out of its retry
 // loop with the original DB error preserved.
 func (m *AITypeMapper) parseTableDDLResponse(response string, sourceTable *Table) (*TableDDLResponse, error) {
-	if abort, reason := classifyRetryResponse(response); abort {
+	// Strip fences before classifying — local models routinely wrap even the
+	// NOT_RETRYABLE marker in ```sql ... ```, which would hide it from the
+	// classifier and trap us in a futile retry loop.
+	ddl := stripMarkdownFence(response)
+	if abort, reason := classifyRetryResponse(ddl); abort {
 		return nil, WrapNotRetryable(reason)
 	}
-
-	ddl := strings.TrimSpace(response)
 
 	// Basic validation - should start with CREATE TABLE
 	upperDDL := strings.ToUpper(ddl)
@@ -1946,6 +1948,25 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// stripMarkdownFence removes a leading ```lang fence and matching trailing
+// ``` from an AI response. Local models (qwen, gpt-oss, llama) frequently
+// wrap DDL in markdown despite explicit "no markdown" prompt instructions.
+// No-op when the response isn't fenced. Idempotent.
+func stripMarkdownFence(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+		s = s[nl+1:]
+	} else {
+		return s
+	}
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
+}
+
 // GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints using AI.
 //
 // Caching mirrors GenerateTableDDL (#32): cache is consulted only on first-try
@@ -2022,11 +2043,11 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 	// On retry calls the prompt invited a NOT_RETRYABLE classification; if the
 	// model chose that path, surface ErrNotRetryable to the writer so it
 	// breaks out of the retry loop with the original DB error preserved.
-	if abort, reason := classifyRetryResponse(result); abort {
+	// Strip fences first so a fenced NOT_RETRYABLE marker is still detected.
+	ddl := stripMarkdownFence(result)
+	if abort, reason := classifyRetryResponse(ddl); abort {
 		return "", WrapNotRetryable(reason)
 	}
-
-	ddl := strings.TrimSpace(result)
 
 	// Validate response starts with expected prefix
 	upperDDL := strings.ToUpper(ddl)
@@ -2389,7 +2410,7 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 			req.TargetSchema, req.TableName, err)
 	}
 
-	ddl := strings.TrimSpace(result)
+	ddl := stripMarkdownFence(result)
 
 	// Validate: must contain DROP and must be idempotent (IF EXISTS).
 	// All three target dialects' AIDropTablePromptAugmentation already mandate

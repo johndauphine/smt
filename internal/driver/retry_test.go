@@ -155,3 +155,20 @@ func TestParseTableDDLResponse_NotRetryable(t *testing.T) {
 		t.Errorf("expected nil response on NOT_RETRYABLE, got %v", resp)
 	}
 }
+
+// Local models often wrap the NOT_RETRYABLE marker in markdown fences even
+// when the prompt forbids markdown. The parser must strip fences before
+// classifying so a fenced marker still aborts the retry loop instead of
+// falling through to DDL validation.
+func TestParseTableDDLResponse_NotRetryable_Fenced(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	fenced := "```\nNOT_RETRYABLE: relation \"foo\" already exists\n```"
+	resp, err := mapper.parseTableDDLResponse(fenced, &Table{Name: "foo"})
+	if !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("expected ErrNotRetryable on fenced marker, got err=%v resp=%v", err, resp)
+	}
+	if resp != nil {
+		t.Errorf("expected nil response, got %v", resp)
+	}
+}
