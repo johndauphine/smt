@@ -1860,11 +1860,13 @@ func columnIntrospection(col Column) map[string]any {
 // and surfaced as ErrNotRetryable so the writer can break out of its retry
 // loop with the original DB error preserved.
 func (m *AITypeMapper) parseTableDDLResponse(response string, sourceTable *Table) (*TableDDLResponse, error) {
-	if abort, reason := classifyRetryResponse(response); abort {
+	// Strip fences before classifying — local models routinely wrap even the
+	// NOT_RETRYABLE marker in ```sql ... ```, which would hide it from the
+	// classifier and trap us in a futile retry loop.
+	ddl := stripMarkdownFence(response)
+	if abort, reason := classifyRetryResponse(ddl); abort {
 		return nil, WrapNotRetryable(reason)
 	}
-
-	ddl := stripMarkdownFence(response)
 
 	// Basic validation - should start with CREATE TABLE
 	upperDDL := strings.ToUpper(ddl)
@@ -2041,11 +2043,11 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 	// On retry calls the prompt invited a NOT_RETRYABLE classification; if the
 	// model chose that path, surface ErrNotRetryable to the writer so it
 	// breaks out of the retry loop with the original DB error preserved.
-	if abort, reason := classifyRetryResponse(result); abort {
+	// Strip fences first so a fenced NOT_RETRYABLE marker is still detected.
+	ddl := stripMarkdownFence(result)
+	if abort, reason := classifyRetryResponse(ddl); abort {
 		return "", WrapNotRetryable(reason)
 	}
-
-	ddl := stripMarkdownFence(result)
 
 	// Validate response starts with expected prefix
 	upperDDL := strings.ToUpper(ddl)
