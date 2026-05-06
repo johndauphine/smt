@@ -290,3 +290,32 @@ func TestGetEffectiveModelTemperature(t *testing.T) {
 }
 
 func floatPtr(f float64) *float64 { return &f }
+
+// TestEffectiveType pins the provider-alias contract: when Type is unset, the
+// YAML key is the dispatch type (legacy behavior); when Type is set, it
+// overrides — letting users have multiple labelled entries that share a
+// backend (anthropic-haiku, anthropic-sonnet — both Type: anthropic). Without
+// this the AI dispatch switch in ai_typemapper.go would reject any YAML key
+// that isn't a known provider literal, blocking the cross-model verify
+// pattern in #48.
+func TestEffectiveType(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerName string
+		provider     Provider
+		want         string
+	}{
+		{"unset Type falls back to YAML key", "anthropic", Provider{}, "anthropic"},
+		{"Type alias overrides YAML key", "anthropic-haiku", Provider{Type: "anthropic"}, "anthropic"},
+		{"empty Type explicitly == unset", "lmstudio", Provider{Type: ""}, "lmstudio"},
+		{"Type can point at any known backend", "my-cheap-gen", Provider{Type: "ollama"}, "ollama"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.provider.EffectiveType(tt.providerName); got != tt.want {
+				t.Errorf("EffectiveType(%q) with Type=%q = %q, want %q",
+					tt.providerName, tt.provider.Type, got, tt.want)
+			}
+		})
+	}
+}

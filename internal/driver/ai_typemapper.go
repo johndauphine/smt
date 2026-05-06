@@ -88,7 +88,8 @@ func NormalizeAIProvider(provider string) string {
 // AITypeMapper uses AI to map database types.
 // It implements the TypeMapper interface.
 type AITypeMapper struct {
-	providerName string
+	providerName string // YAML key in the secrets file (used for cache/log labels)
+	providerType string // dispatch type — equals providerName unless aliased via provider: in YAML
 	provider     *secrets.Provider
 	client       *http.Client
 	cache        *TypeMappingCache
@@ -119,13 +120,20 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 		return nil, fmt.Errorf("AI provider configuration is required")
 	}
 
+	// providerType drives dispatch + IsLocal checks. providerName is the YAML
+	// key we keep around for cache/log identity. Equal in the legacy contract
+	// (no `provider:` alias); differ when the user opts into multiple entries
+	// per backend (e.g. anthropic-haiku + anthropic-sonnet, both Type:
+	// anthropic).
+	providerType := provider.EffectiveType(providerName)
+
 	// Validate cloud providers have API key
-	if !secrets.IsLocalProvider(providerName) && provider.APIKey == "" {
+	if !secrets.IsLocalProvider(providerType) && provider.APIKey == "" {
 		return nil, fmt.Errorf("AI provider %q requires an API key", providerName)
 	}
 
 	// Get effective model
-	model := provider.GetEffectiveModel(providerName)
+	model := provider.GetEffectiveModel(providerType)
 	if model == "" {
 		return nil, fmt.Errorf("no model specified for provider %q", providerName)
 	}
@@ -137,7 +145,7 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 	// Determine API timeout: user-configured > local provider default > cloud default.
 	// Local providers and thinking models need more time for inference.
 	timeoutSec := 60
-	if IsLocalProvider(providerName) {
+	if IsLocalProvider(providerType) {
 		timeoutSec = 120
 	}
 	if provider.TimeoutSeconds > 0 {
@@ -146,6 +154,7 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 
 	mapper := &AITypeMapper{
 		providerName: providerName,
+		providerType: providerType,
 		provider:     provider,
 		client: &http.Client{
 			Timeout: time.Duration(timeoutSec) * time.Second,
@@ -336,7 +345,7 @@ func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 // (free-form callers like schemadiff). Both share the multi-provider HTTP
 // implementations in this file so adding a new provider is a one-place edit.
 func (m *AITypeMapper) dispatch(ctx context.Context, prompt string) (string, error) {
-	switch AIProvider(m.providerName) {
+	switch AIProvider(m.providerType) {
 	case ProviderAnthropic:
 		return m.queryAnthropicAPI(ctx, prompt)
 	case ProviderOpenAI:
@@ -344,10 +353,10 @@ func (m *AITypeMapper) dispatch(ctx context.Context, prompt string) (string, err
 	case ProviderGemini:
 		return m.queryGeminiAPI(ctx, prompt)
 	case ProviderOllama:
-		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerType)
 		return m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	case ProviderLMStudio:
-		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerType)
 		return m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	default:
 		// Unknown providers can ride the OpenAI-compatible endpoint if
@@ -355,7 +364,7 @@ func (m *AITypeMapper) dispatch(ctx context.Context, prompt string) (string, err
 		if m.provider.BaseURL != "" {
 			return m.queryOpenAICompatAPI(ctx, prompt, m.provider.BaseURL+"/v1/chat/completions")
 		}
-		return "", fmt.Errorf("unsupported AI provider: %s", m.providerName)
+		return "", fmt.Errorf("unsupported AI provider: %s (dispatch type %q)", m.providerName, m.providerType)
 	}
 }
 
@@ -696,7 +705,7 @@ func calculateBackoff(attempt int) time.Duration {
 }
 
 func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (string, error) {
-	model := m.provider.GetEffectiveModel(m.providerName)
+	model := m.provider.GetEffectiveModel(m.providerType)
 
 	// Detect if this is a type mapping query (short, simple) vs a complex query.
 	// DDL generation prompts need raw SQL output, while AI monitor/smart config
@@ -833,7 +842,7 @@ func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string, url st
 
 // queryOpenAIAPIWithTokens queries OpenAI API with configurable max tokens.
 func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt string, url string, maxTokens int) (string, error) {
-	model := m.provider.GetEffectiveModel(m.providerName)
+	model := m.provider.GetEffectiveModel(m.providerType)
 
 	// Detect if this is a type mapping query (short, simple) vs general AI query (long, complex)
 	systemMsg := "You are a helpful AI assistant."
@@ -842,7 +851,7 @@ func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt stri
 		systemMsg = "You are a database type mapping expert. Respond with only the target type, no explanation."
 	} else {
 		// For complex queries, use the provider's configured max tokens
-		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerName)
+		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerType)
 	}
 
 	reqBody := openAIRequest{
@@ -909,7 +918,7 @@ func (m *AITypeMapper) queryOpenAICompatAPI(ctx context.Context, prompt string, 
 
 // queryOpenAICompatAPIWithTokens queries local providers with configurable max tokens.
 func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, prompt string, url string, maxTokens int) (string, error) {
-	model := m.provider.GetEffectiveModel(m.providerName)
+	model := m.provider.GetEffectiveModel(m.providerType)
 
 	// Detect if this is a type mapping query (short, simple) vs general AI query (long, complex)
 	systemMsg := "You are a helpful AI assistant."
@@ -922,7 +931,7 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 	// Reasoning models (e.g., Qwen3) consume tokens on thinking before generating,
 	// so they need significantly more headroom.
 	if !isTypeMapping {
-		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerName)
+		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerType)
 	}
 
 	reqBody := openAIRequest{
@@ -936,11 +945,11 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 	}
 
 	// For local providers (Ollama/LMStudio), use max_tokens (older OpenAI-compatible API)
-	if AIProvider(m.providerName) == ProviderOllama || AIProvider(m.providerName) == ProviderLMStudio {
+	if AIProvider(m.providerType) == ProviderOllama || AIProvider(m.providerType) == ProviderLMStudio {
 		reqBody.MaxTokens = reqBody.MaxCompletionTokens
 		reqBody.MaxCompletionTokens = 0
 	}
-	if AIProvider(m.providerName) == ProviderOllama {
+	if AIProvider(m.providerType) == ProviderOllama {
 		contextWindow := m.provider.GetEffectiveContextWindow()
 		reqBody.Options = map[string]interface{}{
 			"num_ctx": contextWindow, // Use configured context window (default: 8192)
@@ -952,7 +961,7 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
-	providerName := m.providerName // capture for closure
+	providerName := m.providerName // capture YAML key for log identity in retry callback
 
 	// Use retry logic for transient failures
 	resp, body, err := m.retryableHTTPDo(ctx, func() (*http.Request, error) {
@@ -1036,7 +1045,7 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 	// Gemini 3+ models use thinking tokens, so they need more headroom.
 	maxTokens := 100
 	if len(prompt) > 500 {
-		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerName)
+		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerType)
 		if maxTokens < 8192 {
 			maxTokens = 8192 // Gemini thinking models need headroom
 		}
@@ -1061,7 +1070,7 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
-	model := m.provider.GetEffectiveModel(m.providerName)
+	model := m.provider.GetEffectiveModel(m.providerType)
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", model)
 
 	// Use retry logic for transient failures
@@ -1250,7 +1259,7 @@ func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error
 	var result string
 	var err error
 
-	switch AIProvider(m.providerName) {
+	switch AIProvider(m.providerType) {
 	case ProviderAnthropic:
 		result, err = m.queryAnthropicAPI(ctx, prompt)
 	case ProviderOpenAI:
@@ -1258,23 +1267,25 @@ func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error
 	case ProviderGemini:
 		result, err = m.queryGeminiAPI(ctx, prompt)
 	case ProviderOllama:
-		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerType)
 		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	case ProviderLMStudio:
-		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerType)
 		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	default:
 		if m.provider.BaseURL != "" {
 			result, err = m.queryOpenAICompatAPI(ctx, prompt, m.provider.BaseURL+"/v1/chat/completions")
 		} else {
-			return "", fmt.Errorf("unsupported AI provider: %s", m.providerName)
+			return "", fmt.Errorf("unsupported AI provider: %s (dispatch type %q)", m.providerName, m.providerType)
 		}
 	}
 
 	return result, err
 }
 
-// ProviderName returns the name of the configured provider.
+// ProviderName returns the YAML key of the configured provider entry —
+// useful for log identity and error messages. For dispatch decisions
+// (which API client to invoke, IsLocal etc.) use providerType internally.
 func (m *AITypeMapper) ProviderName() string {
 	return m.providerName
 }
@@ -1292,7 +1303,7 @@ func IsLocalProvider(providerName string) bool {
 
 // Model returns the model being used.
 func (m *AITypeMapper) Model() string {
-	return m.provider.GetEffectiveModel(m.providerName)
+	return m.provider.GetEffectiveModel(m.providerType)
 }
 
 // GenerateTableDDL generates complete CREATE TABLE DDL for the target database.

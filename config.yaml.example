@@ -58,9 +58,15 @@ migration:
   # Has no effect unless ai_verify is true. Validated at startup; an unknown
   # provider name is a fatal error.
   #
-  # Example pairing — Haiku generates, Sonnet audits:
+  # Example pairing — Haiku generates, Sonnet audits. Note the `provider:`
+  # field on each entry: when set, it aliases the YAML key to a known backend
+  # ("anthropic", "openai", "gemini", "ollama", "lmstudio") so multiple
+  # labelled entries can share one backend (`anthropic-haiku` and
+  # `anthropic-sonnet` here both dispatch through the Anthropic API but
+  # with different model fields). When `provider:` is unset, the YAML key
+  # IS the dispatch type — the legacy contract.
   #   ai.providers:
-  #     anthropic-haiku: { provider: anthropic, model: claude-haiku-4-5, api_key: ... }
+  #     anthropic-haiku:  { provider: anthropic, model: claude-haiku-4-5, api_key: ... }
   #     anthropic-sonnet: { provider: anthropic, model: claude-sonnet-4-6, api_key: ... }
   #   ai.default_provider: anthropic-haiku
   #   migration.ai_verifier_model: anthropic-sonnet
