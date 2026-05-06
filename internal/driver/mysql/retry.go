@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	mysqldrv "github.com/go-sql-driver/mysql"
 
@@ -40,20 +41,23 @@ func isAlreadyExists(err error) bool {
 //
 // This replaced isRetryableDDLError (#29 PR B follow-up) — see postgres
 // equivalent for the full rationale.
-func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, maxRetries int, label string) error {
+func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, opts driver.FinalizeOptions, label string) error {
 	// Defensive clamp — see postgres equivalent for rationale.
+	maxRetries := opts.MaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
 	var (
-		lastDDL string
-		lastErr error
+		lastDDL          string
+		lastErr          error
+		lastFromVerifier bool
 	)
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			req.PreviousAttempt = &driver.FinalizationDDLAttempt{
-				DDL:   lastDDL,
-				Error: lastErr.Error(),
+				DDL:          lastDDL,
+				Error:        lastErr.Error(),
+				FromVerifier: lastFromVerifier,
 			}
 			logging.Info("retry attempt %d/%d for %s after DDL error: %v",
 				attempt, maxRetries, label, lastErr)
@@ -66,6 +70,29 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 				return fmt.Errorf("%s: %w\nDDL: %s", label, lastErr, lastDDL)
 			}
 			return fmt.Errorf("AI DDL generation failed for %s: %w", label, err)
+		}
+
+		// AI self-check between gen and exec — see postgres equivalent for design.
+		if opts.AIVerify {
+			vReq := driver.VerifyFinalizationDDLRequest{
+				Type: req.Type, SourceDBType: req.SourceDBType, TargetDBType: req.TargetDBType,
+				Table: req.Table, TargetSchema: req.TargetSchema, TargetContext: req.TargetContext,
+				Index: req.Index, ForeignKey: req.ForeignKey, CheckConstraint: req.CheckConstraint,
+				ProposedDDL: ddl,
+			}
+			verdict, vErr := w.finalizationMapper.VerifyFinalizationDDL(ctx, vReq)
+			if vErr != nil {
+				return fmt.Errorf("AI verify failed for %s: %w", label, vErr)
+			}
+			if !verdict.OK {
+				logging.Warn("verify flagged %d issue(s) on %s, retrying:\n  %s",
+					len(verdict.Issues), label, strings.Join(verdict.Issues, "\n  "))
+				lastDDL = ddl
+				lastErr = fmt.Errorf("%s", strings.Join(verdict.Issues, "\n"))
+				lastFromVerifier = true
+				continue
+			}
+			logging.Debug("verify OK: %s", label)
 		}
 
 		if _, execErr := w.db.ExecContext(ctx, ddl); execErr == nil {
@@ -86,6 +113,7 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 			}
 			lastDDL = ddl
 			lastErr = execErr
+			lastFromVerifier = false
 		}
 	}
 	return fmt.Errorf("%s: %w\nDDL: %s", label, lastErr, lastDDL)

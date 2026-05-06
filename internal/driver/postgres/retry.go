@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -40,11 +41,16 @@ func isAlreadyExists(err error) bool {
 }
 
 // retryFinalize generates DDL via the finalization mapper and executes it,
-// retrying up to maxRetries times. Each retry feeds the prior failed DDL plus
-// the verbatim database error back into the AI prompt via PreviousAttempt;
-// the prompt invites the AI to either return corrected DDL or, if it judges
-// retry futile, emit NOT_RETRYABLE — which surfaces here as ErrNotRetryable
-// and breaks the loop early with the original DB error preserved.
+// retrying up to opts.MaxRetries times. Each retry feeds the prior failed
+// DDL plus the verbatim database error back into the AI prompt via
+// PreviousAttempt; the prompt invites the AI to either return corrected DDL
+// or, if it judges retry futile, emit NOT_RETRYABLE — which surfaces here
+// as ErrNotRetryable and breaks the loop early with the original DB error
+// preserved.
+//
+// When opts.AIVerify is true, an AI self-check pass runs between Generate
+// and Exec. Verifier ISSUES are fed back as PreviousAttempt.Error in the
+// next iteration, sharing the same retry budget as exec failures.
 //
 // This replaced the per-driver isRetryableDDLError SQLSTATE allowlist (#29
 // PR B follow-up): the allowlist needed manual maintenance and false negatives
@@ -53,25 +59,27 @@ func isAlreadyExists(err error) bool {
 // sentinel + parsing helper.
 //
 // label is used for logging and the wrapping error message (e.g. "index
-// Orders.idx_customer", "FK Orders.fk_customer"). The finalization mapper
-// has no cache, so a successful retry doesn't need any re-prime step.
-func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, maxRetries int, label string) error {
+// Orders.idx_customer", "FK Orders.fk_customer").
+func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRequest, opts driver.FinalizeOptions, label string) error {
 	// Defensive clamp: a negative budget would skip the loop body entirely
 	// (no AI call, no exec) and surface a confusing wrapped-nil error.
 	// Orchestrator.aiMaxRetries already maps negatives to 0; this guard
 	// exists for direct WithOptions callers. (Copilot review on PR #31.)
+	maxRetries := opts.MaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
 	var (
-		lastDDL string
-		lastErr error
+		lastDDL          string
+		lastErr          error
+		lastFromVerifier bool
 	)
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			req.PreviousAttempt = &driver.FinalizationDDLAttempt{
-				DDL:   lastDDL,
-				Error: lastErr.Error(),
+				DDL:          lastDDL,
+				Error:        lastErr.Error(),
+				FromVerifier: lastFromVerifier,
 			}
 			logging.Info("retry attempt %d/%d for %s after DDL error: %v",
 				attempt, maxRetries, label, lastErr)
@@ -86,6 +94,30 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 				return fmt.Errorf("%s: %w\nDDL: %s", label, lastErr, lastDDL)
 			}
 			return fmt.Errorf("AI DDL generation failed for %s: %w", label, err)
+		}
+
+		// AI self-check between gen and exec (opt-in via opts.AIVerify).
+		// On ISSUES, retry generation with the verifier's complaints fed in.
+		if opts.AIVerify {
+			vReq := driver.VerifyFinalizationDDLRequest{
+				Type: req.Type, SourceDBType: req.SourceDBType, TargetDBType: req.TargetDBType,
+				Table: req.Table, TargetSchema: req.TargetSchema, TargetContext: req.TargetContext,
+				Index: req.Index, ForeignKey: req.ForeignKey, CheckConstraint: req.CheckConstraint,
+				ProposedDDL: ddl,
+			}
+			verdict, vErr := w.finalizationMapper.VerifyFinalizationDDL(ctx, vReq)
+			if vErr != nil {
+				return fmt.Errorf("AI verify failed for %s: %w", label, vErr)
+			}
+			if !verdict.OK {
+				logging.Warn("verify flagged %d issue(s) on %s, retrying:\n  %s",
+					len(verdict.Issues), label, strings.Join(verdict.Issues, "\n  "))
+				lastDDL = ddl
+				lastErr = fmt.Errorf("%s", strings.Join(verdict.Issues, "\n"))
+				lastFromVerifier = true
+				continue
+			}
+			logging.Debug("verify OK: %s", label)
 		}
 
 		if _, execErr := w.pool.Exec(ctx, ddl); execErr == nil {
@@ -117,6 +149,7 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 			}
 			lastDDL = ddl
 			lastErr = execErr
+			lastFromVerifier = false
 			// No classifier — let the next iteration ask the AI. If we've
 			// exhausted maxRetries the for condition exits the loop naturally.
 		}

@@ -1477,17 +1477,34 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	// PRIOR ATTEMPT FAILED — last in the prompt so the corrective context is the
 	// most recent thing the model sees before generating. Only present when this
 	// is a retry call (PreviousAttempt != nil); see #29 for the validate-and-retry
-	// design. Verbatim DDL + verbatim error give the model the exact ground truth
-	// of what it produced and what the database said about it.
+	// design. Two shapes: a database-error block (the original #29 form) and an
+	// auditor-feedback block when FromVerifier=true (Phase 1 verify). They have
+	// different framings because mixing them confuses the generator: a verifier
+	// complaint ("max_length 20 vs 10") doesn't look like a database error, and
+	// presenting it as one leads models to emit prose ("OK, that's fine") instead
+	// of corrected DDL.
 	if req.PreviousAttempt != nil {
 		sb.WriteString("\n=== PRIOR ATTEMPT FAILED ===\n")
-		sb.WriteString("The previous CREATE TABLE you generated was rejected by the target database.\n\n")
-		sb.WriteString("Previous DDL (verbatim):\n")
-		sb.WriteString(req.PreviousAttempt.DDL)
-		sb.WriteString("\n\nDatabase error (verbatim):\n")
-		sb.WriteString(req.PreviousAttempt.Error)
-		sb.WriteString("\n\nGenerate a corrected CREATE TABLE for the same source table. Use the same target column names, types, and constraints — only fix what the error indicates is wrong. Do not regenerate from scratch.\n")
-		writeRetryClassificationInstruction(&sb)
+		if req.PreviousAttempt.FromVerifier {
+			sb.WriteString("An AI auditor reviewed your previous CREATE TABLE and flagged the issues below. The auditor checks whether the target DDL preserves source column attributes (max_length, precision, scale, nullability, identity, timezone-awareness, default-class, type semantics).\n\n")
+			sb.WriteString("Previous DDL (verbatim):\n")
+			sb.WriteString(req.PreviousAttempt.DDL)
+			sb.WriteString("\n\nAuditor's flagged issues:\n")
+			sb.WriteString(req.PreviousAttempt.Error)
+			sb.WriteString("\n\nGenerate a corrected CREATE TABLE that addresses each flagged issue. Output rules:\n")
+			sb.WriteString("- Your response MUST start with CREATE TABLE and end with a semicolon. Do not respond with prose, opinions, or rebuttals — emit DDL only.\n")
+			sb.WriteString("- Keep every column the auditor did not flag exactly as-is.\n")
+			sb.WriteString("- Fix only the flagged attributes. Do not re-architect the schema.\n")
+			sb.WriteString("- If the auditor flagged something that is actually correct (false positive), still emit corrected DDL — repeat the prior column form. The auditor will re-evaluate.\n")
+		} else {
+			sb.WriteString("The previous CREATE TABLE you generated was rejected by the target database.\n\n")
+			sb.WriteString("Previous DDL (verbatim):\n")
+			sb.WriteString(req.PreviousAttempt.DDL)
+			sb.WriteString("\n\nDatabase error (verbatim):\n")
+			sb.WriteString(req.PreviousAttempt.Error)
+			sb.WriteString("\n\nGenerate a corrected CREATE TABLE for the same source table. Use the same target column names, types, and constraints — only fix what the error indicates is wrong. Do not regenerate from scratch.\n")
+			writeRetryClassificationInstruction(&sb)
+		}
 	}
 
 	return sb.String()
@@ -2149,6 +2166,18 @@ func writeFinalizationPriorAttempt(sb *strings.Builder, req FinalizationDDLReque
 		return
 	}
 	sb.WriteString("\n=== PRIOR ATTEMPT FAILED ===\n")
+	if req.PreviousAttempt.FromVerifier {
+		sb.WriteString("An AI auditor reviewed your previous DDL and flagged the issues below.\n\n")
+		sb.WriteString("Previous DDL (verbatim):\n")
+		sb.WriteString(req.PreviousAttempt.DDL)
+		sb.WriteString("\n\nAuditor's flagged issues:\n")
+		sb.WriteString(req.PreviousAttempt.Error)
+		sb.WriteString("\n\nGenerate corrected DDL addressing each flagged issue. Output rules:\n")
+		sb.WriteString("- Emit DDL only — no prose, no opinions, no rebuttals.\n")
+		sb.WriteString("- Keep everything the auditor did not flag exactly as-is.\n")
+		sb.WriteString("- Fix only the flagged attributes.\n")
+		return
+	}
 	sb.WriteString("The previous DDL you generated was rejected by the target database.\n\n")
 	sb.WriteString("Previous DDL (verbatim):\n")
 	sb.WriteString(req.PreviousAttempt.DDL)
