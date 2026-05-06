@@ -53,16 +53,11 @@ const (
 	ProviderOllama AIProvider = "ollama"
 	// ProviderLMStudio uses local LM Studio with OpenAI-compatible API.
 	ProviderLMStudio AIProvider = "lmstudio"
-	// ProviderWindows uses on-device Windows AI (Phi Silica via the Windows
-	// Copilot Runtime). The actual API call is not yet wired up; dispatch
-	// returns errWindowsAINotImplemented.
+	// ProviderWindows talks to a local OpenAI-compatible shim that fronts
+	// Phi Silica via the Windows Copilot Runtime (Copilot+ PCs). The user
+	// runs the shim separately; SMT just hits its localhost endpoint.
 	ProviderWindows AIProvider = "windows"
 )
-
-// errWindowsAINotImplemented is returned by dispatch/CallAI when the Windows
-// provider is selected. The provider is registered (so configuration and
-// validation accept it) but the WinRT integration lands in a follow-up PR.
-var errWindowsAINotImplemented = errors.New("windows AI provider is not yet implemented")
 
 // ValidAIProviders returns the list of supported AI provider names.
 func ValidAIProviders() []string {
@@ -342,7 +337,8 @@ func (m *AITypeMapper) dispatch(ctx context.Context, prompt string) (string, err
 		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
 		return m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	case ProviderWindows:
-		return "", errWindowsAINotImplemented
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		return m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	default:
 		// Unknown providers can ride the OpenAI-compatible endpoint if
 		// they configured a base_url (covers vLLM, llama.cpp server, etc.).
@@ -1258,7 +1254,8 @@ func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error
 		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
 		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	case ProviderWindows:
-		return "", errWindowsAINotImplemented
+		baseURL := m.provider.GetEffectiveBaseURL(m.providerName)
+		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
 	default:
 		if m.provider.BaseURL != "" {
 			result, err = m.queryOpenAICompatAPI(ctx, prompt, m.provider.BaseURL+"/v1/chat/completions")

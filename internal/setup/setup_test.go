@@ -215,25 +215,21 @@ func TestCloudProviderRequiresKey(t *testing.T) {
 	}
 }
 
-func TestNativeProviderNoInput(t *testing.T) {
+func TestWindowsProviderDefaultURL(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("y")
 	s.Process("windows")
 
-	// StepAIKey for a native provider must be auto-action — the wizard
-	// must not prompt for a key or URL, since windows has neither.
-	info := s.Prompt()
-	if !info.IsAutoAction {
-		t.Fatal("StepAIKey should be IsAutoAction for windows")
-	}
-
+	// Windows now goes through the local-HTTP wizard branch, same as
+	// ollama / lmstudio — accept the default base URL pointing at the
+	// shim port.
 	s.Process("")
 	if s.CurrentStep != StepWriteSecrets {
 		t.Fatalf("expected StepWriteSecrets, got %d", s.CurrentStep)
 	}
-	if s.AIKey != "" {
-		t.Fatalf("expected empty AIKey for native provider, got %q", s.AIKey)
+	if s.AIKey != "http://localhost:8765" {
+		t.Fatalf("expected default windows shim URL, got %s", s.AIKey)
 	}
 	if !s.AIConfigured {
 		t.Fatal("expected AIConfigured")
