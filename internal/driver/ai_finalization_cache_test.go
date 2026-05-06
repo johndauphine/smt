@@ -414,8 +414,11 @@ func TestCacheFinalizationDDL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateFinalizationDDL after cache prime: %v", err)
 	}
-	if got != validatedDDL {
-		t.Errorf("cache-hit path returned wrong DDL:\n  got:  %q\n  want: %q", got, validatedDDL)
+	if got.DDL != validatedDDL {
+		t.Errorf("cache-hit path returned wrong DDL:\n  got:  %q\n  want: %q", got.DDL, validatedDDL)
+	}
+	if !got.FromCache {
+		t.Error("cache-hit response should have FromCache=true")
 	}
 	if c := calls.Load(); c != 0 {
 		t.Errorf("cache hit should not invoke AI; got %d AI calls", c)
@@ -428,8 +431,8 @@ func TestCacheFinalizationDDL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateFinalizationDDL after replacement: %v", err)
 	}
-	if got != replacementDDL {
-		t.Errorf("CacheFinalizationDDL did not replace prior value:\n  got:  %q\n  want: %q", got, replacementDDL)
+	if got.DDL != replacementDDL {
+		t.Errorf("CacheFinalizationDDL did not replace prior value:\n  got:  %q\n  want: %q", got.DDL, replacementDDL)
 	}
 }
 

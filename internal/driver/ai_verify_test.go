@@ -32,6 +32,12 @@ func TestParseVerifyResponse(t *testing.T) {
 		{"OK with em-dash and prose", "OK — every column preserves source semantics", true, false},
 		{"OK with leading whitespace", "  OK\n", true, false},
 		{"OK in markdown fence", "```\nOK\n```", true, false},
+		// Unicode-uppercase-byte-length sanity: ß uppercases to SS, expanding
+		// the byte length of any prefix containing it. With the previous
+		// substring-on-uppercase implementation, the recovered slice index
+		// would mis-align. Verify the line-based parser gets it right:
+		// "OK" stands alone on the first line, prose follows.
+		{"OK with non-ASCII prose", "OK\nWeißbier comment that uppercases to expand bytes", true, false},
 
 		// --- ISSUES paths ---
 		{"ISSUES with one line", "ISSUES\ncode: max_length — 20 vs 10", false, true},
@@ -234,6 +240,15 @@ func TestBuildVerifyTableDDLPrompt_PinsAuditCriteria(t *testing.T) {
 		"Example A",
 		"Example C — halved varchar",
 		"Example D — TZ semantics added",
+		// Codex P2 fix: examples must distinguish "Your response" from rationale
+		// so the model doesn't include explanatory prose in its output.
+		"Your response:",
+		"Rationale (not part of your output)",
+		// Codex P2 fix: REQUIRED TARGET COLUMN NAMES section so verifier
+		// doesn't false-positive on identifier normalization (e.g. PG
+		// lowercasing CamelCase → snake_case).
+		"REQUIRED TARGET COLUMN NAMES",
+		"casing/quoting/identifier-normalization difference between source and target name is NOT a failure",
 	} {
 		if !strings.Contains(prompt, needle) {
 			t.Errorf("verify prompt missing required phrase %q", needle)

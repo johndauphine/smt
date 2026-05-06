@@ -351,11 +351,13 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		// AI self-check between gen and exec (opt-in via migration.ai_verify).
 		// Audit the AI-returned form (aiDDL), not the Unlogged-rewritten exec
 		// form: the Unlogged rewrite is a writer-side post-process the auditor
-		// shouldn't see. On ISSUES, retry generation with the verifier's
-		// complaints fed back as PreviousAttempt with FromVerifier=true so the
-		// generator's prompt switches from "DB-error" framing to
-		// "auditor-feedback" framing.
-		if opts.AIVerify {
+		// shouldn't see. Skip verify on cache hits — cached DDL was previously
+		// verified-and-executed (modulo the documented "may be unverified if
+		// cached pre-flag-enable" caveat in TableDDLResponse.FromCache).
+		// On ISSUES, retry generation with the verifier's complaints fed back
+		// as PreviousAttempt with FromVerifier=true so the generator's prompt
+		// switches from "DB-error" framing to "auditor-feedback" framing.
+		if opts.AIVerify && !resp.FromCache {
 			vReq := driver.VerifyTableDDLRequest{
 				SourceDBType: req.SourceDBType, TargetDBType: req.TargetDBType,
 				SourceTable: req.SourceTable, TargetSchema: req.TargetSchema,

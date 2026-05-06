@@ -107,8 +107,14 @@ type TableOptions struct {
 	// audit prompt; if the auditor flags issues, the writer retries
 	// generation with the issue list fed in as PreviousAttempt.
 	// Defaults to false (opt-in via migration.ai_verify in config).
-	// Cache hits skip the verify call — cached DDL was already verified
-	// (and executed) on the run that populated the cache.
+	//
+	// Cache hits skip the verify call. Note that this presumes the cache
+	// was populated with verify ENABLED — entries cached before
+	// migration.ai_verify was turned on were never audited, but they are
+	// known to have executed successfully against the target. Users who
+	// want the older cache re-verified after enabling the flag should
+	// clear ~/.smt/type-cache.json. (Same shape as #44's prompt-version
+	// concern.)
 	AIVerify bool
 
 	// Note: Indexes and CHECK constraints are always created separately in Finalize,

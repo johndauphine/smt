@@ -358,7 +358,7 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		}
 
 		// AI self-check — see postgres equivalent for design.
-		if opts.AIVerify {
+		if opts.AIVerify && !resp.FromCache {
 			vReq := driver.VerifyTableDDLRequest{
 				SourceDBType: req.SourceDBType, TargetDBType: req.TargetDBType,
 				SourceTable: req.SourceTable, TargetSchema: req.TargetSchema,

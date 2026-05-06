@@ -1911,6 +1911,7 @@ func (m *AITypeMapper) parseTableDDLFromCache(cachedDDL string, sourceTable *Tab
 		CreateTableDDL: cachedDDL,
 		ColumnTypes:    columnTypes,
 		Notes:          "(from cache)",
+		FromCache:      true,
 	}, nil
 }
 
@@ -1993,12 +1994,12 @@ func stripMarkdownFence(s string) string {
 // gets a fresh chance with the corrective context. Cache writes happen
 // post-exec via CacheFinalizationDDL — never inside the mapper — so a DDL the
 // AI emits but the database rejects can't poison future runs.
-func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error) {
+func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (*FinalizationDDLResponse, error) {
 	if req.Table == nil {
-		return "", fmt.Errorf("Table is required")
+		return nil, fmt.Errorf("Table is required")
 	}
 	if req.TargetDBType == "" {
-		return "", fmt.Errorf("TargetDBType is required")
+		return nil, fmt.Errorf("TargetDBType is required")
 	}
 
 	var prompt string
@@ -2008,7 +2009,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 	switch req.Type {
 	case DDLTypeIndex:
 		if req.Index == nil {
-			return "", fmt.Errorf("Index is required for DDLTypeIndex")
+			return nil, fmt.Errorf("Index is required for DDLTypeIndex")
 		}
 		prompt = m.buildIndexDDLPrompt(req)
 		entityName = req.Index.Name
@@ -2018,7 +2019,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 
 	case DDLTypeForeignKey:
 		if req.ForeignKey == nil {
-			return "", fmt.Errorf("ForeignKey is required for DDLTypeForeignKey")
+			return nil, fmt.Errorf("ForeignKey is required for DDLTypeForeignKey")
 		}
 		prompt = m.buildForeignKeyDDLPrompt(req)
 		entityName = req.ForeignKey.Name
@@ -2028,7 +2029,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 
 	case DDLTypeCheckConstraint:
 		if req.CheckConstraint == nil {
-			return "", fmt.Errorf("CheckConstraint is required for DDLTypeCheckConstraint")
+			return nil, fmt.Errorf("CheckConstraint is required for DDLTypeCheckConstraint")
 		}
 		prompt = m.buildCheckConstraintDDLPrompt(req)
 		entityName = req.CheckConstraint.Name
@@ -2037,7 +2038,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 			req.CheckConstraint.Name, req.TargetSchema, req.Table.Name, req.TargetDBType)
 
 	default:
-		return "", fmt.Errorf("unknown DDL type: %s", req.Type)
+		return nil, fmt.Errorf("unknown DDL type: %s", req.Type)
 	}
 
 	cacheKey := m.finalizationCacheKey(req)
@@ -2048,14 +2049,14 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 			m.cacheMu.RUnlock()
 			logging.Debug("AI finalization DDL cache hit: %s on %s.%s",
 				entityName, req.TargetSchema, req.Table.Name)
-			return cached, nil
+			return &FinalizationDDLResponse{DDL: cached, FromCache: true}, nil
 		}
 		m.cacheMu.RUnlock()
 	}
 
 	result, err := m.CallAI(ctx, prompt)
 	if err != nil {
-		return "", fmt.Errorf("AI DDL generation failed for %s.%s: %w",
+		return nil, fmt.Errorf("AI DDL generation failed for %s.%s: %w",
 			req.Table.Name, entityName, err)
 	}
 
@@ -2065,22 +2066,22 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 	// Strip fences first so a fenced NOT_RETRYABLE marker is still detected.
 	ddl := stripMarkdownFence(result)
 	if abort, reason := classifyRetryResponse(ddl); abort {
-		return "", WrapNotRetryable(reason)
+		return nil, WrapNotRetryable(reason)
 	}
 
 	// Validate response starts with expected prefix
 	upperDDL := strings.ToUpper(ddl)
 	if req.Type == DDLTypeIndex {
 		if !strings.HasPrefix(upperDDL, "CREATE") || !strings.Contains(upperDDL, "INDEX") {
-			return "", fmt.Errorf("response does not contain valid CREATE INDEX statement: %s", truncateString(ddl, 100))
+			return nil, fmt.Errorf("response does not contain valid CREATE INDEX statement: %s", truncateString(ddl, 100))
 		}
 	} else if !strings.HasPrefix(upperDDL, validatePrefix) {
-		return "", fmt.Errorf("response does not contain valid %s statement: %s", validatePrefix, truncateString(ddl, 100))
+		return nil, fmt.Errorf("response does not contain valid %s statement: %s", validatePrefix, truncateString(ddl, 100))
 	}
 
 	logging.Debug("AI generated DDL:\n%s", ddl)
 
-	return ddl, nil
+	return &FinalizationDDLResponse{DDL: ddl, FromCache: false}, nil
 }
 
 // finalizationCacheKey builds a cache key for finalization DDL (index / FK /

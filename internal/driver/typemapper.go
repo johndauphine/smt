@@ -200,6 +200,16 @@ type TableDDLResponse struct {
 
 	// Notes contains any AI-generated notes about the mapping decisions.
 	Notes string
+
+	// FromCache is true when the DDL came from the on-disk cache rather
+	// than a fresh AI call. The writer uses this to skip the AI self-check
+	// pass on cache hits — cached DDL was previously verified-and-executed,
+	// so re-verifying would just double cost without catching anything.
+	// The skip-on-cache-hit semantic for verify presumes the cache was
+	// populated with verify enabled; entries cached pre-verify-enable
+	// won't be re-verified until the cache is cleared. Documented in
+	// migration.ai_verify config.
+	FromCache bool
 }
 
 // TypeInfo contains metadata about a column type.
@@ -227,10 +237,19 @@ type TypeInfo struct {
 	SampleValues []string
 }
 
+// FinalizationDDLResponse contains the generated DDL plus cache-hit metadata
+// (mirrors TableDDLResponse). The cache-hit flag lets the writer skip the AI
+// self-check pass on cache hits, since cached DDL was previously verified
+// and executed.
+type FinalizationDDLResponse struct {
+	DDL       string
+	FromCache bool
+}
+
 // FinalizationDDLMapper handles AI-driven DDL generation for finalization phase.
 type FinalizationDDLMapper interface {
 	// GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints.
-	GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error)
+	GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (*FinalizationDDLResponse, error)
 
 	// CacheFinalizationDDL stores a known-good DDL for the request, replacing
 	// any prior cached value. This is the ONLY entry point that writes to the

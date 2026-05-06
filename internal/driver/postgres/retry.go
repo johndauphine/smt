@@ -85,7 +85,7 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 				attempt, maxRetries, label, lastErr)
 		}
 
-		ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, req)
+		resp, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, req)
 		if err != nil {
 			// AI examined the prior error and classified it as non-retryable.
 			// Surface the original DB error — that's what the user can act on.
@@ -96,9 +96,12 @@ func (w *Writer) retryFinalize(ctx context.Context, req driver.FinalizationDDLRe
 			return fmt.Errorf("AI DDL generation failed for %s: %w", label, err)
 		}
 
+		ddl := resp.DDL
+
 		// AI self-check between gen and exec (opt-in via opts.AIVerify).
+		// Skip on cache hits — cached DDL was previously verified-and-executed.
 		// On ISSUES, retry generation with the verifier's complaints fed in.
-		if opts.AIVerify {
+		if opts.AIVerify && !resp.FromCache {
 			vReq := driver.VerifyFinalizationDDLRequest{
 				Type: req.Type, SourceDBType: req.SourceDBType, TargetDBType: req.TargetDBType,
 				Table: req.Table, TargetSchema: req.TargetSchema, TargetContext: req.TargetContext,

@@ -100,39 +100,56 @@ func (m *AITypeMapper) VerifyFinalizationDDL(ctx context.Context, req VerifyFina
 //   - Trailing prose after OK ("OK\n\nNotes: ..." passes)
 //   - Missing ISSUES header but lines look like issues -> treat as ISSUES
 //   - Wholly malformed responses -> fail-closed with raw text as the issue
+//
+// Implementation note: scan lines and use strings.EqualFold for the ISSUES
+// header detection. We previously substring-searched on strings.ToUpper(text)
+// and then sliced the original text by the matched index, but ToUpper can
+// change byte length on some Unicode inputs (e.g. ß -> SS), so the index
+// could mis-align with the original byte-string. Line-based scanning avoids
+// that class of bug entirely.
 func parseVerifyResponse(response string) *VerifyResult {
 	trimmed := strings.TrimSpace(stripMarkdownFence(response))
 	if trimmed == "" {
 		return &VerifyResult{OK: false, Issues: []string{"verifier returned empty response"}}
 	}
 
-	// First line OK (any case, optional trailing punctuation/prose) → pass.
-	firstLine := trimmed
-	if i := strings.Index(trimmed, "\n"); i >= 0 {
-		firstLine = trimmed[:i]
-	}
-	firstUpper := strings.ToUpper(strings.TrimSpace(firstLine))
-	// Match OK as a full word at the start so "OK" / "OK." / "OK — looks fine"
-	// all pass, but "OKAY" doesn't accidentally match.
-	if firstUpper == "OK" || strings.HasPrefix(firstUpper, "OK ") ||
-		strings.HasPrefix(firstUpper, "OK.") || strings.HasPrefix(firstUpper, "OK,") ||
-		strings.HasPrefix(firstUpper, "OK:") || strings.HasPrefix(firstUpper, "OK—") ||
-		strings.HasPrefix(firstUpper, "OK-") {
+	lines := strings.Split(trimmed, "\n")
+
+	// First-line OK detection. Match "OK" as a full word at the start so
+	// "OK" / "OK." / "OK — looks fine" all pass, but "OKAY" doesn't.
+	firstLine := strings.TrimSpace(lines[0])
+	if isOKLine(firstLine) {
 		return &VerifyResult{OK: true}
 	}
 
-	// Look for ISSUES header (any line, any case).
-	upper := strings.ToUpper(trimmed)
-	if idx := strings.Index(upper, "ISSUES"); idx >= 0 {
-		// Lines after the ISSUES header become the issue list.
-		body := trimmed[idx:]
-		if nl := strings.Index(body, "\n"); nl >= 0 {
-			body = body[nl+1:]
-		} else {
-			body = ""
+	// Look for an ISSUES header line (case-insensitive, the line must START
+	// with the word ISSUES — no substring matches inside other content).
+	headerIdx := -1
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		// Allow "ISSUES", "ISSUES:", or the literal followed by content on
+		// the same line — but the line must start with the keyword.
+		if t == "" {
+			continue
 		}
+		// Find the first whitespace/punctuation; check the leading token.
+		token := t
+		for j := 0; j < len(token); j++ {
+			c := token[j]
+			if c == ' ' || c == '\t' || c == ':' || c == ',' || c == '.' {
+				token = token[:j]
+				break
+			}
+		}
+		if strings.EqualFold(token, "ISSUES") {
+			headerIdx = i
+			break
+		}
+	}
+
+	if headerIdx >= 0 {
 		issues := []string{}
-		for _, line := range strings.Split(body, "\n") {
+		for _, line := range lines[headerIdx+1:] {
 			line = strings.TrimSpace(line)
 			line = strings.TrimPrefix(line, "- ")
 			line = strings.TrimPrefix(line, "* ")
@@ -142,7 +159,6 @@ func parseVerifyResponse(response string) *VerifyResult {
 			issues = append(issues, line)
 		}
 		if len(issues) == 0 {
-			// ISSUES header with no body — still a fail, but no detail.
 			issues = []string{"verifier reported ISSUES with no enumerated detail"}
 		}
 		return &VerifyResult{OK: false, Issues: issues}
@@ -154,6 +170,31 @@ func parseVerifyResponse(response string) *VerifyResult {
 		OK:     false,
 		Issues: []string{fmt.Sprintf("verifier response did not match OK/ISSUES contract: %s", truncateString(trimmed, 300))},
 	}
+}
+
+// isOKLine reports whether a line is the literal OK verdict (any case)
+// optionally followed by punctuation or prose. "OKAY" is rejected — only
+// the two-character word.
+func isOKLine(line string) bool {
+	if !strings.HasPrefix(strings.ToUpper(line), "OK") {
+		return false
+	}
+	// Verify "OK" is followed by end-of-line, whitespace, or punctuation —
+	// not by a letter (which would make it OKAY, OKEYDOKEY, etc.).
+	if len(line) == 2 {
+		return true
+	}
+	c := line[2]
+	switch c {
+	case ' ', '\t', '.', ',', ':', ';', '!', '?', '-':
+		return true
+	}
+	// Em-dash / en-dash are multi-byte; accept any non-ASCII byte after OK
+	// as a separator (covers — and –).
+	if c >= 0x80 {
+		return true
+	}
+	return false
 }
 
 // buildVerifyTableDDLPrompt asks the AI to compare a proposed CREATE TABLE
@@ -173,6 +214,20 @@ func (m *AITypeMapper) buildVerifyTableDDLPrompt(req VerifyTableDDLRequest) stri
 	sb.WriteString(fmt.Sprintf("target_dialect: %s\n", req.TargetDBType))
 	if req.TargetSchema != "" {
 		sb.WriteString(fmt.Sprintf("target_schema: %s\n", req.TargetSchema))
+	}
+	sb.WriteString("\n")
+
+	// REQUIRED TARGET COLUMN NAMES — the generator was instructed to use these
+	// exact names in the DDL it produced (e.g. PG lowercases identifiers via
+	// driver.NormalizeIdentifier). Without showing the mapping, the auditor
+	// would see source `Customer ID` and target `customer_id` and could
+	// falsely flag a missing/changed column. Hand the auditor the same
+	// authoritative source→target name table the generator received.
+	sb.WriteString("=== REQUIRED TARGET COLUMN NAMES ===\n")
+	sb.WriteString("The generator was instructed to use these exact target column names. A casing/quoting/identifier-normalization difference between source and target name is NOT a failure — only flag when a column is missing or its attributes diverge.\n")
+	for _, col := range req.SourceTable.Columns {
+		tgt := targetIdentifier(col.Name, req.TargetDBType)
+		sb.WriteString(fmt.Sprintf("  %s -> %s\n", col.Name, tgt))
 	}
 	sb.WriteString("\n")
 
@@ -358,28 +413,35 @@ func writeVerifyOutputFormat(sb *strings.Builder) {
 	sb.WriteString("- Do NOT discuss what you are doing, what passes, or alternatives. Only enumerate failures.\n\n")
 
 	sb.WriteString("=== EXAMPLES ===\n")
+	sb.WriteString("Each example shows the inputs, the EXACT response you must emit, and (after the response) a one-line rationale that is NOT part of the response. Your actual output is only the lines under \"Your response:\" — never the rationale.\n\n")
+
 	sb.WriteString("Example A — all attributes preserved:\n")
 	sb.WriteString("  Source: code varchar(20) NOT NULL\n")
 	sb.WriteString("  Target: code VARCHAR(20) NOT NULL\n")
-	sb.WriteString("  Output: OK\n\n")
+	sb.WriteString("  Your response:\n")
+	sb.WriteString("    OK\n")
+	sb.WriteString("  Rationale (not part of your output): every attribute matches.\n\n")
 
 	sb.WriteString("Example B — equivalent dialect translation:\n")
 	sb.WriteString("  Source: created_at datetime2 NOT NULL DEFAULT (getutcdate())\n")
 	sb.WriteString("  Target: created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP\n")
-	sb.WriteString("  Output: OK\n")
-	sb.WriteString("  (datetime2 is TZ-naive, TIMESTAMP without time zone is TZ-naive — match. GETUTCDATE ≡ CURRENT_TIMESTAMP.)\n\n")
+	sb.WriteString("  Your response:\n")
+	sb.WriteString("    OK\n")
+	sb.WriteString("  Rationale (not part of your output): datetime2 is TZ-naive, PG TIMESTAMP is TZ-naive — match. GETUTCDATE ≡ CURRENT_TIMESTAMP per the ACCEPTABLE list.\n\n")
 
 	sb.WriteString("Example C — halved varchar (real failure):\n")
 	sb.WriteString("  Source: code varchar(20) NOT NULL\n")
 	sb.WriteString("  Target: code VARCHAR(10) NOT NULL\n")
-	sb.WriteString("  Output:\n")
+	sb.WriteString("  Your response:\n")
 	sb.WriteString("    ISSUES\n")
-	sb.WriteString("    code: max_length — 20 vs 10\n\n")
+	sb.WriteString("    code: max_length — 20 vs 10\n")
+	sb.WriteString("  Rationale (not part of your output): max_length=20 must produce VARCHAR(20).\n\n")
 
 	sb.WriteString("Example D — TZ semantics added (real failure):\n")
 	sb.WriteString("  Source: created_at datetime2 NOT NULL\n")
 	sb.WriteString("  Target: created_at TIMESTAMP WITH TIME ZONE NOT NULL\n")
-	sb.WriteString("  Output:\n")
+	sb.WriteString("  Your response:\n")
 	sb.WriteString("    ISSUES\n")
-	sb.WriteString("    created_at: tz-awareness — TZ-naive (datetime2) vs TZ-aware (timestamp with time zone)\n\n")
+	sb.WriteString("    created_at: tz-awareness — TZ-naive (datetime2) vs TZ-aware (timestamp with time zone)\n")
+	sb.WriteString("  Rationale (not part of your output): TZ class flipped naive_dt → tzaware_dt.\n\n")
 }
