@@ -116,6 +116,10 @@ var KnownProviders = map[string]struct {
 	"gemini":    {ProviderTypeCloud, "https://generativelanguage.googleapis.com"},
 	"ollama":    {ProviderTypeLocal, "http://localhost:11434"},
 	"lmstudio":  {ProviderTypeLocal, "http://localhost:1234"},
+	// Windows AI runs on-device via the Windows Copilot Runtime (Phi Silica
+	// on Copilot+ PCs). It is a native API rather than an HTTP endpoint, so
+	// it has no DefaultURL — the dispatch path is provider-specific.
+	"windows": {ProviderTypeLocal, ""},
 }
 
 // DefaultModels maps providers to their default models.
@@ -131,6 +135,7 @@ var DefaultModels = map[string]string{
 	"gemini":    "gemini-2.0-flash",
 	"ollama":    "llama3",
 	"lmstudio":  "local-model",
+	"windows":   "phi-silica",
 }
 
 var (
@@ -581,6 +586,13 @@ ai:
       model: "local-model"
       # context_window: 8192  # optional, configure based on your model
       # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
+
+    # Windows AI (on-device). Runs Phi Silica via the Windows Copilot Runtime
+    # on Copilot+ PCs. No API key, no base_url — uses the native WinRT API.
+    # Requires Windows 11 with the Windows AI components installed.
+    windows:
+      model: "phi-silica"
+      # max_tokens: 16000  # optional, on-device output cap
 
 encryption:
   master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32

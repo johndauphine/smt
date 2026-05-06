@@ -577,6 +577,8 @@ func TestIsValidAIProvider_CaseInsensitive(t *testing.T) {
 		{"GEMINI", true},
 		{"ollama", true},
 		{"lmstudio", true},
+		{"windows", true},
+		{"Windows", true},
 		{"invalid", false},
 		{"gpt", false},
 		{"", false},
