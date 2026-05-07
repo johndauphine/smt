@@ -51,6 +51,15 @@ func CompareColumns(src, tgt []Column, srcDialect, tgtDialect string) []ColumnDe
 		tgtByName[strings.ToLower(c.Name)] = c
 	}
 
+	// Iteration is source-driven: for each source column we look up the
+	// matching target. The inverse — target columns not present in the
+	// source — is intentionally NOT flagged. SMT's contract is "the target
+	// schema is derived from the source," so an extra target column would
+	// only happen if the AI hallucinated, in which case the column likely
+	// has wrong attributes that other criteria already catch (or the DDL
+	// will fail to exec). Asymmetric on purpose; symmetric checking would
+	// flag idempotent re-runs where the target already has columns from a
+	// prior partial run.
 	var deltas []ColumnDelta
 	for _, s := range src {
 		t, ok := tgtByName[strings.ToLower(s.Name)]
@@ -215,12 +224,12 @@ func cmpTZClass(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 // mechanism, expressed via IsIdentity rather than DefaultExpression. We skip
 // the default check entirely when either side is an identity column; the
 // identity check (cmpIdentity) covers that semantic.
-func cmpDefaultClass(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
+func cmpDefaultClass(src, tgt Column, _, _ string) *ColumnDelta {
 	if src.IsIdentity || tgt.IsIdentity {
 		return nil
 	}
-	srcClass := defaultExpressionClass(srcDialect, src.DefaultExpression)
-	tgtClass := defaultExpressionClass(tgtDialect, tgt.DefaultExpression)
+	srcClass := defaultExpressionClass(src.DefaultExpression)
+	tgtClass := defaultExpressionClass(tgt.DefaultExpression)
 	if srcClass == tgtClass {
 		return nil
 	}
@@ -347,20 +356,35 @@ func dataTypeClass(dialect string, c Column) string {
 //
 // Returns:
 //   - ""              — no default (empty expression)
-//   - "current_time"  — any current-timestamp variant
+//   - "current_dt"    — function returning current date+time (timestamp class).
+//     Includes NOW() / CURRENT_TIMESTAMP / GETDATE() /
+//     GETUTCDATE() / SYSDATETIME() / SYSDATETIMEOFFSET() /
+//     SYSTIMESTAMP / LOCALTIMESTAMP. TZ-awareness of the
+//     function itself is dialect-defined; the column's
+//     TZ-awareness is checked separately via cmpTZClass
+//     on data_type, so we don't subdivide here.
+//   - "current_date"  — function returning today's date only (CURRENT_DATE).
+//     MUST NOT be conflated with current_dt.
+//   - "current_t"     — function returning current time-only (CURRENT_TIME,
+//     LOCALTIME). MUST NOT be conflated with current_dt.
 //   - "uuid_gen"      — any UUID generator variant
 //   - "true"/"false"  — boolean literal (incl. ((0))/((1)) MSSQL stripping)
 //   - "null"          — explicit NULL default
 //   - constant<N>     — numeric literal (normalized to the integer/float)
 //   - constant'<S>'   — string literal (normalized to the unquoted content)
 //   - other:<expr>    — anything we can't classify; comparison falls back to
-//     lexical equality on the normalized expression
+//     lexical equality on the normalized expression. CAVEAT: the bare-word
+//     fallback below catches any pure [a-z0-9_]+ identifier as a string
+//     constant — typos like "sysdatime" silently land in constant'sysdatime'
+//     instead of "other:sysdatime", which can mask real misclassifications.
+//     False-positive risk is low for real-world defaults but nonzero.
 //
-// Two empty results compare equal (no default on either side). Two
-// "current_time" results compare equal regardless of which keyword was used.
-// "other:..." results compare equal iff the normalized expressions match
-// exactly — this is the safety floor for unknown defaults.
-func defaultExpressionClass(_, expr string) string {
+// Two empty results compare equal (no default on either side). Two same-
+// class results compare equal regardless of dialect. Cross-class never
+// matches (e.g. current_date ≠ current_dt — that would be a real fidelity
+// loss). "other:..." results compare equal iff the normalized expressions
+// match exactly — safety floor for unknown defaults.
+func defaultExpressionClass(expr string) string {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		return ""
@@ -393,15 +417,30 @@ func defaultExpressionClass(_, expr string) string {
 		norm = norm[1:]
 	}
 
-	// Current-timestamp family: any of these forms (with or without empty
-	// arglists) is one class. Match the literal token; arg-bearing variants
-	// like dateadd(...) are NOT in this class.
+	// "Now-style" function families. Split into three classes by what the
+	// function actually returns: full date+time (current_dt), date-only
+	// (current_date), or time-only (current_t). The single class the
+	// pre-#55-review code had ("current_time") silently equated all three —
+	// so a source `DEFAULT CURRENT_DATE` would match a target `DEFAULT
+	// CURRENT_TIMESTAMP`, hiding a real fidelity loss. This split is
+	// explicit and keeps cross-dialect translations honest.
 	switch norm {
+	// Full date+time. Includes both TZ-naive and TZ-aware variants — the
+	// function's own TZ-awareness is dialect-defined and not load-bearing
+	// here; the column's TZ class is checked separately via cmpTZClass on
+	// data_type. What matters for default class is that "this column gets a
+	// fresh date+time on insert" matches across dialects.
 	case "current_timestamp", "now()", "now",
 		"getdate()", "getdate", "getutcdate()", "getutcdate",
-		"sysdatetime()", "sysdatetime", "sysdatetimeoffset()", "sysdatetimeoffset",
-		"systimestamp", "current_date", "current_time", "localtimestamp", "localtime":
-		return "current_time"
+		"sysdatetime()", "sysdatetime",
+		"sysdatetimeoffset()", "sysdatetimeoffset",
+		"systimestamp",
+		"localtimestamp", "localtimestamp()":
+		return "current_dt"
+	case "current_date", "current_date()":
+		return "current_date"
+	case "current_time", "current_time()", "localtime", "localtime()":
+		return "current_t"
 	case "newid()", "newid",
 		"gen_random_uuid()", "gen_random_uuid",
 		"uuid()", "uuid",

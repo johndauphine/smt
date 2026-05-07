@@ -63,79 +63,124 @@ func TestTZClass(t *testing.T) {
 // AI-auditor era rules called PASS.
 func TestDefaultExpressionClass(t *testing.T) {
 	cases := []struct {
-		name, dialect, expr, want string
+		name, expr, want string
 	}{
 		// Empty defaults — no default on either side ⇒ equal.
-		{"empty", "postgres", "", ""},
-		{"whitespace only", "mssql", "   ", ""},
+		{"empty", "", ""},
+		{"whitespace only", "   ", ""},
 
-		// current-timestamp family — every variant lands in one class.
-		{"GETUTCDATE", "mssql", "GETUTCDATE()", "current_time"},
-		{"GETDATE", "mssql", "GETDATE()", "current_time"},
-		{"SYSDATETIMEOFFSET", "mssql", "(SYSDATETIMEOFFSET())", "current_time"},
-		{"CURRENT_TIMESTAMP", "postgres", "CURRENT_TIMESTAMP", "current_time"},
-		{"now()", "postgres", "now()", "current_time"},
-		{"NOW()", "mysql", "NOW()", "current_time"},
-		// MSSQL outer-paren stripping doesn't apply here (functions keep
-		// their inner parens) — the lookup is on the bare keyword form.
+		// current_dt — full date+time. Every "now"-style function returning
+		// a timestamp value lands here regardless of TZ-awareness of the
+		// function (the column's TZ is checked separately via cmpTZClass).
+		{"GETUTCDATE", "GETUTCDATE()", "current_dt"},
+		{"GETDATE", "GETDATE()", "current_dt"},
+		{"SYSDATETIME", "SYSDATETIME()", "current_dt"},
+		{"SYSDATETIMEOFFSET", "(SYSDATETIMEOFFSET())", "current_dt"},
+		{"SYSTIMESTAMP", "SYSTIMESTAMP", "current_dt"},
+		{"CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP", "current_dt"},
+		{"LOCALTIMESTAMP", "LOCALTIMESTAMP", "current_dt"},
+		{"now()", "now()", "current_dt"},
+		{"NOW()", "NOW()", "current_dt"},
+
+		// current_date — date-only. MUST be a separate class so a source
+		// `DEFAULT CURRENT_DATE` doesn't silently match a target `DEFAULT
+		// CURRENT_TIMESTAMP` (real fidelity loss the pre-#55-review
+		// monolithic class hid). See the negative pins in
+		// TestDefaultExpressionClass_DistinctNowFamilies for the proof.
+		{"CURRENT_DATE", "CURRENT_DATE", "current_date"},
+		{"current_date()", "current_date()", "current_date"},
+
+		// current_t — time-only.
+		{"CURRENT_TIME", "CURRENT_TIME", "current_t"},
+		{"LOCALTIME", "LOCALTIME", "current_t"},
+		{"LOCALTIME()", "LOCALTIME()", "current_t"},
 
 		// uuid generator family.
-		{"NEWID", "mssql", "(NEWID())", "uuid_gen"},
-		{"gen_random_uuid", "postgres", "gen_random_uuid()", "uuid_gen"},
-		{"UUID()", "mysql", "UUID()", "uuid_gen"},
-		{"NEWSEQUENTIALID", "mssql", "newsequentialid()", "uuid_gen"},
+		{"NEWID", "(NEWID())", "uuid_gen"},
+		{"gen_random_uuid", "gen_random_uuid()", "uuid_gen"},
+		{"UUID()", "UUID()", "uuid_gen"},
+		{"NEWSEQUENTIALID", "newsequentialid()", "uuid_gen"},
 
 		// Boolean / bit literal class — MSSQL ((0)) ≡ pg false, ((1)) ≡ pg true.
-		{"MSSQL ((0))", "mssql", "((0))", "false"},
-		{"MSSQL ((1))", "mssql", "((1))", "true"},
-		{"PG false", "postgres", "false", "false"},
-		{"PG true", "postgres", "true", "true"},
-		{"bare 0", "postgres", "0", "false"},
-		{"bare 1", "postgres", "1", "true"},
+		{"MSSQL ((0))", "((0))", "false"},
+		{"MSSQL ((1))", "((1))", "true"},
+		{"PG false", "false", "false"},
+		{"PG true", "true", "true"},
+		{"bare 0", "0", "false"},
+		{"bare 1", "1", "true"},
 
 		// Numeric constants beyond 0/1 — pinned by exact value.
-		{"constant 42", "postgres", "42", "constant42"},
-		{"constant -1", "postgres", "-1", "constant-1"},
-		{"constant 3.14", "postgres", "3.14", "constant3.14"},
+		{"constant 42", "42", "constant42"},
+		{"constant -1", "-1", "constant-1"},
+		{"constant 3.14", "3.14", "constant3.14"},
 
 		// String literals — MSSQL N-prefix and outer parens stripped.
-		{"MSSQL (('pending'))", "mssql", "(('pending'))", "constant'pending'"},
-		{"MSSQL N'foo'", "mssql", "N'foo'", "constant'foo'"},
-		{"PG 'pending'", "postgres", "'pending'", "constant'pending'"},
+		{"MSSQL (('pending'))", "(('pending'))", "constant'pending'"},
+		{"MSSQL N'foo'", "N'foo'", "constant'foo'"},
+		{"PG 'pending'", "'pending'", "constant'pending'"},
 
 		// NULL default.
-		{"NULL", "postgres", "NULL", "null"},
-		{"null lowercase", "postgres", "null", "null"},
+		{"NULL", "NULL", "null"},
+		{"null lowercase", "null", "null"},
 
 		// PG cast-suffix stripping — `'foo'::text`, `'{}'::jsonb`,
 		// `gen_random_uuid()::char(36)` all classify as if the cast weren't
 		// there. PG's introspection emits explicit casts on most defaults;
 		// the cast doesn't change semantic class. Without this rule, every
 		// PG default is "other:..." and never matches a non-PG counterpart.
-		{"PG text cast", "postgres", "'pending'::text", "constant'pending'"},
-		{"PG jsonb empty", "postgres", "'{}'::jsonb", "constant'{}'"},
-		{"PG uuid_gen with cast", "postgres", "gen_random_uuid()::char(36)", "uuid_gen"},
-		{"PG numeric cast", "postgres", "0::integer", "false"},
+		{"PG text cast", "'pending'::text", "constant'pending'"},
+		{"PG jsonb empty", "'{}'::jsonb", "constant'{}'"},
+		{"PG uuid_gen with cast", "gen_random_uuid()::char(36)", "uuid_gen"},
+		{"PG numeric cast", "0::integer", "false"},
 
 		// MySQL bare-word defaults — information_schema returns ENUM and
 		// string defaults UNQUOTED. The bare-word rule normalizes them to
 		// the same class as a quoted-string default on the other side.
-		{"MySQL bare ENUM value", "mysql", "draft", "constant'draft'"},
-		{"MySQL bare SET enumerator", "mysql", "billing", "constant'billing'"},
-		{"MySQL bare snake_case", "mysql", "full_time", "constant'full_time'"},
+		{"MySQL bare ENUM value", "draft", "constant'draft'"},
+		{"MySQL bare SET enumerator", "billing", "constant'billing'"},
+		{"MySQL bare snake_case", "full_time", "constant'full_time'"},
 
 		// Unknown expression falls into "other:" with normalized text. Two
 		// matching unknowns are equal under this scheme — that's the safety
 		// floor for defaults we haven't classified.
-		{"unknown function", "postgres", "FOO(bar, 1)", "other:foo(bar, 1)"},
-		{"normalized parens", "mssql", "((CONVERT(int, 42)))", "other:convert(int, 42)"},
+		{"unknown function", "FOO(bar, 1)", "other:foo(bar, 1)"},
+		{"normalized parens", "((CONVERT(int, 42)))", "other:convert(int, 42)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := defaultExpressionClass(tc.dialect, tc.expr)
+			got := defaultExpressionClass(tc.expr)
 			if got != tc.want {
-				t.Errorf("defaultExpressionClass(%q, %q) = %q, want %q",
-					tc.dialect, tc.expr, got, tc.want)
+				t.Errorf("defaultExpressionClass(%q) = %q, want %q",
+					tc.expr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDefaultExpressionClass_DistinctNowFamilies pins the negative side of
+// the now-family split: CURRENT_DATE, CURRENT_TIMESTAMP, and CURRENT_TIME
+// MUST NOT classify equally. The pre-#55-review monolithic class lumped
+// them all into "current_time", which would silently allow a source
+// `DEFAULT CURRENT_DATE` to translate to a target `DEFAULT
+// CURRENT_TIMESTAMP` — losing the date-only semantics. Each pair below
+// asserts the classes diverge.
+func TestDefaultExpressionClass_DistinctNowFamilies(t *testing.T) {
+	pairs := []struct {
+		a, b string
+	}{
+		{"CURRENT_DATE", "CURRENT_TIMESTAMP"},
+		{"CURRENT_DATE", "GETDATE()"},
+		{"CURRENT_DATE", "now()"},
+		{"CURRENT_TIME", "CURRENT_TIMESTAMP"},
+		{"CURRENT_TIME", "LOCALTIMESTAMP"},
+		{"CURRENT_TIME", "CURRENT_DATE"},
+	}
+	for _, p := range pairs {
+		t.Run(p.a+"_vs_"+p.b, func(t *testing.T) {
+			ac := defaultExpressionClass(p.a)
+			bc := defaultExpressionClass(p.b)
+			if ac == bc {
+				t.Errorf("expected distinct classes, both produced %q (a=%q, b=%q)", ac, p.a, p.b)
 			}
 		})
 	}
@@ -147,33 +192,30 @@ func TestDefaultExpressionClass(t *testing.T) {
 // criterion 6 check pass on real cross-dialect translations.
 func TestDefaultExpressionClass_CrossDialectEquivalence(t *testing.T) {
 	pairs := []struct {
-		name            string
-		srcDialect, src string
-		tgtDialect, tgt string
+		name, src, tgt string
 	}{
-		{"GETUTCDATE ≡ CURRENT_TIMESTAMP", "mssql", "(getutcdate())", "postgres", "CURRENT_TIMESTAMP"},
-		{"GETDATE ≡ NOW()", "mssql", "(getdate())", "mysql", "NOW()"},
-		{"SYSDATETIMEOFFSET ≡ now()", "mssql", "(sysdatetimeoffset())", "postgres", "now()"},
-		{"NEWID ≡ gen_random_uuid", "mssql", "(newid())", "postgres", "gen_random_uuid()"},
-		{"NEWID ≡ UUID()", "mssql", "(newid())", "mysql", "UUID()"},
-		{"((0)) ≡ false", "mssql", "((0))", "postgres", "false"},
-		{"((1)) ≡ true", "mssql", "((1))", "postgres", "true"},
-		{"(('pending')) ≡ 'pending'", "mssql", "(('pending'))", "postgres", "'pending'"},
+		{"GETUTCDATE ≡ CURRENT_TIMESTAMP", "(getutcdate())", "CURRENT_TIMESTAMP"},
+		{"GETDATE ≡ NOW()", "(getdate())", "NOW()"},
+		{"SYSDATETIMEOFFSET ≡ now()", "(sysdatetimeoffset())", "now()"},
+		{"NEWID ≡ gen_random_uuid", "(newid())", "gen_random_uuid()"},
+		{"NEWID ≡ UUID()", "(newid())", "UUID()"},
+		{"((0)) ≡ false", "((0))", "false"},
+		{"((1)) ≡ true", "((1))", "true"},
+		{"(('pending')) ≡ 'pending'", "(('pending'))", "'pending'"},
 
-		// New for the matrix-v6 failures (this PR's iteration):
 		// MySQL bare-word ENUM default ≡ PG quoted string ≡ MSSQL N-quoted.
-		{"mysql draft ≡ pg 'draft'", "mysql", "draft", "postgres", "'draft'"},
-		{"mysql full_time ≡ pg 'full_time'::text", "mysql", "full_time", "postgres", "'full_time'::text"},
-		{"mysql usd ≡ mssql N'USD'", "mysql", "usd", "mssql", "N'USD'"},
+		{"mysql draft ≡ pg 'draft'", "draft", "'draft'"},
+		{"mysql full_time ≡ pg 'full_time'::text", "full_time", "'full_time'::text"},
+		{"mysql usd ≡ mssql N'USD'", "usd", "N'USD'"},
 
 		// PG cast wrappings ≡ unwrapped equivalent on other dialects.
-		{"pg '{}'::jsonb ≡ mssql '{}' ", "postgres", "'{}'::jsonb", "mssql", "'{}'"},
-		{"pg gen_random_uuid()::char(36) ≡ mysql UUID()", "postgres", "gen_random_uuid()::char(36)", "mysql", "UUID()"},
+		{"pg '{}'::jsonb ≡ mssql '{}' ", "'{}'::jsonb", "'{}'"},
+		{"pg gen_random_uuid()::char(36) ≡ mysql UUID()", "gen_random_uuid()::char(36)", "UUID()"},
 	}
 	for _, p := range pairs {
 		t.Run(p.name, func(t *testing.T) {
-			srcClass := defaultExpressionClass(p.srcDialect, p.src)
-			tgtClass := defaultExpressionClass(p.tgtDialect, p.tgt)
+			srcClass := defaultExpressionClass(p.src)
+			tgtClass := defaultExpressionClass(p.tgt)
 			if srcClass != tgtClass {
 				t.Errorf("class mismatch: %s → %q vs %s → %q", p.src, srcClass, p.tgt, tgtClass)
 			}
