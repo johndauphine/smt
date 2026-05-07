@@ -9,17 +9,36 @@ import (
 )
 
 // VerifyTableDDL audits a generated CREATE TABLE statement against the
-// source introspection facts. The auditor checks six per-column criteria:
-// max_length / precision / scale, nullability, identity, timezone-awareness,
-// default-class, and data_type semantic equivalence.
+// source introspection facts. The flow has two stages:
 //
-// Phase 1 uses the same model for generation and verification — same
-// dispatch path, same provider settings. Cross-model verify is Phase 2.
+//  1. AI parse — the proposed target DDL is sent to the AI with a parser
+//     prompt that returns Column[] JSON. This is the AI's only job; it does
+//     not judge or compare.
+//  2. Deterministic compare — Go-side CompareColumns runs the six
+//     per-column criteria (max_length, precision/scale, nullability,
+//     identity, TZ class, default class) against the source. Any deltas
+//     become Issues in the returned VerifyResult.
 //
-// On a malformed AI response (neither parseable as OK nor as ISSUES) the
-// parser fails-closed: returns OK=false with the raw response as the issue.
-// The writer then retries generation, which is safer than letting possibly-
-// bad DDL slip through on an unparseable verdict.
+// The split eliminates the prose-drift / lexical-vs-class failure modes the
+// free-text auditor (#47, #51, #53) hit at multi-table cross-dialect scale —
+// see #55. The AI's parse step is what LLMs are best at; the comparison is
+// what they were worst at, so it moves to deterministic Go.
+//
+// Failure handling:
+//   - AI parse error (network / API / etc.) → returned as error; writer
+//     surfaces and retries generation.
+//   - Bad JSON / zero columns from the AI → returned as a verify-fail
+//     verdict with the parse error in Issues. The writer's retry loop will
+//     re-prompt with the parse failure as PreviousAttempt.Error, the same
+//     way it would for an exec-fail or auditor-fail in the legacy path.
+//   - Comparison deltas → verdict.OK=false with one Issue per delta in the
+//     same string form #53's prompt produced (`column: criterion — src vs
+//     tgt`), so the writer's PreviousAttempt feedback path is unchanged.
+//
+// Cross-model verify (#48) still works — the parser model is whatever's
+// configured. Since the comparison is deterministic, the cheap model is
+// fine for parse; cross-model becomes an opt-in optimization rather than a
+// recommended safety net.
 func (m *AITypeMapper) VerifyTableDDL(ctx context.Context, req VerifyTableDDLRequest) (*VerifyResult, error) {
 	if req.SourceTable == nil {
 		return nil, fmt.Errorf("SourceTable is required")
@@ -28,25 +47,38 @@ func (m *AITypeMapper) VerifyTableDDL(ctx context.Context, req VerifyTableDDLReq
 		return nil, fmt.Errorf("ProposedDDL is required")
 	}
 
-	prompt := m.buildVerifyTableDDLPrompt(req)
-
-	logging.Debug("AI verify table DDL: %s.%s (%s -> %s)",
+	logging.Debug("AI verify table DDL (parse + compare): %s.%s (%s -> %s)",
 		req.SourceTable.Schema, req.SourceTable.Name, req.SourceDBType, req.TargetDBType)
 
-	result, err := m.CallAI(ctx, prompt)
+	parsedCols, err := m.parseTargetDDLToColumns(ctx, req.ProposedDDL, req.TargetDBType)
 	if err != nil {
-		return nil, fmt.Errorf("AI verify call failed for %s.%s: %w",
+		// Bad JSON / no columns / no JSON object — retryable signal. Surface
+		// as a verdict the writer can feed back into the next prompt rather
+		// than as a hard error (which would abort the table immediately).
+		// The cause is in the message; the generator gets concrete corrective
+		// context the same as it would for a comparison delta.
+		logging.Debug("AI verify parse failed on %s.%s: %v",
 			req.SourceTable.Schema, req.SourceTable.Name, err)
+		return &VerifyResult{
+			OK:     false,
+			Issues: []string{fmt.Sprintf("verifier could not parse target DDL: %v", err)},
+		}, nil
 	}
 
-	verdict := parseVerifyResponse(result)
-	if verdict.OK {
-		logging.Debug("AI verify OK: %s.%s", req.SourceTable.Schema, req.SourceTable.Name)
-	} else {
-		logging.Debug("AI verify flagged %d issue(s) on %s.%s",
-			len(verdict.Issues), req.SourceTable.Schema, req.SourceTable.Name)
+	deltas := CompareColumns(req.SourceTable.Columns, parsedCols, req.SourceDBType, req.TargetDBType)
+	if len(deltas) == 0 {
+		logging.Debug("AI verify OK: %s.%s (deterministic compare)",
+			req.SourceTable.Schema, req.SourceTable.Name)
+		return &VerifyResult{OK: true}, nil
 	}
-	return verdict, nil
+
+	issues := make([]string, 0, len(deltas))
+	for _, d := range deltas {
+		issues = append(issues, d.String())
+	}
+	logging.Debug("AI verify flagged %d delta(s) on %s.%s (deterministic compare)",
+		len(deltas), req.SourceTable.Schema, req.SourceTable.Name)
+	return &VerifyResult{OK: false, Issues: issues}, nil
 }
 
 // VerifyFinalizationDDL audits a generated CREATE INDEX / FOREIGN KEY /
@@ -197,50 +229,6 @@ func isOKLine(line string) bool {
 	return false
 }
 
-// buildVerifyTableDDLPrompt asks the AI to compare a proposed CREATE TABLE
-// against the source introspection block. The criteria list is exhaustive
-// for column-level metadata and uses imperative phrasing so the model
-// returns a structured verdict rather than discursive prose.
-func (m *AITypeMapper) buildVerifyTableDDLPrompt(req VerifyTableDDLRequest) string {
-	var sb strings.Builder
-
-	sb.WriteString("You are a database migration auditor. Compare source column metadata against the proposed target DDL and report any attribute that fails to preserve source semantics.\n\n")
-
-	sb.WriteString("=== SOURCE METADATA ===\n")
-	sb.WriteString(buildSourceIntrospectionBlock(req.SourceTable, req.SourceDBType))
-	sb.WriteString("\n")
-
-	sb.WriteString("=== TARGET ===\n")
-	sb.WriteString(fmt.Sprintf("target_dialect: %s\n", req.TargetDBType))
-	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("target_schema: %s\n", req.TargetSchema))
-	}
-	sb.WriteString("\n")
-
-	// REQUIRED TARGET COLUMN NAMES — the generator was instructed to use these
-	// exact names in the DDL it produced (e.g. PG lowercases identifiers via
-	// driver.NormalizeIdentifier). Without showing the mapping, the auditor
-	// would see source `Customer ID` and target `customer_id` and could
-	// falsely flag a missing/changed column. Hand the auditor the same
-	// authoritative source→target name table the generator received.
-	sb.WriteString("=== REQUIRED TARGET COLUMN NAMES ===\n")
-	sb.WriteString("The generator was instructed to use these exact target column names. A casing/quoting/identifier-normalization difference between source and target name is NOT a failure — only flag when a column is missing or its attributes diverge.\n")
-	for _, col := range req.SourceTable.Columns {
-		tgt := targetIdentifier(col.Name, req.TargetDBType)
-		sb.WriteString(fmt.Sprintf("  %s -> %s\n", col.Name, tgt))
-	}
-	sb.WriteString("\n")
-
-	sb.WriteString("=== PROPOSED TARGET DDL ===\n")
-	sb.WriteString(req.ProposedDDL)
-	sb.WriteString("\n\n")
-
-	writeVerifyAuditCriteria(&sb)
-	writeVerifyOutputFormat(&sb)
-
-	return sb.String()
-}
-
 // buildVerifyIndexDDLPrompt audits a CREATE INDEX statement.
 func (m *AITypeMapper) buildVerifyIndexDDLPrompt(req VerifyFinalizationDDLRequest) string {
 	var sb strings.Builder
@@ -348,47 +336,6 @@ func (m *AITypeMapper) buildVerifyCheckConstraintDDLPrompt(req VerifyFinalizatio
 
 	writeVerifyOutputFormat(&sb)
 	return sb.String()
-}
-
-// writeVerifyAuditCriteria appends the six column-level audit criteria
-// shared by the table-DDL verify prompt. Same criteria the verify_columns.sh
-// harness applies — keeps the in-loop and end-to-end checks aligned.
-//
-// Critical phrasing notes (informed by an early run that produced false
-// positives on Sonnet → Sonnet):
-//   - The "acceptable" lists are not optional — list them explicitly so the
-//     model doesn't flag known-equivalent type-name pairs as failures.
-//   - The "what is NOT a failure" section is a hard rule, not a hint.
-//   - The output contract has examples — without them, models tend to write
-//     a checklist with PASS/FAIL annotations per criterion instead of the
-//     terse OK / ISSUES form the parser expects.
-func writeVerifyAuditCriteria(sb *strings.Builder) {
-	sb.WriteString("=== AUDIT CRITERIA ===\n")
-	sb.WriteString("For each source column, compare its target column. A FAILURE exists ONLY if one of these strict checks fails:\n")
-	sb.WriteString("  1. max_length / precision / scale not preserved exactly. Source max_length=20 must produce target VARCHAR(20). Source precision=18, scale=4 must produce target NUMERIC(18,4). No bucket-rounding, halving, doubling, substituting, or relying on the target default.\n")
-	sb.WriteString("  2. nullability differs. Source nullable=false → target NOT NULL. Source nullable=true → target allows NULL.\n")
-	sb.WriteString("  3. identity / auto-increment dropped. Source identity=true → target identity equivalent (PG GENERATED IDENTITY / sequence default, MSSQL IDENTITY, MySQL AUTO_INCREMENT).\n")
-	sb.WriteString("  4. timezone-awareness CLASS changed. TZ-naive source MUST map to TZ-naive target; TZ-aware source MUST map to TZ-aware target.\n")
-	sb.WriteString("  5. default expression dropped (target has no default, source did) or replaced with something semantically different.\n")
-	sb.WriteString("  6. data_type is not a semantic equivalent in the target dialect.\n\n")
-
-	sb.WriteString("=== ACCEPTABLE — DO NOT FLAG THESE ===\n")
-	sb.WriteString("Type-name equivalences (cross-dialect):\n")
-	sb.WriteString("  - PG `varchar(N)` / `character varying(N)` / MSSQL `VARCHAR(N)` / MSSQL `NVARCHAR(N)` / MySQL `VARCHAR(N)` — all preserve a max_length of N CHARACTERS.\n")
-	sb.WriteString("  - PG `integer` / `int4` / MSSQL `INT` / MySQL `INT` — all 32-bit signed integer.\n")
-	sb.WriteString("  - PG `bigint` / `int8` / MSSQL `BIGINT` / MySQL `BIGINT`.\n")
-	sb.WriteString("  - PG `boolean` / MSSQL `BIT` / MySQL `TINYINT(1)`.\n")
-	sb.WriteString("  - PG `text` for unbounded source `nvarchar(MAX)` / `varchar(MAX)` / MySQL `TEXT`.\n")
-	sb.WriteString("  - PG `uuid` / MSSQL `UNIQUEIDENTIFIER` / MySQL `CHAR(36)`.\n")
-	sb.WriteString("  - PG `timestamp` ≡ `timestamp without time zone`; PG `timestamptz` ≡ `timestamp with time zone`.\n")
-	sb.WriteString("  - PG `numeric(P,S)` / MSSQL `NUMERIC(P,S)` / `DECIMAL(P,S)` / MySQL `DECIMAL(P,S)`.\n")
-	sb.WriteString("Default-expression equivalences:\n")
-	sb.WriteString("  - GETUTCDATE() ≡ GETDATE() ≡ SYSDATETIME() ≡ SYSDATETIMEOFFSET() ≡ CURRENT_TIMESTAMP ≡ NOW(). All are 'current time' defaults; pick whichever is dialect-idiomatic on the target. Do NOT flag GETUTCDATE → CURRENT_TIMESTAMP as a failure.\n")
-	sb.WriteString("  - NEWID() ≡ gen_random_uuid() ≡ UUID() — all generate a fresh UUID.\n")
-	sb.WriteString("  - ISNULL(a,b) ≡ COALESCE(a,b) — semantically identical for two arguments.\n")
-	sb.WriteString("  - MSSQL outer-paren default stripping: ((0)) ≡ 0; ((1)) ≡ 1; (('pending')) ≡ 'pending'.\n")
-	sb.WriteString("  - PG `bit(0)`/`bit(1)` literals from MSSQL `((0))`/`((1))` mapped to PG `false`/`true`.\n")
-	sb.WriteString("Casing / quoting differences are NEVER a failure (e.g. `name` vs `\"name\"`, `INT` vs `int`, `NULL` vs `null`).\n\n")
 }
 
 // writeVerifyOutputFormat appends the OK / ISSUES output contract. Shared by

@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"smt/internal/secrets"
 )
 
 // TestParseVerifyResponse exercises the OK/ISSUES parser against the
@@ -102,17 +100,16 @@ func verifyMockServer(t *testing.T, content string, calls *atomic.Int32) *httpte
 	}))
 }
 
-// TestVerifyTableDDL_OK is the happy path: the auditor returns OK,
-// VerifyTableDDL returns a verdict with OK=true.
+// TestVerifyTableDDL_OK is the happy path under the parse+compare flow
+// (#55): AI parser returns Column[] JSON whose attributes match the source,
+// CompareColumns returns zero deltas, verdict.OK=true. No more "auditor says
+// OK" — the comparison is mechanical.
 func TestVerifyTableDDL_OK(t *testing.T) {
-	var calls atomic.Int32
-	server := verifyMockServer(t, "OK", &calls)
-	defer server.Close()
-
-	mapper := testMapperWithTempCache(t, "lmstudio", &secrets.Provider{
-		APIKey: "", Model: "test-model", BaseURL: server.URL,
-	})
-	mapper.client = server.Client()
+	parserResp := `{"columns":[
+		{"name":"id","data_type":"integer","is_nullable":false,"is_identity":true},
+		{"name":"code","data_type":"varchar","max_length":20,"is_nullable":false}
+	]}`
+	mapper := mockParseServer(t, parserResp)
 
 	req := VerifyTableDDLRequest{
 		SourceDBType: "mssql", TargetDBType: "postgres",
@@ -135,30 +132,32 @@ func TestVerifyTableDDL_OK(t *testing.T) {
 	if !verdict.OK {
 		t.Errorf("expected OK=true, got OK=false with issues: %v", verdict.Issues)
 	}
-	if calls.Load() != 1 {
-		t.Errorf("expected 1 AI call, got %d", calls.Load())
-	}
 }
 
-// TestVerifyTableDDL_FlagsIssues exercises the failure path: the auditor
-// reports a halved varchar; VerifyTableDDL surfaces it in Issues.
+// TestVerifyTableDDL_FlagsIssues exercises the parse+compare failure path:
+// the AI parses the DDL faithfully (it had halved-varchar values), and Go's
+// CompareColumns produces two max_length deltas. The deltas surface as
+// Issues in the same shape the legacy prompt produced, so the writer's
+// PreviousAttempt feedback is unchanged.
 func TestVerifyTableDDL_FlagsIssues(t *testing.T) {
-	var calls atomic.Int32
-	server := verifyMockServer(t,
-		"ISSUES\ncode: max_length — 20 vs 10\nindustry: max_length — 50 vs 25",
-		&calls)
-	defer server.Close()
-
-	mapper := testMapperWithTempCache(t, "lmstudio", &secrets.Provider{
-		APIKey: "", Model: "test-model", BaseURL: server.URL,
-	})
-	mapper.client = server.Client()
+	// Parser faithfully extracts what the (wrong) DDL says — code=10, industry=25.
+	parserResp := `{"columns":[
+		{"name":"id","data_type":"integer"},
+		{"name":"code","data_type":"varchar","max_length":10},
+		{"name":"industry","data_type":"varchar","max_length":25}
+	]}`
+	mapper := mockParseServer(t, parserResp)
 
 	req := VerifyTableDDLRequest{
 		SourceDBType: "mssql", TargetDBType: "postgres",
 		SourceTable: &Table{
 			Schema: "dbo", Name: "Companies", PrimaryKey: []string{"id"},
-			Columns: []Column{{Name: "id", DataType: "int"}},
+			Columns: []Column{
+				{Name: "id", DataType: "int"},
+				// Source had max_length=20 and 50; Go comparison flags both halvings.
+				{Name: "code", DataType: "varchar", MaxLength: 20},
+				{Name: "industry", DataType: "varchar", MaxLength: 50},
+			},
 		},
 		TargetSchema: "public",
 		ProposedDDL:  "CREATE TABLE public.companies (id integer, code varchar(10), industry varchar(25));",
@@ -172,6 +171,41 @@ func TestVerifyTableDDL_FlagsIssues(t *testing.T) {
 	}
 	if len(verdict.Issues) != 2 {
 		t.Errorf("expected 2 issues, got %d: %v", len(verdict.Issues), verdict.Issues)
+	}
+	// Sanity-check the issue strings carry the criterion + values — the
+	// generator's retry prompt depends on this format being stable.
+	for _, issue := range verdict.Issues {
+		if !strings.Contains(issue, "max_length") {
+			t.Errorf("issue missing criterion: %q", issue)
+		}
+	}
+}
+
+// TestVerifyTableDDL_BadJSONIsRetryable pins the parse-failure handling: a
+// model that returns malformed JSON results in verdict.OK=false (so the
+// writer retries) rather than a hard error (which would abort the table).
+// The error message in Issues feeds back to the next-attempt prompt the
+// same way a comparison delta would.
+func TestVerifyTableDDL_BadJSONIsRetryable(t *testing.T) {
+	mapper := mockParseServer(t, `not even close to JSON`)
+
+	req := VerifyTableDDLRequest{
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		SourceTable: &Table{
+			Schema: "dbo", Name: "Companies",
+			Columns: []Column{{Name: "id", DataType: "int"}},
+		},
+		ProposedDDL: "CREATE TABLE x (id int);",
+	}
+	verdict, err := mapper.VerifyTableDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyTableDDL should not return error on bad parse, got: %v", err)
+	}
+	if verdict.OK {
+		t.Error("expected OK=false on parse failure")
+	}
+	if len(verdict.Issues) != 1 || !strings.Contains(verdict.Issues[0], "could not parse") {
+		t.Errorf("expected single issue mentioning parse failure, got %v", verdict.Issues)
 	}
 }
 
@@ -194,75 +228,6 @@ func TestVerifyTableDDL_RequiresProposedDDL(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error when ProposedDDL empty, got nil")
-	}
-}
-
-// TestBuildVerifyTableDDLPrompt_PinsAuditCriteria is the regression guard
-// that prevents prompt edits from silently dropping the criteria. Without
-// these phrases the auditor lacks the rules to enforce — the very
-// regressions PR #45 chased would slip through.
-func TestBuildVerifyTableDDLPrompt_PinsAuditCriteria(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
-
-	req := VerifyTableDDLRequest{
-		SourceDBType: "mssql", TargetDBType: "postgres",
-		SourceTable: &Table{
-			Schema: "dbo", Name: "Companies", PrimaryKey: []string{"id"},
-			Columns: []Column{{Name: "id", DataType: "int", IsNullable: false}},
-		},
-		TargetSchema: "public",
-		ProposedDDL:  "CREATE TABLE public.companies (id integer NOT NULL);",
-	}
-	prompt := mapper.buildVerifyTableDDLPrompt(req)
-
-	for _, needle := range []string{
-		"AUDIT CRITERIA",
-		"max_length / precision / scale not preserved exactly",
-		"nullability differs",
-		"identity / auto-increment dropped",
-		"timezone-awareness CLASS changed",
-		"default expression dropped",
-		"data_type is not a semantic equivalent",
-		// Acceptable / equivalences list — protects against the false-positive
-		// failure mode that surfaced on the first end-to-end test.
-		"ACCEPTABLE — DO NOT FLAG THESE",
-		"GETUTCDATE() ≡ GETDATE()",
-		"NEWID() ≡ gen_random_uuid()",
-		"ISNULL(a,b) ≡ COALESCE(a,b)",
-		"((0)) ≡ 0",
-		// Output contract + few-shot examples (without these, models tend to
-		// emit per-criterion checklists with PASS/FAIL instead of OK/ISSUES).
-		"OUTPUT FORMAT",
-		"EXACTLY the literal text: OK",
-		"ISSUES",
-		"Do NOT wrap in markdown",
-		"EXAMPLES",
-		"Example A",
-		"Example C — halved varchar",
-		"Example D — TZ semantics added",
-		// Codex P2 fix: examples must distinguish "Your response" from rationale
-		// so the model doesn't include explanatory prose in its output.
-		"Your response:",
-		"Rationale (not part of your output)",
-		// Codex P2 fix: REQUIRED TARGET COLUMN NAMES section so verifier
-		// doesn't false-positive on identifier normalization (e.g. PG
-		// lowercasing CamelCase → snake_case).
-		"REQUIRED TARGET COLUMN NAMES",
-		"casing/quoting/identifier-normalization difference between source and target name is NOT a failure",
-	} {
-		if !strings.Contains(prompt, needle) {
-			t.Errorf("verify prompt missing required phrase %q", needle)
-		}
-	}
-
-	// The prompt must include the source DDL and the proposed DDL so the
-	// auditor can compare them. Failing this means the auditor is being
-	// asked to rule on something it can't see.
-	if !strings.Contains(prompt, req.ProposedDDL) {
-		t.Error("verify prompt missing the proposed DDL")
-	}
-	if !strings.Contains(prompt, "Companies") {
-		t.Error("verify prompt missing the source table name")
 	}
 }
 
