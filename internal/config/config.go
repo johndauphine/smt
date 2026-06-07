@@ -145,12 +145,14 @@ type AutoConfig struct {
 // Config holds all configuration for the migration tool.
 // Note: AI and Slack settings are global-only and loaded from ~/.secrets/smt-config.yaml
 type Config struct {
-	Source    SourceConfig    `yaml:"source"`
-	Target    TargetConfig    `yaml:"target"`
-	Migration MigrationConfig `yaml:"migration"`
-	Profile   ProfileConfig   `yaml:"profile,omitempty"`
-	AI        *AIConfig       `yaml:"ai,omitempty"`
-	Slack     *SlackConfig    `yaml:"slack,omitempty"`
+	Source           SourceConfig           `yaml:"source"`
+	Target           TargetConfig           `yaml:"target"`
+	Migration        MigrationConfig        `yaml:"migration"`
+	SchemaGeneration SchemaGenerationConfig `yaml:"schema_generation,omitempty"`
+	AIReview         AIReviewConfig         `yaml:"ai_review,omitempty"`
+	Profile          ProfileConfig          `yaml:"profile,omitempty"`
+	AI               *AIConfig              `yaml:"ai,omitempty"`
+	Slack            *SlackConfig           `yaml:"slack,omitempty"`
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
 	autoConfig AutoConfig
@@ -197,6 +199,38 @@ type AIConfig struct {
 
 	// TypeMapping configures AI-assisted type mapping for unknown types.
 	TypeMapping *AITypeMappingConfig `yaml:"type_mapping"`
+}
+
+// SchemaGenerationConfig controls how SMT builds target schema DDL.
+type SchemaGenerationConfig struct {
+	// Mode is "deterministic" by default. Set to "ai" to preserve the legacy
+	// behavior where an AI provider authors executable schema DDL.
+	Mode string `yaml:"mode"`
+
+	// UnknownTypePolicy controls how deterministic mapping handles unsupported
+	// source types. The default is "fail".
+	UnknownTypePolicy string `yaml:"unknown_type_policy"`
+}
+
+// AIReviewConfig controls optional AI inspection of deterministic DDL.
+type AIReviewConfig struct {
+	// Enabled is a pointer so config loading can distinguish omitted from false.
+	Enabled *bool `yaml:"enabled"`
+
+	// Model names a provider entry in ~/.secrets/smt-config.yaml. Empty uses
+	// the default AI provider when review is enabled.
+	Model string `yaml:"model"`
+
+	// Mode is "warn" or "fail". Warn logs findings and continues; fail stops
+	// before applying DDL with reviewer issues.
+	Mode string `yaml:"mode"`
+
+	// Scope is reserved for future chunking choices such as "table" or "plan".
+	Scope string `yaml:"scope"`
+
+	// AllowPatchSuggestions allows a reviewer to include human-readable patch
+	// suggestions. SMT must not apply those suggestions automatically.
+	AllowPatchSuggestions bool `yaml:"allow_patch_suggestions"`
 }
 
 // AITypeMappingConfig contains settings specific to AI type mapping.
@@ -671,6 +705,25 @@ func (c *Config) applyDefaults() error {
 	if c.Migration.TargetMode == "" {
 		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
 	}
+	if c.SchemaGeneration.Mode == "" {
+		c.SchemaGeneration.Mode = driver.SchemaGenerationDeterministic
+	}
+	if c.SchemaGeneration.UnknownTypePolicy == "" {
+		c.SchemaGeneration.UnknownTypePolicy = "fail"
+	}
+	if c.AIReview.Enabled == nil {
+		enabled := c.Migration.AIVerify
+		c.AIReview.Enabled = &enabled
+	}
+	if c.AIReview.Model == "" {
+		c.AIReview.Model = c.Migration.AIVerifierModel
+	}
+	if c.AIReview.Mode == "" {
+		c.AIReview.Mode = "warn"
+	}
+	if c.AIReview.Scope == "" {
+		c.AIReview.Scope = "plan"
+	}
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
@@ -960,6 +1013,24 @@ func (c *Config) validate() error {
 	// Validate migration settings
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
+	}
+	if c.SchemaGeneration.Mode != "" && c.SchemaGeneration.Mode != driver.SchemaGenerationDeterministic && c.SchemaGeneration.Mode != driver.SchemaGenerationAI {
+		return fmt.Errorf("schema_generation.mode must be 'deterministic' or 'ai'")
+	}
+	switch c.SchemaGeneration.UnknownTypePolicy {
+	case "", "fail", "warn", "text_fallback":
+	default:
+		return fmt.Errorf("schema_generation.unknown_type_policy must be 'fail', 'warn', or 'text_fallback'")
+	}
+	switch c.AIReview.Mode {
+	case "", "warn", "fail":
+	default:
+		return fmt.Errorf("ai_review.mode must be 'warn' or 'fail'")
+	}
+	switch c.AIReview.Scope {
+	case "", "plan", "table":
+	default:
+		return fmt.Errorf("ai_review.scope must be 'plan' or 'table'")
 	}
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/smt-config.yaml
@@ -1330,6 +1401,10 @@ func (c *Config) DebugDump() string {
 
 	// Other settings
 	b.WriteString(fmt.Sprintf("  TargetMode: %s\n", c.Migration.TargetMode))
+	b.WriteString(fmt.Sprintf("  SchemaGeneration: %s\n", c.SchemaGeneration.Mode))
+	b.WriteString(fmt.Sprintf("  UnknownTypePolicy: %s\n", c.SchemaGeneration.UnknownTypePolicy))
+	aiReviewEnabled := c.AIReview.Enabled != nil && *c.AIReview.Enabled
+	b.WriteString(fmt.Sprintf("  AIReview: enabled=%v mode=%s scope=%s\n", aiReviewEnabled, c.AIReview.Mode, c.AIReview.Scope))
 
 	// UpsertMergeChunkSize - only show in upsert mode
 	if c.Migration.TargetMode == "upsert" {

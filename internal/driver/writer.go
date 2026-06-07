@@ -117,6 +117,23 @@ type TableOptions struct {
 	// concern.)
 	AIVerify bool
 
+	// AIReviewEnabled enables optional review of deterministic DDL before it
+	// is applied. Unlike AIVerify, reviewer findings are not fed back into a
+	// DDL generator; deterministic DDL is either allowed with warnings or
+	// blocked based on AIReviewMode.
+	AIReviewEnabled bool
+
+	// AIReviewMode controls what happens when AIReviewEnabled is true and the
+	// reviewer reports issues. "fail" blocks before apply; any other value
+	// logs warnings and continues.
+	AIReviewMode string
+
+	// ArtifactDir, when set, receives the rendered DDL before it is applied.
+	ArtifactDir string
+
+	// ArtifactName overrides the default artifact filename for this DDL.
+	ArtifactName string
+
 	// Note: Indexes and CHECK constraints are always created separately in Finalize,
 	// not included in the initial CREATE TABLE DDL.
 }
@@ -143,6 +160,19 @@ type FinalizeOptions struct {
 	// AIVerify enables the AI self-check pass between generation and exec
 	// for finalization DDL. See TableOptions.AIVerify for semantics.
 	AIVerify bool
+
+	// AIReviewEnabled enables optional review of deterministic finalization DDL
+	// before it is applied.
+	AIReviewEnabled bool
+
+	// AIReviewMode controls whether reviewer issues warn or fail.
+	AIReviewMode string
+
+	// ArtifactDir, when set, receives the rendered DDL before it is applied.
+	ArtifactDir string
+
+	// ArtifactName overrides the default artifact filename for this DDL.
+	ArtifactName string
 }
 
 // WriteBatchOptions configures a bulk write operation.

@@ -5,9 +5,9 @@ package main
 // snapshot: extract the current source schema, store it in the SMT state DB
 //   so future `sync` runs can diff against it.
 //
-// sync: extract the current source schema, load the latest snapshot, ask the
-//   AI to render the structural diff as ALTER statements, and either write
-//   the SQL to a file (default) or apply it against the target (--apply).
+// sync: extract the current source schema, load the latest snapshot, render
+//   the structural diff as ALTER statements, and either write the SQL to a
+//   file (default) or apply it against the target (--apply).
 
 import (
 	"context"
@@ -176,18 +176,27 @@ func runSync(c *cli.Context) error {
 
 	fmt.Printf("Diff: %s\n", diff.Summary())
 
-	mapper, err := driver.NewAITypeMapperFromSecrets()
-	if err != nil || mapper == nil {
-		return fmt.Errorf("sync requires an AI provider for SQL rendering; configure one in ~/.secrets/smt-config.yaml: %w", err)
-	}
+	var plan schemadiff.Plan
+	if cfg.SchemaGeneration.Mode == driver.SchemaGenerationAI {
+		mapper, err := driver.NewAITypeMapperFromSecrets()
+		if err != nil || mapper == nil {
+			return fmt.Errorf("sync requires an AI provider for SQL rendering when schema_generation.mode is ai; configure one in ~/.secrets/smt-config.yaml: %w", err)
+		}
 
-	logging.Info("asking AI to render diff as %s SQL...", cfg.Target.Type)
-	plan, err := schemadiff.Render(ctx, mapper, diff, cfg.Target.Schema, cfg.Target.Type)
-	if err != nil {
-		return err
+		logging.Info("asking AI to render diff as %s SQL...", cfg.Target.Type)
+		plan, err = schemadiff.Render(ctx, mapper, diff, cfg.Target.Schema, cfg.Target.Type)
+		if err != nil {
+			return err
+		}
+	} else {
+		logging.Info("rendering diff deterministically as %s SQL...", cfg.Target.Type)
+		plan, err = schemadiff.RenderDeterministicWithUnknownTypePolicy(diff, cfg.Target.Schema, cfg.Target.Type, cfg.SchemaGeneration.UnknownTypePolicy)
+		if err != nil {
+			return err
+		}
 	}
 	if plan.IsEmpty() {
-		fmt.Println("AI returned no statements; nothing to apply.")
+		fmt.Println("Renderer returned no statements; nothing to apply.")
 		return nil
 	}
 

@@ -67,6 +67,16 @@ type Driver interface {
 	NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts WriterOptions) (Writer, error)
 }
 
+const (
+	// SchemaGenerationDeterministic renders schema DDL from source metadata
+	// without requiring an AI provider.
+	SchemaGenerationDeterministic = "deterministic"
+
+	// SchemaGenerationAI preserves the legacy behavior where an AI mapper
+	// authors executable schema DDL.
+	SchemaGenerationAI = "ai"
+)
+
 // WriterOptions contains options for creating a Writer.
 type WriterOptions struct {
 	// BatchSize is the default number of rows per bulk insert batch.
@@ -80,8 +90,18 @@ type WriterOptions struct {
 	// SourceType is the source database type (for cross-engine type handling).
 	SourceType string
 
+	// SchemaGenerationMode controls whether the writer renders schema DDL
+	// deterministically or asks the configured AI mapper to author it.
+	// Empty means deterministic.
+	SchemaGenerationMode string
+
+	// UnknownTypePolicy controls deterministic handling of unsupported source
+	// types. Supported values are "fail", "warn", and "text_fallback".
+	UnknownTypePolicy string
+
 	// TypeMapper is the AI-powered type mapper for database type conversions.
-	// This is required for all migrations.
+	// This is optional in deterministic schema-generation mode and required
+	// in AI schema-generation mode.
 	TypeMapper TypeMapper
 
 	// VerifierTypeMapper, when non-nil, is used for the AI self-check pass

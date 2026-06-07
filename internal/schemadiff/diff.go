@@ -358,8 +358,8 @@ func diffColumns(prev, curr []driver.Column) (added, removed []driver.Column, ch
 }
 
 // columnsEqual compares two columns on the structural attributes that
-// matter for DDL — sample values, ordinal position, and identity flag
-// are intentionally excluded (sample values are not part of the schema,
+// matter for DDL. Sample values, ordinal position, and identity flag are
+// intentionally excluded (sample values are not part of the schema,
 // ordinal position changes when columns are added/removed, and identity
 // is hard to alter and rarely changed in practice).
 func columnsEqual(a, b driver.Column) bool {
@@ -368,7 +368,11 @@ func columnsEqual(a, b driver.Column) bool {
 		a.Precision == b.Precision &&
 		a.Scale == b.Scale &&
 		a.IsNullable == b.IsNullable &&
-		a.SRID == b.SRID
+		a.SRID == b.SRID &&
+		strings.TrimSpace(a.DefaultExpression) == strings.TrimSpace(b.DefaultExpression) &&
+		a.IsComputed == b.IsComputed &&
+		strings.TrimSpace(a.ComputedExpression) == strings.TrimSpace(b.ComputedExpression) &&
+		a.ComputedPersisted == b.ComputedPersisted
 }
 
 func diffIndexes(prev, curr []driver.Index) (added, removed []driver.Index) {

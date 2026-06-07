@@ -88,6 +88,24 @@ func TestCompute_ChangedColumnType(t *testing.T) {
 	}
 }
 
+func TestCompute_ChangedColumnDefault(t *testing.T) {
+	oldCol := col("Enabled", "bit", false)
+	oldCol.DefaultExpression = "((0))"
+	newCol := oldCol
+	newCol.DefaultExpression = "((1))"
+	prev := Snapshot{Tables: []driver.Table{table("Users", oldCol)}}
+	curr := Snapshot{Tables: []driver.Table{table("Users", newCol)}}
+
+	d := Compute(prev, curr)
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %+v", d)
+	}
+	changed := d.ChangedTables[0].ChangedColumns
+	if len(changed) != 1 || changed[0].Name != "Enabled" {
+		t.Fatalf("expected Enabled default change, got %+v", changed)
+	}
+}
+
 func TestCompute_AddedAndRemovedTables(t *testing.T) {
 	prev := Snapshot{Tables: []driver.Table{table("Users"), table("Sessions")}}
 	curr := Snapshot{Tables: []driver.Table{table("Users"), table("Audit")}}
@@ -271,6 +289,230 @@ func TestRender_PromptIncludesTargetDialectAndSchema(t *testing.T) {
 	}
 	if !strings.Contains(asker.GotPrompt, "my_schema") {
 		t.Errorf("prompt should mention target schema, got: %s", asker.GotPrompt)
+	}
+}
+
+func TestRenderDeterministic_AddedColumnPostgres(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false),
+		driver.Column{Name: "DisplayName", DataType: "nvarchar", MaxLength: 40, IsNullable: true},
+	)}}
+	d := Compute(prev, curr).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	if len(plan.Statements) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(plan.Statements))
+	}
+	stmt := plan.Statements[0]
+	if stmt.Risk != RiskSafe {
+		t.Fatalf("risk = %s", stmt.Risk)
+	}
+	if !strings.Contains(stmt.SQL, `ALTER TABLE "public"."users" ADD COLUMN "displayname" character varying(40)`) {
+		t.Fatalf("unexpected SQL: %s", stmt.SQL)
+	}
+}
+
+func TestRenderDeterministic_AddedTableIncludesSideObjects(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	audit := driver.Table{
+		Schema:     "dbo",
+		Name:       "AuditLog",
+		PrimaryKey: []string{"Id"},
+		Columns: []driver.Column{
+			{Name: "Id", DataType: "int", IsNullable: false},
+			{Name: "UserId", DataType: "int", IsNullable: false},
+			{Name: "Action", DataType: "nvarchar", MaxLength: 20, IsNullable: false},
+		},
+		Indexes: []driver.Index{{
+			Name:    "IX_AuditLog_UserId",
+			Columns: []string{"UserId"},
+		}},
+		ForeignKeys: []driver.ForeignKey{{
+			Name:       "FK_AuditLog_Users",
+			Columns:    []string{"UserId"},
+			RefTable:   "Users",
+			RefColumns: []string{"Id"},
+		}},
+		CheckConstraints: []driver.CheckConstraint{{
+			Name:       "CK_AuditLog_Action",
+			Definition: "([Action] IN ('create','update'))",
+		}},
+	}
+	curr := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false)), audit}}
+	d := Compute(prev, curr).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	if len(plan.Statements) != 4 {
+		t.Fatalf("expected create table plus 3 side-object statements, got %d: %+v", len(plan.Statements), plan.Statements)
+	}
+	sql := plan.SQL()
+	for _, want := range []string{
+		`CREATE TABLE "public"."auditlog"`,
+		`CREATE INDEX "ix_auditlog_userid" ON "public"."auditlog" ("userid")`,
+		`ALTER TABLE "public"."auditlog" ADD CONSTRAINT "fk_auditlog_users" FOREIGN KEY ("userid") REFERENCES "public"."users" ("id")`,
+		`ALTER TABLE "public"."auditlog" ADD CONSTRAINT "ck_auditlog_action" CHECK ("action" IN ('create','update'))`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected SQL to contain %q, got:\n%s", want, sql)
+		}
+	}
+}
+
+func TestRenderDeterministic_AddedTableForeignKeysAfterAllCreateTables(t *testing.T) {
+	comments := driver.Table{
+		Schema: "dbo",
+		Name:   "Comments",
+		Columns: []driver.Column{
+			{Name: "Id", DataType: "int", IsNullable: false},
+			{Name: "PostId", DataType: "int", IsNullable: false},
+		},
+		ForeignKeys: []driver.ForeignKey{{
+			Name:       "FK_Comments_Posts",
+			Columns:    []string{"PostId"},
+			RefTable:   "Posts",
+			RefColumns: []string{"Id"},
+		}},
+	}
+	posts := driver.Table{
+		Schema:  "dbo",
+		Name:    "Posts",
+		Columns: []driver.Column{{Name: "Id", DataType: "int", IsNullable: false}},
+	}
+	d := Compute(Snapshot{}, Snapshot{Tables: []driver.Table{comments, posts}}).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	sql := plan.SQL()
+	commentsPos := strings.Index(sql, `CREATE TABLE "public"."comments"`)
+	postsPos := strings.Index(sql, `CREATE TABLE "public"."posts"`)
+	fkPos := strings.Index(sql, `ALTER TABLE "public"."comments" ADD CONSTRAINT "fk_comments_posts"`)
+	if commentsPos < 0 || postsPos < 0 || fkPos < 0 {
+		t.Fatalf("expected comments/posts create and FK statements, got:\n%s", sql)
+	}
+	if fkPos < commentsPos || fkPos < postsPos {
+		t.Fatalf("expected FK after both CREATE TABLE statements, got:\n%s", sql)
+	}
+}
+
+func TestRenderDeterministic_ColumnTypeAndDefaultChangeDropsDefaultFirst(t *testing.T) {
+	oldScore := driver.Column{Name: "Score", DataType: "varchar", MaxLength: 10, IsNullable: false, DefaultExpression: "('0')"}
+	newScore := driver.Column{Name: "Score", DataType: "int", IsNullable: false, DefaultExpression: "((0))"}
+	d := Compute(
+		Snapshot{Tables: []driver.Table{table("Users", oldScore)}},
+		Snapshot{Tables: []driver.Table{table("Users", newScore)}},
+	).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	sql := plan.SQL()
+	dropPos := strings.Index(sql, `ALTER TABLE "public"."users" ALTER COLUMN "score" DROP DEFAULT`)
+	typePos := strings.Index(sql, `ALTER TABLE "public"."users" ALTER COLUMN "score" TYPE integer`)
+	setPos := strings.Index(sql, `ALTER TABLE "public"."users" ALTER COLUMN "score" SET DEFAULT 0`)
+	if dropPos < 0 || typePos < 0 || setPos < 0 {
+		t.Fatalf("expected drop default, type change, and set default statements, got:\n%s", sql)
+	}
+	if !(dropPos < typePos && typePos < setPos) {
+		t.Fatalf("expected default drop before type change before set default, got:\n%s", sql)
+	}
+}
+
+func TestRenderDeterministic_ColumnDefaultChanges(t *testing.T) {
+	activeOld := driver.Column{Name: "IsActive", DataType: "bit", IsNullable: false, DefaultExpression: "((0))"}
+	activeNew := activeOld
+	activeNew.DefaultExpression = "((1))"
+	statusOld := driver.Column{Name: "Status", DataType: "nvarchar", MaxLength: 20, IsNullable: true, DefaultExpression: "('old')"}
+	statusNew := statusOld
+	statusNew.DefaultExpression = ""
+	prev := Snapshot{Tables: []driver.Table{table("Users", activeOld, statusOld)}}
+	curr := Snapshot{Tables: []driver.Table{table("Users", activeNew, statusNew)}}
+	d := Compute(prev, curr).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	if len(plan.Statements) != 2 {
+		t.Fatalf("expected 2 default statements, got %d: %+v", len(plan.Statements), plan.Statements)
+	}
+	sql := plan.SQL()
+	if !strings.Contains(sql, `ALTER TABLE "public"."users" ALTER COLUMN "isactive" SET DEFAULT true`) {
+		t.Fatalf("expected SET DEFAULT true, got:\n%s", sql)
+	}
+	if !strings.Contains(sql, `ALTER TABLE "public"."users" ALTER COLUMN "status" DROP DEFAULT`) {
+		t.Fatalf("expected DROP DEFAULT, got:\n%s", sql)
+	}
+}
+
+func TestRenderDeterministic_UnknownTypePolicyAppliesToSync(t *testing.T) {
+	prev := Snapshot{}
+	curr := Snapshot{Tables: []driver.Table{table("Events", driver.Column{Name: "Payload", DataType: "sql_variant", IsNullable: true})}}
+	d := Compute(prev, curr).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministicWithUnknownTypePolicy(d, "public", "postgres", "text_fallback")
+	if err != nil {
+		t.Fatalf("RenderDeterministicWithUnknownTypePolicy: %v", err)
+	}
+	if !strings.Contains(plan.SQL(), `"payload" text`) {
+		t.Fatalf("expected text fallback, got:\n%s", plan.SQL())
+	}
+}
+
+func TestRenderDeterministic_RemovedColumnIsDataLoss(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{table("Users",
+		col("Id", "int", false),
+		col("Legacy", "int", true),
+	)}}
+	curr := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	d := Compute(prev, curr).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	if len(plan.Statements) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(plan.Statements))
+	}
+	if plan.Statements[0].Risk != RiskDataLoss {
+		t.Fatalf("risk = %s", plan.Statements[0].Risk)
+	}
+	if !strings.Contains(plan.Statements[0].SQL, `ALTER TABLE "public"."users" DROP COLUMN "legacy"`) {
+		t.Fatalf("unexpected SQL: %s", plan.Statements[0].SQL)
+	}
+}
+
+func TestRenderDeterministic_UnsupportedTarget(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
+	curr := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false), col("Email", "varchar", true))}}
+	d := Compute(prev, curr)
+
+	_, err := RenderDeterministic(d, "dbo", "mssql")
+	if err == nil {
+		t.Fatal("expected unsupported target error")
 	}
 }
 

@@ -6,7 +6,9 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -128,6 +130,9 @@ func (o *Orchestrator) ExtractSchema(ctx context.Context, runID string) error {
 
 	o.tables = o.filterTables(tables)
 	logging.Info("[%s] %d tables in scope", TaskExtractSchema, len(o.tables))
+	if err := o.writeJSONArtifact(runID, "source_schema.json", o.tables); err != nil {
+		return fmt.Errorf("writing source schema artifact: %w", err)
+	}
 	return nil
 }
 
@@ -149,6 +154,7 @@ func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateTables))
 	total := len(o.tables)
 	maxRetries := o.aiMaxRetries()
+	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
 	logging.Info("[%s] creating %d tables (concurrency=%d, max_retries=%d)", TaskCreateTables, total, o.aiConcurrency(), maxRetries)
 	var done atomic.Int64
 	// Gather source DB context once up front (Reader caches; this primes the
@@ -156,11 +162,16 @@ func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
 	// on the sync.Once inside the Reader implementation). The result feeds the
 	// AI prompt's SOURCE DATABASE block — see issue #13.
 	sourceCtx := o.source.DatabaseContext()
-	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
+	artifactDir := o.ddlArtifactDir(runID)
+	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
 		opts := driver.TableOptions{
-			SourceContext: sourceCtx,
-			MaxRetries:    maxRetries,
-			AIVerify:      o.config.Migration.AIVerify,
+			SourceContext:   sourceCtx,
+			MaxRetries:      maxRetries,
+			AIVerify:        o.config.Migration.AIVerify,
+			AIReviewEnabled: aiReviewEnabled,
+			AIReviewMode:    o.config.AIReview.Mode,
+			ArtifactDir:     artifactDir,
+			ArtifactName:    fmt.Sprintf("%03d_create_table_%s.sql", i+1, artifactName(t.Name)),
 		}
 		if err := o.target.CreateTableWithOptions(ctx, &t, o.config.Target.Schema, opts); err != nil {
 			return fmt.Errorf("creating table %s: %w", t.Name, err)
@@ -215,14 +226,17 @@ func (o *Orchestrator) CreateIndexes(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateIndexes))
 	maxRetries := o.aiMaxRetries()
 	logging.Info("[%s] loading and creating indexes (concurrency=%d, max_retries=%d)", TaskCreateIndexes, o.aiConcurrency(), maxRetries)
-	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify}
-	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
+	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify, AIReviewEnabled: aiReviewEnabled, AIReviewMode: o.config.AIReview.Mode, ArtifactDir: o.ddlArtifactDir(runID)}
+	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
 		if err := o.source.LoadIndexes(ctx, &t); err != nil {
 			return fmt.Errorf("loading indexes for %s: %w", t.Name, err)
 		}
 		for j := range t.Indexes {
 			idx := t.Indexes[j]
-			if err := o.target.CreateIndexWithOptions(ctx, &t, &idx, o.config.Target.Schema, opts); err != nil {
+			callOpts := opts
+			callOpts.ArtifactName = fmt.Sprintf("%03d_%03d_create_index_%s_%s.sql", i+1, j+1, artifactName(t.Name), artifactName(idx.Name))
+			if err := o.target.CreateIndexWithOptions(ctx, &t, &idx, o.config.Target.Schema, callOpts); err != nil {
 				return fmt.Errorf("creating index %s: %w", idx.Name, err)
 			}
 		}
@@ -237,14 +251,17 @@ func (o *Orchestrator) CreateForeignKeys(ctx context.Context, runID string) erro
 	_ = o.state.UpdatePhase(runID, string(TaskCreateFKs))
 	maxRetries := o.aiMaxRetries()
 	logging.Info("[%s] loading and creating foreign keys (concurrency=%d, max_retries=%d)", TaskCreateFKs, o.aiConcurrency(), maxRetries)
-	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify}
-	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
+	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify, AIReviewEnabled: aiReviewEnabled, AIReviewMode: o.config.AIReview.Mode, ArtifactDir: o.ddlArtifactDir(runID)}
+	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
 		if err := o.source.LoadForeignKeys(ctx, &t); err != nil {
 			return fmt.Errorf("loading FKs for %s: %w", t.Name, err)
 		}
 		for j := range t.ForeignKeys {
 			fk := t.ForeignKeys[j]
-			if err := o.target.CreateForeignKeyWithOptions(ctx, &t, &fk, o.config.Target.Schema, opts); err != nil {
+			callOpts := opts
+			callOpts.ArtifactName = fmt.Sprintf("%03d_%03d_create_fk_%s_%s.sql", i+1, j+1, artifactName(t.Name), artifactName(fk.Name))
+			if err := o.target.CreateForeignKeyWithOptions(ctx, &t, &fk, o.config.Target.Schema, callOpts); err != nil {
 				return fmt.Errorf("creating FK %s: %w", fk.Name, err)
 			}
 		}
@@ -259,14 +276,17 @@ func (o *Orchestrator) CreateCheckConstraints(ctx context.Context, runID string)
 	_ = o.state.UpdatePhase(runID, string(TaskCreateChecks))
 	maxRetries := o.aiMaxRetries()
 	logging.Info("[%s] loading and creating check constraints (concurrency=%d, max_retries=%d)", TaskCreateChecks, o.aiConcurrency(), maxRetries)
-	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify}
-	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, _ int, t source.Table) error {
+	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
+	opts := driver.FinalizeOptions{MaxRetries: maxRetries, AIVerify: o.config.Migration.AIVerify, AIReviewEnabled: aiReviewEnabled, AIReviewMode: o.config.AIReview.Mode, ArtifactDir: o.ddlArtifactDir(runID)}
+	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
 		if err := o.source.LoadCheckConstraints(ctx, &t); err != nil {
 			return fmt.Errorf("loading checks for %s: %w", t.Name, err)
 		}
 		for j := range t.CheckConstraints {
 			chk := t.CheckConstraints[j]
-			if err := o.target.CreateCheckConstraintWithOptions(ctx, &t, &chk, o.config.Target.Schema, opts); err != nil {
+			callOpts := opts
+			callOpts.ArtifactName = fmt.Sprintf("%03d_%03d_create_check_%s_%s.sql", i+1, j+1, artifactName(t.Name), artifactName(chk.Name))
+			if err := o.target.CreateCheckConstraintWithOptions(ctx, &t, &chk, o.config.Target.Schema, callOpts); err != nil {
 				return fmt.Errorf("creating check %s: %w", chk.Name, err)
 			}
 		}
@@ -313,4 +333,33 @@ func matchesAny(name string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+func (o *Orchestrator) runArtifactDir(runID string) string {
+	return filepath.Join(o.config.Migration.DataDir, "runs", runID)
+}
+
+func (o *Orchestrator) ddlArtifactDir(runID string) string {
+	return filepath.Join(o.runArtifactDir(runID), "ddl")
+}
+
+func (o *Orchestrator) writeJSONArtifact(runID, name string, value any) error {
+	dir := o.runArtifactDir(runID)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(filepath.Join(dir, name), data, 0600)
+}
+
+func artifactName(name string) string {
+	normalized := driver.NormalizeIdentifier("postgres", name)
+	if normalized == "" {
+		return "unnamed"
+	}
+	return normalized
 }
