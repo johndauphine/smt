@@ -1,9 +1,8 @@
 # smt — Schema Migration Tool configuration
 #
 # SMT extracts the source schema and creates matching DDL on the target.
-# Unlike DMT, it does not transfer rows. There are no workers, chunks,
-# read-ahead buffers, or throughput knobs — just a source, a target, and
-# a list of which schema objects to create.
+# Unlike DMT, it does not transfer rows. Schema DDL is deterministic by
+# default; AI review is optional.
 
 source:
   type: mssql                           # mssql | postgres | mysql
@@ -23,6 +22,15 @@ target:
   password: ${PG_PASSWORD}
   schema: public
 
+schema_generation:
+  mode: deterministic                  # deterministic | ai
+  unknown_type_policy: fail            # fail | warn | text_fallback
+
+ai_review:
+  enabled: false                       # optional review of deterministic DDL
+  mode: warn                           # warn | fail
+  # model: strong-reviewer             # provider entry in ~/.secrets/smt-config.yaml
+
 profile:
   name: example
   description: |
@@ -41,38 +49,14 @@ migration:
   create_foreign_keys: true
   create_check_constraints: true
 
-  # AI self-check (opt-in). When true, every newly-generated DDL is sent
-  # back to the AI as an audit prompt that compares it against the source
-  # introspection metadata (max_length, precision, scale, nullability,
-  # identity, timezone-awareness, default-class, type semantics). If the
-  # auditor flags issues, generation is retried with the issue list fed
-  # in. Cost: cold-cache runs roughly double per-table AI calls. Cache
-  # hits skip verify (cached DDL was already verified). Defaults to false.
+  # Deprecated alias for ai_review.enabled during the deterministic-DDL
+  # transition. Prefer the top-level ai_review block above.
   ai_verify: false
 
-  # Optional verifier-provider override. Names a provider entry in the
-  # secrets file (~/.secrets/smt-config.yaml under ai.providers). When set,
-  # the AI self-check pass uses this provider instead of ai.default_provider
-  # — the canonical use case is a cheap/local generator paired with a strong
-  # cloud auditor. Empty (the default) means same-model verify (Phase 1).
-  # Has no effect unless ai_verify is true. Validated at startup; an unknown
-  # provider name is a fatal error.
-  #
-  # Example pairing — Haiku generates, Sonnet audits. Note the `provider:`
-  # field on each entry: when set, it aliases the YAML key to a known backend
-  # ("anthropic", "openai", "gemini", "ollama", "lmstudio") so multiple
-  # labelled entries can share one backend (`anthropic-haiku` and
-  # `anthropic-sonnet` here both dispatch through the Anthropic API but
-  # with different model fields). When `provider:` is unset, the YAML key
-  # IS the dispatch type — the legacy contract.
-  #   ai.providers:
-  #     anthropic-haiku:  { provider: anthropic, model: claude-haiku-4-5, api_key: ... }
-  #     anthropic-sonnet: { provider: anthropic, model: claude-sonnet-4-6, api_key: ... }
-  #   ai.default_provider: anthropic-haiku
-  #   migration.ai_verifier_model: anthropic-sonnet
+  # Deprecated alias for ai_review.model.
   # ai_verifier_model: ""
 
-  # Where SMT keeps its state DB (run history, snapshots, encrypted profiles)
+  # Where SMT keeps its state DB, schema artifacts, and DDL artifacts.
   data_dir: ~/.smt
 
 # Slack notifications (optional). AI provider keys live in the secrets file

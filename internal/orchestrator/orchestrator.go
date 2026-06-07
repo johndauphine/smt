@@ -69,25 +69,33 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	o.source = src
 
 	if !opts.SourceOnly {
-		mapper, _ := driver.GetAITypeMapper()
+		reviewEnabled := cfg.AIReview.Enabled != nil && *cfg.AIReview.Enabled
+		needsDefaultAI := cfg.SchemaGeneration.Mode == driver.SchemaGenerationAI ||
+			(reviewEnabled && cfg.AIReview.Model == "")
 
-		// Build the verifier mapper if migration.ai_verifier_model names a
-		// non-default provider — enables cross-model verify (cheap/local
-		// generator + strong cloud auditor). Empty config string keeps the
-		// Phase 1 same-model behavior. The verifier mapper is only consulted
-		// when ai_verify is on; we still construct it eagerly so a typo in
-		// the provider name fails loudly at startup, not mid-run.
+		var mapper driver.TypeMapper
+		if needsDefaultAI {
+			mapper, err = driver.GetAITypeMapper()
+			if err != nil {
+				src.Close()
+				return nil, fmt.Errorf("loading AI provider: %w", err)
+			}
+		}
+
+		// Build a separate AI reviewer when requested. Deterministic schema
+		// generation does not require this mapper unless ai_review.enabled is
+		// true, and reviewer feedback is not fed back into a generator.
 		var verifierMapper driver.TypeMapper
-		if name := cfg.Migration.AIVerifierModel; name != "" {
+		if name := cfg.AIReview.Model; reviewEnabled && name != "" {
 			vm, err := driver.NewAITypeMapperByName(name)
 			if err != nil {
 				src.Close()
-				return nil, fmt.Errorf("loading verifier AI provider %q: %w", name, err)
+				return nil, fmt.Errorf("loading AI review provider %q: %w", name, err)
 			}
 			verifierMapper = vm
 		}
 
-		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, mapper, verifierMapper)
+		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, cfg.SchemaGeneration.Mode, cfg.SchemaGeneration.UnknownTypePolicy, mapper, verifierMapper)
 		if err != nil {
 			src.Close()
 			return nil, fmt.Errorf("opening target: %w", err)

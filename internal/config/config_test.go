@@ -900,6 +900,82 @@ func TestExpandSecretsWithTilde(t *testing.T) {
 	}
 }
 
+func TestDeterministicSchemaGenerationDefaults(t *testing.T) {
+	yaml := `
+source:
+  type: mssql
+  host: mssql-server
+  database: sourcedb
+  user: sa
+  password: source-password
+target:
+  type: postgres
+  host: pg-server
+  database: targetdb
+  user: postgres
+  password: target-password
+`
+	cfg, err := LoadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadBytes failed: %v", err)
+	}
+
+	if cfg.SchemaGeneration.Mode != "deterministic" {
+		t.Fatalf("SchemaGeneration.Mode = %q", cfg.SchemaGeneration.Mode)
+	}
+	if cfg.SchemaGeneration.UnknownTypePolicy != "fail" {
+		t.Fatalf("SchemaGeneration.UnknownTypePolicy = %q", cfg.SchemaGeneration.UnknownTypePolicy)
+	}
+	if cfg.AIReview.Enabled == nil {
+		t.Fatal("AIReview.Enabled is nil")
+	}
+	if *cfg.AIReview.Enabled {
+		t.Fatal("AIReview.Enabled defaulted to true")
+	}
+	if cfg.AIReview.Mode != "warn" {
+		t.Fatalf("AIReview.Mode = %q", cfg.AIReview.Mode)
+	}
+}
+
+func TestAIReviewExplicitConfig(t *testing.T) {
+	yaml := `
+source:
+  type: mssql
+  host: mssql-server
+  database: sourcedb
+  user: sa
+  password: source-password
+target:
+  type: postgres
+  host: pg-server
+  database: targetdb
+  user: postgres
+  password: target-password
+ai_review:
+  enabled: true
+  mode: fail
+  scope: table
+  model: local-reviewer
+`
+	cfg, err := LoadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadBytes failed: %v", err)
+	}
+
+	if cfg.AIReview.Enabled == nil || !*cfg.AIReview.Enabled {
+		t.Fatal("AIReview.Enabled was not true")
+	}
+	if cfg.AIReview.Mode != "fail" {
+		t.Fatalf("AIReview.Mode = %q", cfg.AIReview.Mode)
+	}
+	if cfg.AIReview.Scope != "table" {
+		t.Fatalf("AIReview.Scope = %q", cfg.AIReview.Scope)
+	}
+	if cfg.AIReview.Model != "local-reviewer" {
+		t.Fatalf("AIReview.Model = %q", cfg.AIReview.Model)
+	}
+}
+
 func TestSecretsWithSpecialCharacters(t *testing.T) {
 	// Test that secrets containing YAML special characters work correctly
 	tmpDir := t.TempDir()

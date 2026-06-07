@@ -1,8 +1,8 @@
 # smt — Schema Migration Tool
 
-SMT extracts the schema of a source database, builds matching DDL on a target database, and applies incremental schema changes (ALTER TABLE / CREATE INDEX / ...) detected by diffing the current source schema against a stored snapshot. The diff is rendered to dialect-appropriate SQL by an AI provider.
+SMT extracts the schema of a source database, builds matching DDL on a target database, and applies incremental schema changes (ALTER TABLE / CREATE INDEX / ...) detected by diffing the current source schema against a stored snapshot. Schema DDL is generated deterministically by default, with optional AI review available as an extra inspection layer.
 
-SMT is the schema-only counterpart to [DMT](https://github.com/johndauphine/dmt) (the data migration tool): same pluggable driver model, same AI-assisted type mapping, same TUI scaffolding, same encrypted profile storage. It does not move rows.
+SMT is the schema-only counterpart to [DMT](https://github.com/johndauphine/dmt) (the data migration tool): same pluggable driver model, same TUI scaffolding, same encrypted profile storage. It does not move rows.
 
 ## Supported databases
 
@@ -12,13 +12,12 @@ PostgreSQL, SQL Server, MySQL — both as source and target. New engines are add
 
 ```bash
 make build
-./smt init-secrets                  # create ~/.secrets/smt-config.yaml; add your AI key
 cp config.yaml.example config.yaml  # edit source/target connection
 ./smt health-check
 ./smt create                        # build target schema from source
 ./smt snapshot                      # capture source schema as a baseline
 # ...time passes, source schema evolves...
-./smt sync                          # diff vs snapshot, AI renders ALTERs to migration.sql
+./smt sync                          # diff vs snapshot, render ALTERs to migration.sql
 ./smt sync --apply                  # execute the ALTERs against the target
 ```
 
@@ -30,7 +29,7 @@ Run `./smt` with no arguments to launch the TUI. See `./smt --help` for the full
 |---------|--------------|
 | `smt create` | extract source schema, run CREATE TABLE / CREATE INDEX / etc on target |
 | `smt snapshot` | save the current source schema as a baseline for future diffing |
-| `smt sync` | diff source against last snapshot; AI generates target-dialect SQL; emit to `migration.sql` for review |
+| `smt sync` | diff source against last snapshot; generate target-dialect SQL; emit to `migration.sql` for review |
 | `smt sync --apply` | also execute the generated SQL against the target |
 | `smt sync --apply --allow-data-loss` | permit column/table drops |
 | `smt sync --apply --save-snapshot` | save the new schema as the next baseline after success |
@@ -41,9 +40,34 @@ Run `./smt` with no arguments to launch the TUI. See `./smt --help` for the full
 | `smt profile {save,list,delete,export}` | encrypted profile storage |
 | `smt init` / `smt init-secrets` | create the config / secrets files |
 
-## AI configuration
+## Deterministic DDL
 
-SMT relies on an AI provider for type mapping and for SQL rendering in `sync`. Configure one in `~/.secrets/smt-config.yaml` (run `smt init-secrets` for the template):
+SMT uses deterministic schema generation by default:
+
+```yaml
+schema_generation:
+  mode: deterministic
+  unknown_type_policy: fail
+
+ai_review:
+  enabled: false
+```
+
+In deterministic mode, `smt create` and PostgreSQL-target `smt sync` do not require LM Studio, Ollama, OpenAI, Anthropic, Gemini, or any other AI provider. SMT introspects source schema metadata, maps source types to target types through deterministic rules, renders target DDL, writes SQL artifacts under `migration.data_dir`, applies the DDL, and can be verified independently.
+
+Set `schema_generation.mode: ai` only to use the legacy AI-authored DDL path.
+
+## Optional AI Review
+
+AI review is optional. When enabled, the AI reviews deterministic DDL before apply and reports issues. It does not silently rewrite executable SQL.
+
+```yaml
+ai_review:
+  enabled: true
+  mode: warn   # warn | fail
+```
+
+Configure the provider in `~/.secrets/smt-config.yaml` (run `smt init-secrets` for the template):
 
 ```yaml
 ai:
@@ -61,16 +85,14 @@ The same secrets file is read by both the CLI and the TUI. File mode 0600 is enf
 
 ## Philosophy
 
-SMT's job is to give the AI the context it needs and execute what comes back. Translation, generation, and judgment belong to the AI — type mapping, ALTER statement generation, risk classification, and error diagnosis all flow through the configured provider. SMT itself does the deterministic parts: introspect schemas, compute structural diffs, run SQL.
+SMT's core schema path should be deterministic: introspect schemas, map types, compute structural diffs, render SQL, write artifacts, and run SQL. AI can be a strong reviewer, but it is not required and is not the author of DDL in the default architecture.
 
 ## How `sync` works
 
 1. `smt snapshot` extracts the current source schema (tables + columns + indexes + FKs + check constraints) and stores the JSON in the SQLite state DB at `~/.smt/state.db`.
 2. `smt sync` extracts the current source schema again, loads the latest snapshot, and computes a structural diff (added / removed / changed tables and per-table column/index/FK/check deltas).
-3. The whole structural diff is sent to the configured AI provider in one prompt. The AI returns a JSON list of statements, each containing the SQL text, a one-line description, and a risk classification: `safe`, `blocking`, `rebuild`, or `data-loss-risk`.
+3. In deterministic mode, SMT renders a plan locally. In legacy AI mode, the whole structural diff is sent to the configured AI provider in one prompt.
 4. By default the SQL is written to `migration.sql` for review. With `--apply` the statements are executed against the target in order. `data-loss-risk` statements (column drops, table drops) are refused unless `--allow-data-loss` is also passed.
-
-There is no hand-coded ALTER syntax table — the AI is the renderer. This keeps the supported-dialect surface as wide as the AI provider's training data.
 
 ## Configuration
 
