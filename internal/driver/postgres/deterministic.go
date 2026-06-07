@@ -263,8 +263,15 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 		}
 	case "text", "ntext":
 		typ = "text"
-	case "datetime", "datetime2", "smalldatetime", "timestamp":
+	case "datetime", "datetime2", "smalldatetime":
 		typ = "timestamp without time zone"
+	case "timestamp":
+		// SQL Server's timestamp is the legacy rowversion binary type.
+		if col.MaxLength == 8 {
+			typ = "bytea"
+		} else {
+			typ = "timestamp without time zone"
+		}
 	case "datetimeoffset", "timestamptz", "timestamp with time zone":
 		typ = "timestamp with time zone"
 	case "date":

@@ -435,6 +435,32 @@ func TestRenderDeterministic_ColumnTypeAndDefaultChangeDropsDefaultFirst(t *test
 	}
 }
 
+func TestRenderDeterministic_ComputedColumnChangeFails(t *testing.T) {
+	oldTotal := driver.Column{
+		Name:               "Total",
+		DataType:           "int",
+		IsNullable:         false,
+		IsComputed:         true,
+		ComputedExpression: "([Quantity]*[Price])",
+	}
+	newTotal := oldTotal
+	newTotal.ComputedExpression = "([Quantity]*[Price]*(1-[Discount]))"
+	d := Compute(
+		Snapshot{Tables: []driver.Table{table("Orders", oldTotal)}},
+		Snapshot{Tables: []driver.Table{table("Orders", newTotal)}},
+	).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	_, err := RenderDeterministic(d, "public", "postgres")
+	if err == nil {
+		t.Fatal("expected computed column change to fail")
+	}
+	if !strings.Contains(err.Error(), "computed column") {
+		t.Fatalf("expected computed column error, got %v", err)
+	}
+}
+
 func TestRenderDeterministic_ColumnDefaultChanges(t *testing.T) {
 	activeOld := driver.Column{Name: "IsActive", DataType: "bit", IsNullable: false, DefaultExpression: "((0))"}
 	activeNew := activeOld

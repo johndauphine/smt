@@ -187,6 +187,10 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 }
 
 func (r deterministicPostgresRenderer) renderColumnChange(plan *Plan, tableName string, cc ColumnChange) error {
+	if cc.Old.IsComputed || cc.New.IsComputed {
+		return fmt.Errorf("computed column %s changes are not supported by deterministic PostgreSQL sync", cc.Name)
+	}
+
 	oldType, err := pgddl.RenderColumnTypeWithPolicy(cc.Old, r.unknownTypePolicy)
 	if err != nil {
 		return err
