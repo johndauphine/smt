@@ -369,6 +369,47 @@ func TestRenderDeterministic_AddedTableIncludesSideObjects(t *testing.T) {
 	}
 }
 
+func TestRenderDeterministic_ChangedTableBitSideObjectsUseColumnContext(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{{
+		Name: "Customers",
+		Curr: driver.Table{
+			Name: "Customers",
+			Columns: []driver.Column{
+				{Name: "Id", DataType: "int", IsNullable: false},
+				{Name: "IsActive", DataType: "bit", IsNullable: false},
+			},
+		},
+		AddedIndexes: []driver.Index{{
+			Name:    "IX_Customers_Active",
+			Columns: []string{"Id"},
+			Filter:  "([IsActive]=(1))",
+		}},
+		AddedChecks: []driver.CheckConstraint{{
+			Name:       "CK_Customers_Active",
+			Definition: "([IsActive]=(1))",
+		}},
+	}}}.Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	sql := plan.SQL()
+	for _, want := range []string{
+		`CREATE INDEX "ix_customers_active" ON "public"."customers" ("id") WHERE ("isactive" = true)`,
+		`ALTER TABLE "public"."customers" ADD CONSTRAINT "ck_customers_active" CHECK ("isactive" = true)`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected SQL to contain %q, got:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "true))") {
+		t.Fatalf("bit comparison rewrite left an extra close paren:\n%s", sql)
+	}
+}
+
 func TestRenderDeterministic_AddedTableForeignKeysAfterAllCreateTables(t *testing.T) {
 	comments := driver.Table{
 		Schema: "dbo",

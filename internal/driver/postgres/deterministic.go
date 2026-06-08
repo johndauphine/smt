@@ -73,7 +73,7 @@ func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlo
 	lines := make([]string, 0, len(t.Columns)+1)
 
 	for _, col := range t.Columns {
-		def, colType, err := r.columnDefinition(col)
+		def, colType, err := r.columnDefinition(col, t.Columns)
 		if err != nil {
 			return "", nil, fmt.Errorf("mapping column %s.%s: %w", t.Name, col.Name, err)
 		}
@@ -104,11 +104,15 @@ func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlo
 	return b.String(), columnTypes, nil
 }
 
-func (r deterministicDDL) columnDefinition(col driver.Column) (string, string, error) {
+func (r deterministicDDL) columnDefinition(col driver.Column, tableColumns ...[]driver.Column) (string, string, error) {
 	colName := sanitizePGIdentifier(col.Name)
 	colType, err := r.columnType(col)
 	if err != nil {
 		return "", "", err
+	}
+	contextColumns := []driver.Column(nil)
+	if len(tableColumns) > 0 {
+		contextColumns = tableColumns[0]
 	}
 	if col.IsComputed {
 		if !col.ComputedPersisted {
@@ -124,6 +128,7 @@ func (r deterministicDDL) columnDefinition(col driver.Column) (string, string, e
 		if isTextualPGType(colType) {
 			expr = rewriteSQLServerStringConcat(expr)
 		}
+		expr = rewriteSQLServerBitComparisons(expr, contextColumns)
 		if strings.EqualFold(strings.TrimSpace(col.DataType), "bit") {
 			expr = rewriteSQLServerBooleanResultLiterals(expr)
 		}
@@ -193,6 +198,7 @@ func (r deterministicDDL) createIndex(t *driver.Table, idx *driver.Index, target
 		if err != nil {
 			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
 		}
+		expr = rewriteSQLServerBitComparisons(expr, t.Columns)
 		b.WriteString(" WHERE ")
 		b.WriteString(expr)
 	}

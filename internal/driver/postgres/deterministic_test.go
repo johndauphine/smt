@@ -92,6 +92,26 @@ func TestDeterministicFinalizationDDL(t *testing.T) {
 	assertContains(t, checkDDL, `ALTER TABLE "public"."votes" ADD CONSTRAINT "ck_votes_bountyamount" CHECK ("bountyamount">(0))`)
 }
 
+func TestDeterministicFilteredIndexBitComparison(t *testing.T) {
+	renderer := newDeterministicDDL()
+	table := &driver.Table{
+		Name:    "Customers",
+		Columns: []driver.Column{{Name: "IsActive", DataType: "bit"}},
+	}
+	idxDDL, err := renderer.createIndex(table, &driver.Index{
+		Name:    "IX_Customers_Active",
+		Columns: []string{"Id"},
+		Filter:  "([IsActive]=(1))",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createIndex: %v", err)
+	}
+	assertContains(t, idxDDL, `WHERE ("isactive" = true)`)
+	if strings.Contains(idxDDL, "true))") {
+		t.Fatalf("filtered index bit comparison rewrite left an extra close paren:\n%s", idxDDL)
+	}
+}
+
 func TestDeterministicUnsupportedTypeFails(t *testing.T) {
 	renderer := newDeterministicDDL()
 	_, err := renderer.columnType(driver.Column{Name: "Mystery", DataType: "sql_variant"})
@@ -232,6 +252,30 @@ func TestDeterministicMSSQLComputedBitCaseColumn(t *testing.T) {
 	assertContains(t, def, `"ispreferred" boolean GENERATED ALWAYS AS (`)
 	assertContains(t, def, `case when "score" >= (10) then true else false end`)
 	assertContains(t, def, `) STORED`)
+}
+
+func TestDeterministicMSSQLComputedColumnTestsBitSource(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, _, err := renderer.createTable(&driver.Table{
+		Name: "Customers",
+		Columns: []driver.Column{
+			{Name: "IsActive", DataType: "bit"},
+			{
+				Name:               "ActiveRank",
+				DataType:           "int",
+				IsComputed:         true,
+				ComputedExpression: "(case when [IsActive]=(1) then (10) else (0) end)",
+				ComputedPersisted:  true,
+			},
+		},
+	}, "public", false)
+	if err != nil {
+		t.Fatalf("createTable: %v", err)
+	}
+	assertContains(t, ddl, `case when "isactive" = true then (10) else (0) end`)
+	if strings.Contains(ddl, "true)") {
+		t.Fatalf("computed bit source comparison rewrite left an extra close paren:\n%s", ddl)
+	}
 }
 
 func TestDeterministicUnsafeDefaultExpressionFails(t *testing.T) {

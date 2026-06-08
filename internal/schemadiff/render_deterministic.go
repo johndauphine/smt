@@ -81,14 +81,14 @@ func (r deterministicPostgresRenderer) renderAddedTableDefinition(plan *Plan, t 
 func (r deterministicPostgresRenderer) renderAddedTableSideObjects(plan *Plan, tables []driver.Table) error {
 	for _, t := range tables {
 		for _, idx := range t.Indexes {
-			if err := r.renderAddedIndex(plan, t.Name, idx); err != nil {
+			if err := r.renderAddedIndex(plan, t, idx); err != nil {
 				return err
 			}
 		}
 	}
 	for _, t := range tables {
 		for _, chk := range t.CheckConstraints {
-			if err := r.renderAddedCheck(plan, t.Name, chk); err != nil {
+			if err := r.renderAddedCheck(plan, t, chk); err != nil {
 				return err
 			}
 		}
@@ -168,7 +168,7 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 	}
 
 	for _, idx := range td.AddedIndexes {
-		if err := r.renderAddedIndex(plan, tableName, idx); err != nil {
+		if err := r.renderAddedIndex(plan, td.Curr, idx); err != nil {
 			return err
 		}
 	}
@@ -178,7 +178,7 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 		}
 	}
 	for _, chk := range td.AddedChecks {
-		if err := r.renderAddedCheck(plan, tableName, chk); err != nil {
+		if err := r.renderAddedCheck(plan, td.Curr, chk); err != nil {
 			return err
 		}
 	}
@@ -268,8 +268,8 @@ func (r deterministicPostgresRenderer) renderColumnChange(plan *Plan, tableName 
 	return nil
 }
 
-func (r deterministicPostgresRenderer) renderAddedIndex(plan *Plan, tableName string, idx driver.Index) error {
-	t := driver.Table{Name: tableName}
+func (r deterministicPostgresRenderer) renderAddedIndex(plan *Plan, t driver.Table, idx driver.Index) error {
+	tableName := t.Name
 	ddl, err := pgddl.RenderCreateIndexDDL(&t, &idx, r.schema)
 	if err != nil {
 		return err
@@ -300,8 +300,8 @@ func (r deterministicPostgresRenderer) renderAddedForeignKey(plan *Plan, tableNa
 	return nil
 }
 
-func (r deterministicPostgresRenderer) renderAddedCheck(plan *Plan, tableName string, chk driver.CheckConstraint) error {
-	t := driver.Table{Name: tableName}
+func (r deterministicPostgresRenderer) renderAddedCheck(plan *Plan, t driver.Table, chk driver.CheckConstraint) error {
+	tableName := t.Name
 	ddl, err := pgddl.RenderCreateCheckConstraintDDL(&t, &chk, r.schema)
 	if err != nil {
 		return err
