@@ -285,6 +285,27 @@ func TestDeterministicMSSQLCheckBitComparison(t *testing.T) {
 		t.Fatalf("createCheckConstraint: %v", err)
 	}
 	assertContains(t, ddl, `CHECK ("isactive" = true)`)
+	if strings.Contains(ddl, "true))") {
+		t.Fatalf("bit comparison rewrite left an extra close paren:\n%s", ddl)
+	}
+}
+
+func TestDeterministicMSSQLCheckBitComparisonReversed(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, err := renderer.createCheckConstraint(&driver.Table{
+		Name:    "Customers",
+		Columns: []driver.Column{{Name: "IsActive", DataType: "bit"}},
+	}, &driver.CheckConstraint{
+		Name:       "CK_Cust_active",
+		Definition: "((0)=[IsActive])",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createCheckConstraint: %v", err)
+	}
+	assertContains(t, ddl, `CHECK (false = "isactive")`)
+	if strings.Contains(ddl, "false)") {
+		t.Fatalf("reversed bit comparison rewrite left an extra close paren:\n%s", ddl)
+	}
 }
 
 func TestDeterministicMSSQLCheckLikeBracketPattern(t *testing.T) {

@@ -632,24 +632,33 @@ func rewriteSQLServerBitComparisons(expr string, cols []driver.Column) string {
 		}
 		quoted := `"` + sanitizePGIdentifier(col.Name) + `"`
 		ident := regexp.QuoteMeta(quoted)
-		leftRE := regexp.MustCompile(`(?i)(` + ident + `)\s*=\s*\(?([01])\)?\b`)
+		leftRE := regexp.MustCompile(`(?i)(` + ident + `)\s*=\s*(?:\(([01])\)|([01])\b)`)
 		out = leftRE.ReplaceAllStringFunc(out, func(match string) string {
 			parts := leftRE.FindStringSubmatch(match)
-			if len(parts) != 3 {
+			if len(parts) != 4 {
 				return match
 			}
-			return parts[1] + " = " + bitLiteral(parts[2])
+			return parts[1] + " = " + bitLiteral(firstNonEmpty(parts[2], parts[3]))
 		})
-		rightRE := regexp.MustCompile(`(?i)\(?([01])\)?\s*=\s*(` + ident + `)\b`)
+		rightRE := regexp.MustCompile(`(?i)(?:\(([01])\)|([01])\b)\s*=\s*(` + ident + `)`)
 		out = rightRE.ReplaceAllStringFunc(out, func(match string) string {
 			parts := rightRE.FindStringSubmatch(match)
-			if len(parts) != 3 {
+			if len(parts) != 4 {
 				return match
 			}
-			return bitLiteral(parts[1]) + " = " + parts[2]
+			return bitLiteral(firstNonEmpty(parts[1], parts[2])) + " = " + parts[3]
 		})
 	}
 	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func bitLiteral(v string) string {
