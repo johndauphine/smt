@@ -79,7 +79,7 @@ If you find yourself writing SQL syntax in Go code (a new ALTER variant, a new d
 
 ### AI infrastructure
 
-The full multi-provider HTTP plumbing (Anthropic / OpenAI / Gemini / Ollama / LM Studio) lives in `internal/driver/ai_typemapper.go`:
+The full multi-provider HTTP plumbing (Anthropic / OpenAI / Google / Ollama / LM Studio) lives in `internal/driver/ai_typemapper.go`:
 
 - `MapType` / `MapTypeWithError` — cached type-mapping API, used by every driver's `CreateTable` for source-to-target type inference
 - `Ask(ctx, prompt)` — generic free-form prompt entrypoint, used by `internal/schemadiff/render.go` for SQL rendering
@@ -152,8 +152,6 @@ Active work is tracked in GitHub issues. Run `gh issue list --state open` and re
 
 Older non-issue follow-ups:
 
-- `smt validate` and `smt analyze` are stubs. validate is a small reuse of `schemadiff.Compute` against the target's introspection rather than a stored snapshot. analyze reuses the AI plumbing for schema-relevant suggestions (risky type mappings, tables to exclude, missing indexes).
-- TUI `/sync` and `/snapshot` print "lands in a later phase" instead of dispatching to the new commands; wire them to call the same handlers as the CLI.
 - `MigrationDefaults` in `internal/secrets/secrets.go` carries unused workers/chunk_size/buffer fields. Safe to drop once we're confident no DMT secrets file in the wild needs them.
 
 ### Cross-engine coverage status (as of 2026-05-06)

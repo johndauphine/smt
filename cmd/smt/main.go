@@ -1,7 +1,7 @@
 // Command smt is the schema migration tool. It extracts schemas from a
-// source database, generates matching DDL on a target database, and (in a
-// later phase) applies ALTER statements derived from diffing the source
-// schema against a stored snapshot.
+// source database, generates matching DDL on a target database, and applies
+// ALTER statements derived from diffing the source schema against a stored
+// snapshot.
 //
 // SMT is the schema-only counterpart to DMT (the data migration tool): it
 // shares DMT's driver model, AI-assisted type mapping, and TUI scaffolding
@@ -90,26 +90,18 @@ func topLevelAction(c *cli.Context) error {
 	if c.NArg() == 0 {
 		return tui.Start()
 	}
-	return cli.ShowAppHelp(c)
+	_ = cli.ShowAppHelp(c)
+	return exitcodes.NewExitError(fmt.Errorf("unknown command: %s", c.Args().First()), exitcodes.ConfigError)
 }
 
 func commands() []*cli.Command {
 	return []*cli.Command{
 		createCommand(),
 		syncCommand(),
-		validateCommand(),
 		snapshotCommand(),
 		healthCheckCommand(),
-		analyzeCommand(),
-		initCommand(),
 		initSecretsCommand(),
 		profileCommand(),
 		historyCommand(),
-	}
-}
-
-func notImplemented(name string) cli.ActionFunc {
-	return func(*cli.Context) error {
-		return fmt.Errorf("%s: not yet implemented in this build", name)
 	}
 }

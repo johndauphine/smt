@@ -33,12 +33,10 @@ Run `./smt` with no arguments to launch the TUI. See `./smt --help` for the full
 | `smt sync --apply` | also execute the generated SQL against the target |
 | `smt sync --apply --allow-data-loss` | permit column/table drops |
 | `smt sync --apply --save-snapshot` | save the new schema as the next baseline after success |
-| `smt validate` | (planned) compare source vs target, report drift |
-| `smt analyze` | (planned) AI suggestions for schema-relevant config |
 | `smt health-check` | ping both databases, count source tables |
 | `smt history` | list past schema runs |
 | `smt profile {save,list,delete,export}` | encrypted profile storage |
-| `smt init` / `smt init-secrets` | create the config / secrets files |
+| `smt init-secrets` | create the secrets file template |
 
 ## Deterministic DDL
 
@@ -53,7 +51,7 @@ ai_review:
   enabled: false
 ```
 
-In deterministic mode, `smt create` and PostgreSQL-target `smt sync` do not require LM Studio, Ollama, OpenAI, Anthropic, Gemini, or any other AI provider. SMT introspects source schema metadata, maps source types to target types through deterministic rules, renders target DDL, writes SQL artifacts under `migration.data_dir`, applies the DDL, and can be verified independently.
+In deterministic mode, `smt create` and PostgreSQL-target `smt sync` do not require LM Studio, Ollama, OpenAI, Anthropic, Google, or any other AI provider. SMT introspects source schema metadata, maps source types to target types through deterministic rules, renders target DDL, writes SQL artifacts under `migration.data_dir`, applies the DDL, and can be verified independently.
 
 Set `schema_generation.mode: ai` only to use the legacy AI-authored DDL path.
 
@@ -71,9 +69,14 @@ Configure the provider in `~/.secrets/smt-config.yaml` (run `smt init-secrets` f
 
 ```yaml
 ai:
-  provider: anthropic           # anthropic | openai | gemini | ollama | lmstudio
-  api_key: ${env:ANTHROPIC_API_KEY}
-  model: claude-haiku-4-5-20251001
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: "your-anthropic-api-key"
+      model: claude-sonnet-4-6
+    google:
+      api_key: "your-google-api-key"
+      model: gemini-2.0-flash
 encryption:
   master_key: ""                # openssl rand -base64 32, used for profile encryption
 notifications:
@@ -117,7 +120,7 @@ Passwords support `${env:VAR}`, `${file:/path}`, and literal forms.
 
 ## Heritage
 
-SMT started as a schema-feature carve-out from DMT. The driver layer, AI plumbing (multi-provider HTTP for Anthropic / OpenAI / Gemini / Ollama / LM Studio), encrypted profile storage, setup wizard, and Bubble Tea TUI all carry over. The data-transfer machinery (parallel workers, chunking, write-ahead writers, runtime AI tuning) is gone. The schema-diff + AI-rendered ALTER feature is new in SMT.
+SMT started as a schema-feature carve-out from DMT. The driver layer, AI plumbing (multi-provider HTTP for Anthropic / OpenAI / Google / Ollama / LM Studio), encrypted profile storage, and Bubble Tea TUI all carry over. The data-transfer machinery (parallel workers, chunking, write-ahead writers, runtime AI tuning) is gone. The schema-diff + AI-rendered ALTER feature is new in SMT.
 
 ## License
 

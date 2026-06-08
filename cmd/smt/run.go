@@ -154,27 +154,6 @@ func runHistory(c *cli.Context) error {
 	return orch.ShowHistory()
 }
 
-// validateCommand and analyzeCommand remain stubs for now. validate
-// (compare source vs target schema) reuses the schema-diff engine — it
-// just compares against the target's introspection rather than a stored
-// snapshot — and is a small follow-up. analyze gets the AI-driven
-// schema-relevant recommendations.
-func validateCommand() *cli.Command {
-	return &cli.Command{
-		Name:   "validate",
-		Usage:  "Compare source vs target schema and report drift",
-		Action: notImplemented("validate"),
-	}
-}
-
-func analyzeCommand() *cli.Command {
-	return &cli.Command{
-		Name:   "analyze",
-		Usage:  "Analyze source schema and suggest configuration",
-		Action: notImplemented("analyze"),
-	}
-}
-
 // withSignalCancel returns a derived context that is cancelled when the
 // process receives SIGINT or SIGTERM. After timeout from cancellation,
 // the process is force-exited.

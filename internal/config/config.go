@@ -183,7 +183,8 @@ type AIConfig struct {
 	APIKey string `yaml:"api_key"`
 
 	// Provider specifies which AI provider to use.
-	// Valid values: "anthropic", "openai", "gemini", "ollama", "lmstudio"
+	// Valid values: "anthropic", "openai", "google", "ollama", "lmstudio"
+	// Legacy "gemini" is accepted and normalized to "google".
 	// Defaults to "anthropic" if not specified.
 	Provider string `yaml:"provider"`
 
@@ -191,7 +192,7 @@ type AIConfig struct {
 	// Defaults to smart models for accurate inference:
 	//   Anthropic: claude-haiku-4-5-20251001
 	//   OpenAI: gpt-4o
-	//   Gemini: gemini-2.0-flash
+	//   Google: gemini-2.0-flash
 	Model string `yaml:"model"`
 
 	// TimeoutSeconds is the API request timeout (default: 30).
@@ -277,7 +278,7 @@ type MigrationConfig struct {
 	// CreateCheckConstraints). Each phase still runs sequentially relative
 	// to the others — only the per-table calls inside a phase parallelize.
 	//
-	// Cloud providers (Anthropic, OpenAI, Gemini): set 8-32. Throughput
+	// Cloud providers (Anthropic, OpenAI, Google): set 8-32. Throughput
 	// scales nearly linearly with concurrency until you hit the per-key
 	// rate limit; the existing 429 retry handles transient throttling.
 	// Live benchmark with Anthropic Haiku 4.5 on an 18-table schema:

@@ -47,7 +47,9 @@ const (
 	ProviderAnthropic AIProvider = "anthropic"
 	// ProviderOpenAI uses OpenAI's API.
 	ProviderOpenAI AIProvider = "openai"
-	// ProviderGemini uses Google's Gemini API.
+	// ProviderGoogle uses Google's Gemini API.
+	ProviderGoogle AIProvider = "google"
+	// ProviderGemini is the legacy name for ProviderGoogle.
 	ProviderGemini AIProvider = "gemini"
 	// ProviderOllama uses local Ollama with OpenAI-compatible API.
 	ProviderOllama AIProvider = "ollama"
@@ -60,7 +62,7 @@ func ValidAIProviders() []string {
 	return []string{
 		string(ProviderAnthropic),
 		string(ProviderOpenAI),
-		string(ProviderGemini),
+		string(ProviderGoogle),
 		string(ProviderOllama),
 		string(ProviderLMStudio),
 	}
@@ -69,7 +71,7 @@ func ValidAIProviders() []string {
 // IsValidAIProvider returns true if the provider name is valid (case-insensitive).
 func IsValidAIProvider(provider string) bool {
 	switch AIProvider(strings.ToLower(provider)) {
-	case ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOllama, ProviderLMStudio:
+	case ProviderAnthropic, ProviderOpenAI, ProviderGoogle, ProviderGemini, ProviderOllama, ProviderLMStudio:
 		return true
 	}
 	return false
@@ -79,6 +81,9 @@ func IsValidAIProvider(provider string) bool {
 // Returns empty string if the provider is invalid.
 func NormalizeAIProvider(provider string) string {
 	normalized := strings.ToLower(provider)
+	if AIProvider(normalized) == ProviderGemini {
+		return string(ProviderGoogle)
+	}
 	if IsValidAIProvider(normalized) {
 		return normalized
 	}
@@ -126,6 +131,9 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 	// per backend (e.g. anthropic-haiku + anthropic-sonnet, both Type:
 	// anthropic).
 	providerType := provider.EffectiveType(providerName)
+	if normalized := NormalizeAIProvider(providerType); normalized != "" {
+		providerType = normalized
+	}
 
 	// Validate cloud providers have API key
 	if !secrets.IsLocalProvider(providerType) && provider.APIKey == "" {
@@ -350,7 +358,7 @@ func (m *AITypeMapper) dispatch(ctx context.Context, prompt string) (string, err
 		return m.queryAnthropicAPI(ctx, prompt)
 	case ProviderOpenAI:
 		return m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
-	case ProviderGemini:
+	case ProviderGoogle, ProviderGemini:
 		return m.queryGeminiAPI(ctx, prompt)
 	case ProviderOllama:
 		baseURL := m.provider.GetEffectiveBaseURL(m.providerType)
@@ -1264,7 +1272,7 @@ func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error
 		result, err = m.queryAnthropicAPI(ctx, prompt)
 	case ProviderOpenAI:
 		result, err = m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
-	case ProviderGemini:
+	case ProviderGoogle, ProviderGemini:
 		result, err = m.queryGeminiAPI(ctx, prompt)
 	case ProviderOllama:
 		baseURL := m.provider.GetEffectiveBaseURL(m.providerType)
