@@ -92,6 +92,26 @@ func TestDeterministicFinalizationDDL(t *testing.T) {
 	assertContains(t, checkDDL, `ALTER TABLE "public"."votes" ADD CONSTRAINT "ck_votes_bountyamount" CHECK ("bountyamount">(0))`)
 }
 
+func TestDeterministicFilteredIndexBitComparison(t *testing.T) {
+	renderer := newDeterministicDDL()
+	table := &driver.Table{
+		Name:    "Customers",
+		Columns: []driver.Column{{Name: "IsActive", DataType: "bit"}},
+	}
+	idxDDL, err := renderer.createIndex(table, &driver.Index{
+		Name:    "IX_Customers_Active",
+		Columns: []string{"Id"},
+		Filter:  "([IsActive]=(1))",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createIndex: %v", err)
+	}
+	assertContains(t, idxDDL, `WHERE ("isactive" = true)`)
+	if strings.Contains(idxDDL, "true))") {
+		t.Fatalf("filtered index bit comparison rewrite left an extra close paren:\n%s", idxDDL)
+	}
+}
+
 func TestDeterministicUnsupportedTypeFails(t *testing.T) {
 	renderer := newDeterministicDDL()
 	_, err := renderer.columnType(driver.Column{Name: "Mystery", DataType: "sql_variant"})
@@ -108,6 +128,188 @@ func TestDeterministicMSSQLTimestampRowversionMapsToBytea(t *testing.T) {
 	}
 	if got != "bytea" {
 		t.Fatalf("timestamp max_length=8 maps to %q, want bytea", got)
+	}
+}
+
+func TestDeterministicMSSQLDateTimeOffsetDefault(t *testing.T) {
+	renderer := newDeterministicDDL()
+	def, err := renderer.defaultExpression(driver.Column{
+		Name:              "PaidAt",
+		DataType:          "datetimeoffset",
+		DefaultExpression: "(sysdatetimeoffset())",
+	})
+	if err != nil {
+		t.Fatalf("defaultExpression: %v", err)
+	}
+	if def != "CURRENT_TIMESTAMP" {
+		t.Fatalf("sysdatetimeoffset maps to %q, want CURRENT_TIMESTAMP", def)
+	}
+}
+
+func TestDeterministicMSSQLDateTimeOffsetUTCDefault(t *testing.T) {
+	renderer := newDeterministicDDL()
+	def, err := renderer.defaultExpression(driver.Column{
+		Name:              "PaidAt",
+		DataType:          "datetimeoffset",
+		DefaultExpression: "(sysutcdatetime())",
+	})
+	if err != nil {
+		t.Fatalf("defaultExpression: %v", err)
+	}
+	if def != "CURRENT_TIMESTAMP" {
+		t.Fatalf("datetimeoffset sysutcdatetime maps to %q, want CURRENT_TIMESTAMP", def)
+	}
+}
+
+func TestDeterministicMSSQLComputedColumn(t *testing.T) {
+	renderer := newDeterministicDDL()
+	def, colType, err := renderer.columnDefinition(driver.Column{
+		Name:               "LineTotal",
+		DataType:           "decimal",
+		Precision:          15,
+		Scale:              2,
+		IsComputed:         true,
+		ComputedExpression: "(([quantity]*[unit_price])*((1)-[discount_pct]/(100)))",
+		ComputedPersisted:  true,
+	})
+	if err != nil {
+		t.Fatalf("columnDefinition: %v", err)
+	}
+	if colType != "numeric(15,2)" {
+		t.Fatalf("colType = %q, want numeric(15,2)", colType)
+	}
+	assertContains(t, def, `"linetotal" numeric(15,2) GENERATED ALWAYS AS (`)
+	assertContains(t, def, `"quantity"*"unit_price"`)
+	assertContains(t, def, `"discount_pct"`)
+	assertContains(t, def, `) STORED`)
+}
+
+func TestDeterministicMSSQLComputedColumnNullability(t *testing.T) {
+	renderer := newDeterministicDDL()
+	def, _, err := renderer.columnDefinition(driver.Column{
+		Name:               "LineTotal",
+		DataType:           "decimal",
+		Precision:          15,
+		Scale:              2,
+		IsNullable:         false,
+		IsComputed:         true,
+		ComputedExpression: "([quantity]*[unit_price])",
+		ComputedPersisted:  true,
+	})
+	if err != nil {
+		t.Fatalf("columnDefinition: %v", err)
+	}
+	assertContains(t, def, `) STORED NOT NULL`)
+
+	nullableDef, _, err := renderer.columnDefinition(driver.Column{
+		Name:               "LineTotal",
+		DataType:           "decimal",
+		Precision:          15,
+		Scale:              2,
+		IsNullable:         true,
+		IsComputed:         true,
+		ComputedExpression: "([quantity]*[unit_price])",
+		ComputedPersisted:  true,
+	})
+	if err != nil {
+		t.Fatalf("columnDefinition nullable: %v", err)
+	}
+	if strings.Contains(nullableDef, " NOT NULL") {
+		t.Fatalf("nullable computed column should not render NOT NULL:\n%s", nullableDef)
+	}
+}
+
+func TestDeterministicMSSQLComputedStringConcatColumn(t *testing.T) {
+	renderer := newDeterministicDDL()
+	def, _, err := renderer.columnDefinition(driver.Column{
+		Name:               "FullName",
+		DataType:           "nvarchar",
+		MaxLength:          101,
+		IsComputed:         true,
+		ComputedExpression: "([first_name]+' '+[last_name])",
+		ComputedPersisted:  true,
+	})
+	if err != nil {
+		t.Fatalf("columnDefinition: %v", err)
+	}
+	assertContains(t, def, `"fullname" character varying(101) GENERATED ALWAYS AS (`)
+	assertContains(t, def, `"first_name" || ' ' || "last_name"`)
+	assertContains(t, def, `) STORED`)
+}
+
+func TestDeterministicMSSQLNonPersistedComputedColumnFails(t *testing.T) {
+	renderer := newDeterministicDDL()
+	_, _, err := renderer.columnDefinition(driver.Column{
+		Name:               "FullName",
+		DataType:           "nvarchar",
+		MaxLength:          101,
+		IsComputed:         true,
+		ComputedExpression: "([first_name]+' '+[last_name])",
+		ComputedPersisted:  false,
+	})
+	if err == nil {
+		t.Fatal("expected non-persisted computed column to fail")
+	}
+}
+
+func TestDeterministicMSSQLComputedCaseColumn(t *testing.T) {
+	renderer := newDeterministicDDL()
+	def, _, err := renderer.columnDefinition(driver.Column{
+		Name:               "Margin",
+		DataType:           "decimal",
+		Precision:          12,
+		Scale:              2,
+		IsComputed:         true,
+		ComputedExpression: "(case when [cost_price] IS NULL OR [cost_price]=(0) then NULL else ([unit_price]-[cost_price])/[cost_price] end)",
+		ComputedPersisted:  true,
+	})
+	if err != nil {
+		t.Fatalf("columnDefinition: %v", err)
+	}
+	assertContains(t, def, `"margin" numeric(12,2) GENERATED ALWAYS AS (`)
+	assertContains(t, def, `case when "cost_price" IS NULL`)
+	assertContains(t, def, `else ("unit_price"-"cost_price")/"cost_price" end`)
+	assertContains(t, def, `) STORED`)
+}
+
+func TestDeterministicMSSQLComputedBitCaseColumn(t *testing.T) {
+	renderer := newDeterministicDDL()
+	def, _, err := renderer.columnDefinition(driver.Column{
+		Name:               "IsPreferred",
+		DataType:           "bit",
+		IsComputed:         true,
+		ComputedExpression: "(case when [score] >= (10) then (1) else (0) end)",
+		ComputedPersisted:  true,
+	})
+	if err != nil {
+		t.Fatalf("columnDefinition: %v", err)
+	}
+	assertContains(t, def, `"ispreferred" boolean GENERATED ALWAYS AS (`)
+	assertContains(t, def, `case when "score" >= (10) then true else false end`)
+	assertContains(t, def, `) STORED`)
+}
+
+func TestDeterministicMSSQLComputedColumnTestsBitSource(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, _, err := renderer.createTable(&driver.Table{
+		Name: "Customers",
+		Columns: []driver.Column{
+			{Name: "IsActive", DataType: "bit"},
+			{
+				Name:               "ActiveRank",
+				DataType:           "int",
+				IsComputed:         true,
+				ComputedExpression: "(case when [IsActive]=(1) then (10) else (0) end)",
+				ComputedPersisted:  true,
+			},
+		},
+	}, "public", false)
+	if err != nil {
+		t.Fatalf("createTable: %v", err)
+	}
+	assertContains(t, ddl, `case when "isactive" = true then (10) else (0) end`)
+	if strings.Contains(ddl, "true)") {
+		t.Fatalf("computed bit source comparison rewrite left an extra close paren:\n%s", ddl)
 	}
 }
 
@@ -132,6 +334,109 @@ func TestDeterministicUnsafeCheckExpressionFails(t *testing.T) {
 	}, "public")
 	if err == nil {
 		t.Fatal("expected unsupported check expression error")
+	}
+}
+
+func TestDeterministicMSSQLCheckBooleanKeywords(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, err := renderer.createCheckConstraint(&driver.Table{Name: "Customers"}, &driver.CheckConstraint{
+		Name:       "CK_Cust_identity",
+		Definition: "([customer_type]='individual' AND [first_name] IS NOT NULL AND [last_name] IS NOT NULL OR ([customer_type]='government' OR [customer_type]='company') AND [company_name] IS NOT NULL)",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createCheckConstraint: %v", err)
+	}
+	assertContains(t, ddl, `ALTER TABLE "public"."customers" ADD CONSTRAINT "ck_cust_identity" CHECK (`)
+	assertContains(t, ddl, `"customer_type"='individual' AND "first_name" IS NOT NULL`)
+	assertContains(t, ddl, `OR ("customer_type"='government' OR "customer_type"='company')`)
+}
+
+func TestDeterministicMSSQLCheckBitComparison(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, err := renderer.createCheckConstraint(&driver.Table{
+		Name:    "Customers",
+		Columns: []driver.Column{{Name: "IsActive", DataType: "bit"}},
+	}, &driver.CheckConstraint{
+		Name:       "CK_Cust_active",
+		Definition: "([IsActive]=(1))",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createCheckConstraint: %v", err)
+	}
+	assertContains(t, ddl, `CHECK ("isactive" = true)`)
+	if strings.Contains(ddl, "true))") {
+		t.Fatalf("bit comparison rewrite left an extra close paren:\n%s", ddl)
+	}
+}
+
+func TestDeterministicMSSQLCheckBitComparisonReversed(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, err := renderer.createCheckConstraint(&driver.Table{
+		Name:    "Customers",
+		Columns: []driver.Column{{Name: "IsActive", DataType: "bit"}},
+	}, &driver.CheckConstraint{
+		Name:       "CK_Cust_active",
+		Definition: "((0)=[IsActive])",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createCheckConstraint: %v", err)
+	}
+	assertContains(t, ddl, `CHECK (false = "isactive")`)
+	if strings.Contains(ddl, "false)") {
+		t.Fatalf("reversed bit comparison rewrite left an extra close paren:\n%s", ddl)
+	}
+}
+
+func TestDeterministicMSSQLCheckBitInequality(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, err := renderer.createCheckConstraint(&driver.Table{
+		Name: "Customers",
+		Columns: []driver.Column{
+			{Name: "IsDeleted", DataType: "bit"},
+			{Name: "IsArchived", DataType: "bit"},
+			{Name: "IsLocked", DataType: "bit"},
+		},
+	}, &driver.CheckConstraint{
+		Name:       "CK_Cust_flags",
+		Definition: "([IsDeleted]<>(1) AND [IsArchived]!=(0) AND (0)<>[IsLocked])",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createCheckConstraint: %v", err)
+	}
+	assertContains(t, ddl, `CHECK ("isdeleted" <> true AND "isarchived" != false AND false <> "islocked")`)
+	if strings.Contains(ddl, `<>(1)`) || strings.Contains(ddl, `!=(0)`) || strings.Contains(ddl, `(0)<>`) {
+		t.Fatalf("bit inequality rewrite left numeric literals behind:\n%s", ddl)
+	}
+}
+
+func TestDeterministicMSSQLCheckLikeBracketPattern(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, err := renderer.createCheckConstraint(&driver.Table{Name: "Tags"}, &driver.CheckConstraint{
+		Name:       "CK_Tag_color",
+		Definition: "([color] IS NULL OR [color] LIKE '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]')",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createCheckConstraint: %v", err)
+	}
+	assertContains(t, ddl, `ALTER TABLE "public"."tags" ADD CONSTRAINT "ck_tag_color" CHECK (`)
+	assertContains(t, ddl, `"color" IS NULL OR "color" ~ '^#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$'`)
+	if strings.Contains(ddl, `"col_0_9a_fa_f"`) {
+		t.Fatalf("LIKE character class was rewritten as an identifier:\n%s", ddl)
+	}
+}
+
+func TestDeterministicMSSQLCheckUnicodeLikeBracketPattern(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, err := renderer.createCheckConstraint(&driver.Table{Name: "Tags"}, &driver.CheckConstraint{
+		Name:       "CK_Tag_color",
+		Definition: "([color] IS NULL OR [color] LIKE N'#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]')",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createCheckConstraint: %v", err)
+	}
+	assertContains(t, ddl, `"color" IS NULL OR "color" ~ '^#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$'`)
+	if strings.Contains(ddl, `LIKE N'`) || strings.Contains(ddl, `"col_0_9a_fa_f"`) {
+		t.Fatalf("Unicode LIKE pattern was not rewritten correctly:\n%s", ddl)
 	}
 }
 

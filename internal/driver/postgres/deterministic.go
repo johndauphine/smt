@@ -39,6 +39,11 @@ func RenderColumnDefinitionWithPolicy(col driver.Column, unknownTypePolicy strin
 	return def, err
 }
 
+func RenderColumnDefinitionWithContextAndPolicy(col driver.Column, tableColumns []driver.Column, unknownTypePolicy string) (string, error) {
+	def, _, err := newDeterministicDDL(unknownTypePolicy).columnDefinition(col, tableColumns)
+	return def, err
+}
+
 func RenderColumnType(col driver.Column) (string, error) {
 	return RenderColumnTypeWithPolicy(col, "")
 }
@@ -73,7 +78,7 @@ func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlo
 	lines := make([]string, 0, len(t.Columns)+1)
 
 	for _, col := range t.Columns {
-		def, colType, err := r.columnDefinition(col)
+		def, colType, err := r.columnDefinition(col, t.Columns)
 		if err != nil {
 			return "", nil, fmt.Errorf("mapping column %s.%s: %w", t.Name, col.Name, err)
 		}
@@ -104,14 +109,45 @@ func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlo
 	return b.String(), columnTypes, nil
 }
 
-func (r deterministicDDL) columnDefinition(col driver.Column) (string, string, error) {
+func (r deterministicDDL) columnDefinition(col driver.Column, tableColumns ...[]driver.Column) (string, string, error) {
 	colName := sanitizePGIdentifier(col.Name)
 	colType, err := r.columnType(col)
 	if err != nil {
 		return "", "", err
 	}
+	contextColumns := []driver.Column(nil)
+	if len(tableColumns) > 0 {
+		contextColumns = tableColumns[0]
+	}
 	if col.IsComputed {
-		return "", "", fmt.Errorf("computed column %s is not yet supported by deterministic PostgreSQL DDL", col.Name)
+		if !col.ComputedPersisted {
+			return "", "", fmt.Errorf("computed column %s is not persisted; PostgreSQL generated columns are stored only", col.Name)
+		}
+		expr, err := r.sqlServerExpression(col.ComputedExpression)
+		if err != nil {
+			return "", "", fmt.Errorf("mapping computed column %s: %w", col.Name, err)
+		}
+		if strings.TrimSpace(expr) == "" {
+			return "", "", fmt.Errorf("computed column %s has no expression", col.Name)
+		}
+		if isTextualPGType(colType) {
+			expr = rewriteSQLServerStringConcat(expr)
+		}
+		expr = rewriteSQLServerBitComparisons(expr, contextColumns)
+		if strings.EqualFold(strings.TrimSpace(col.DataType), "bit") {
+			expr = rewriteSQLServerBooleanResultLiterals(expr)
+		}
+		var b strings.Builder
+		b.WriteString(r.dialect.QuoteIdentifier(colName))
+		b.WriteString(" ")
+		b.WriteString(colType)
+		b.WriteString(" GENERATED ALWAYS AS (")
+		b.WriteString(expr)
+		b.WriteString(") STORED")
+		if !col.IsNullable {
+			b.WriteString(" NOT NULL")
+		}
+		return b.String(), colType, nil
 	}
 
 	var b strings.Builder
@@ -170,6 +206,7 @@ func (r deterministicDDL) createIndex(t *driver.Table, idx *driver.Index, target
 		if err != nil {
 			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
 		}
+		expr = rewriteSQLServerBitComparisons(expr, t.Columns)
 		b.WriteString(" WHERE ")
 		b.WriteString(expr)
 	}
@@ -228,6 +265,7 @@ func (r deterministicDDL) createCheckConstraint(t *driver.Table, chk *driver.Che
 	if err != nil {
 		return "", fmt.Errorf("mapping check constraint %s: %w", chk.Name, err)
 	}
+	expr = rewriteSQLServerBitComparisons(expr, t.Columns)
 
 	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
 		r.dialect.QualifyTable(targetSchema, tableName),
@@ -337,6 +375,13 @@ func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
 		return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')", nil
 	case "sysdatetime()":
 		return "CURRENT_TIMESTAMP", nil
+	case "sysdatetimeoffset()":
+		return "CURRENT_TIMESTAMP", nil
+	case "sysutcdatetime()":
+		if strings.EqualFold(strings.TrimSpace(col.DataType), "datetimeoffset") {
+			return "CURRENT_TIMESTAMP", nil
+		}
+		return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')", nil
 	case "newid()":
 		return "gen_random_uuid()", nil
 	}
@@ -358,15 +403,22 @@ func (r deterministicDDL) sqlServerExpression(expr string) (string, error) {
 	out = replaceBracketIdentifiers(out, func(name string) string {
 		return r.dialect.QuoteIdentifier(sanitizePGIdentifier(name))
 	})
+	out = stripSQLServerUnicodeStringPrefixes(out)
+	out = rewriteSQLServerLikePatterns(out)
 	out = strings.ReplaceAll(out, "GETDATE()", "CURRENT_TIMESTAMP")
 	out = strings.ReplaceAll(out, "getdate()", "CURRENT_TIMESTAMP")
 	out = strings.ReplaceAll(out, "GETUTCDATE()", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
 	out = strings.ReplaceAll(out, "getutcdate()", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+	out = strings.ReplaceAll(out, "SYSDATETIME()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "sysdatetime()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "SYSDATETIMEOFFSET()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "sysdatetimeoffset()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "SYSUTCDATETIME()", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+	out = strings.ReplaceAll(out, "sysutcdatetime()", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
 	out = strings.ReplaceAll(out, "NEWID()", "gen_random_uuid()")
 	out = strings.ReplaceAll(out, "newid()", "gen_random_uuid()")
 	out = strings.ReplaceAll(out, "ISNULL(", "COALESCE(")
 	out = strings.ReplaceAll(out, "isnull(", "COALESCE(")
-	out = strings.ReplaceAll(out, "N'", "'")
 	if err := rejectUnsupportedSQLServerExpression(out); err != nil {
 		return "", err
 	}
@@ -383,7 +435,7 @@ func rejectUnsupportedSQLServerExpression(expr string) error {
 		}
 		name := strings.ToLower(match[1])
 		switch name {
-		case "coalesce", "gen_random_uuid", "nullif", "lower", "upper", "in", "not", "exists":
+		case "and", "or", "case", "when", "then", "else", "end", "coalesce", "gen_random_uuid", "nullif", "lower", "upper", "in", "not", "exists":
 			continue
 		default:
 			return fmt.Errorf("unsupported SQL expression function %q in %q", match[1], expr)
@@ -471,14 +523,238 @@ func balancedParens(s string) bool {
 	return depth == 0 && !inSingleQuote
 }
 
-var bracketIdentifierRE = regexp.MustCompile(`\[([^\]]+)\]`)
-
 func replaceBracketIdentifiers(s string, quote func(string) string) string {
-	return bracketIdentifierRE.ReplaceAllStringFunc(s, func(match string) string {
-		parts := bracketIdentifierRE.FindStringSubmatch(match)
-		if len(parts) != 2 {
+	var b strings.Builder
+	b.Grow(len(s))
+	inSingleQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' {
+			b.WriteByte(ch)
+			if inSingleQuote && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				b.WriteByte(s[i])
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if !inSingleQuote && ch == '[' {
+			if end := strings.IndexByte(s[i+1:], ']'); end >= 0 {
+				name := s[i+1 : i+1+end]
+				b.WriteString(quote(name))
+				i += end + 1
+				continue
+			}
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func stripSQLServerUnicodeStringPrefixes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inSingleQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if !inSingleQuote && (ch == 'N' || ch == 'n') && i+1 < len(s) && s[i+1] == '\'' && startsSQLStringPrefix(s, i) {
+			b.WriteByte('\'')
+			i++
+			inSingleQuote = true
+			continue
+		}
+		if ch == '\'' {
+			b.WriteByte(ch)
+			if inSingleQuote && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				b.WriteByte(s[i])
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func startsSQLStringPrefix(s string, idx int) bool {
+	if idx == 0 {
+		return true
+	}
+	prev := s[idx-1]
+	return !((prev >= 'a' && prev <= 'z') ||
+		(prev >= 'A' && prev <= 'Z') ||
+		(prev >= '0' && prev <= '9') ||
+		prev == '_' ||
+		prev == '"')
+}
+
+func isTextualPGType(colType string) bool {
+	colType = strings.ToLower(strings.TrimSpace(colType))
+	return strings.HasPrefix(colType, "character varying") ||
+		strings.HasPrefix(colType, "character(") ||
+		colType == "text"
+}
+
+func rewriteSQLServerStringConcat(expr string) string {
+	var b strings.Builder
+	b.Grow(len(expr))
+	inSingleQuote := false
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if ch == '\'' {
+			b.WriteByte(ch)
+			if inSingleQuote && i+1 < len(expr) && expr[i+1] == '\'' {
+				i++
+				b.WriteByte(expr[i])
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if !inSingleQuote && ch == '+' {
+			b.WriteString(" || ")
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func rewriteSQLServerBooleanResultLiterals(expr string) string {
+	resultLiteralRE := regexp.MustCompile(`(?i)\b(THEN|ELSE)\s+\(?([01])\)?`)
+	return resultLiteralRE.ReplaceAllStringFunc(expr, func(match string) string {
+		parts := resultLiteralRE.FindStringSubmatch(match)
+		if len(parts) != 3 {
 			return match
 		}
-		return quote(parts[1])
+		lit := "false"
+		if parts[2] == "1" {
+			lit = "true"
+		}
+		return parts[1] + " " + lit
 	})
+}
+
+func rewriteSQLServerBitComparisons(expr string, cols []driver.Column) string {
+	out := expr
+	for _, col := range cols {
+		if !strings.EqualFold(strings.TrimSpace(col.DataType), "bit") {
+			continue
+		}
+		quoted := `"` + sanitizePGIdentifier(col.Name) + `"`
+		ident := regexp.QuoteMeta(quoted)
+		leftRE := regexp.MustCompile(`(?i)(` + ident + `)\s*(=|<>|!=)\s*(?:\(([01])\)|([01])\b)`)
+		out = leftRE.ReplaceAllStringFunc(out, func(match string) string {
+			parts := leftRE.FindStringSubmatch(match)
+			if len(parts) != 5 {
+				return match
+			}
+			return parts[1] + " " + parts[2] + " " + bitLiteral(firstNonEmpty(parts[3], parts[4]))
+		})
+		rightRE := regexp.MustCompile(`(?i)(?:\(([01])\)|([01])\b)\s*(=|<>|!=)\s*(` + ident + `)`)
+		out = rightRE.ReplaceAllStringFunc(out, func(match string) string {
+			parts := rightRE.FindStringSubmatch(match)
+			if len(parts) != 5 {
+				return match
+			}
+			return bitLiteral(firstNonEmpty(parts[1], parts[2])) + " " + parts[3] + " " + parts[4]
+		})
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func bitLiteral(v string) string {
+	if v == "1" {
+		return "true"
+	}
+	return "false"
+}
+
+var sqlServerLikeLiteralRE = regexp.MustCompile(`(?i)(("[^"]+"|[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)\s+)(NOT\s+)?LIKE\s+('(?:''|[^'])*')`)
+
+func rewriteSQLServerLikePatterns(s string) string {
+	return sqlServerLikeLiteralRE.ReplaceAllStringFunc(s, func(match string) string {
+		parts := sqlServerLikeLiteralRE.FindStringSubmatch(match)
+		if len(parts) != 5 {
+			return match
+		}
+		pattern := unquoteSQLString(parts[4])
+		if !strings.Contains(pattern, "[") || !strings.Contains(pattern, "]") {
+			return match
+		}
+		re, ok := sqlServerLikePatternToRegex(pattern)
+		if !ok {
+			return match
+		}
+		op := "~"
+		if strings.TrimSpace(parts[3]) != "" {
+			op = "!~"
+		}
+		return strings.TrimSpace(parts[1]) + " " + op + " " + quoteSQLString(re)
+	})
+}
+
+func sqlServerLikePatternToRegex(pattern string) (string, bool) {
+	var b strings.Builder
+	b.Grow(len(pattern) + 2)
+	b.WriteByte('^')
+	usedBracketClass := false
+	for i := 0; i < len(pattern); i++ {
+		ch := pattern[i]
+		switch ch {
+		case '%':
+			b.WriteString(".*")
+		case '_':
+			b.WriteByte('.')
+		case '[':
+			end := strings.IndexByte(pattern[i+1:], ']')
+			if end < 0 {
+				b.WriteString(`\[`)
+				continue
+			}
+			class := pattern[i+1 : i+1+end]
+			if class == "" {
+				b.WriteString(`\[\]`)
+			} else {
+				usedBracketClass = true
+				if class[0] == '^' {
+					class = "^" + regexp.QuoteMeta(class[1:])
+				} else {
+					class = regexp.QuoteMeta(class)
+				}
+				b.WriteByte('[')
+				b.WriteString(class)
+				b.WriteByte(']')
+			}
+			i += end + 1
+		default:
+			b.WriteString(regexp.QuoteMeta(string(ch)))
+		}
+	}
+	b.WriteByte('$')
+	return b.String(), usedBracketClass
+}
+
+func unquoteSQLString(lit string) string {
+	lit = strings.TrimSpace(lit)
+	if len(lit) >= 2 && lit[0] == '\'' && lit[len(lit)-1] == '\'' {
+		lit = lit[1 : len(lit)-1]
+	}
+	return strings.ReplaceAll(lit, "''", "'")
+}
+
+func quoteSQLString(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
