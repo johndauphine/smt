@@ -184,6 +184,41 @@ func TestDeterministicMSSQLComputedColumn(t *testing.T) {
 	assertContains(t, def, `) STORED`)
 }
 
+func TestDeterministicMSSQLComputedColumnNullability(t *testing.T) {
+	renderer := newDeterministicDDL()
+	def, _, err := renderer.columnDefinition(driver.Column{
+		Name:               "LineTotal",
+		DataType:           "decimal",
+		Precision:          15,
+		Scale:              2,
+		IsNullable:         false,
+		IsComputed:         true,
+		ComputedExpression: "([quantity]*[unit_price])",
+		ComputedPersisted:  true,
+	})
+	if err != nil {
+		t.Fatalf("columnDefinition: %v", err)
+	}
+	assertContains(t, def, `) STORED NOT NULL`)
+
+	nullableDef, _, err := renderer.columnDefinition(driver.Column{
+		Name:               "LineTotal",
+		DataType:           "decimal",
+		Precision:          15,
+		Scale:              2,
+		IsNullable:         true,
+		IsComputed:         true,
+		ComputedExpression: "([quantity]*[unit_price])",
+		ComputedPersisted:  true,
+	})
+	if err != nil {
+		t.Fatalf("columnDefinition nullable: %v", err)
+	}
+	if strings.Contains(nullableDef, " NOT NULL") {
+		t.Fatalf("nullable computed column should not render NOT NULL:\n%s", nullableDef)
+	}
+}
+
 func TestDeterministicMSSQLComputedStringConcatColumn(t *testing.T) {
 	renderer := newDeterministicDDL()
 	def, _, err := renderer.columnDefinition(driver.Column{
@@ -349,6 +384,28 @@ func TestDeterministicMSSQLCheckBitComparisonReversed(t *testing.T) {
 	assertContains(t, ddl, `CHECK (false = "isactive")`)
 	if strings.Contains(ddl, "false)") {
 		t.Fatalf("reversed bit comparison rewrite left an extra close paren:\n%s", ddl)
+	}
+}
+
+func TestDeterministicMSSQLCheckBitInequality(t *testing.T) {
+	renderer := newDeterministicDDL()
+	ddl, err := renderer.createCheckConstraint(&driver.Table{
+		Name: "Customers",
+		Columns: []driver.Column{
+			{Name: "IsDeleted", DataType: "bit"},
+			{Name: "IsArchived", DataType: "bit"},
+			{Name: "IsLocked", DataType: "bit"},
+		},
+	}, &driver.CheckConstraint{
+		Name:       "CK_Cust_flags",
+		Definition: "([IsDeleted]<>(1) AND [IsArchived]!=(0) AND (0)<>[IsLocked])",
+	}, "public")
+	if err != nil {
+		t.Fatalf("createCheckConstraint: %v", err)
+	}
+	assertContains(t, ddl, `CHECK ("isdeleted" <> true AND "isarchived" != false AND false <> "islocked")`)
+	if strings.Contains(ddl, `<>(1)`) || strings.Contains(ddl, `!=(0)`) || strings.Contains(ddl, `(0)<>`) {
+		t.Fatalf("bit inequality rewrite left numeric literals behind:\n%s", ddl)
 	}
 }
 

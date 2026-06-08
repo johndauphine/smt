@@ -144,6 +144,9 @@ func (r deterministicDDL) columnDefinition(col driver.Column, tableColumns ...[]
 		b.WriteString(" GENERATED ALWAYS AS (")
 		b.WriteString(expr)
 		b.WriteString(") STORED")
+		if !col.IsNullable {
+			b.WriteString(" NOT NULL")
+		}
 		return b.String(), colType, nil
 	}
 
@@ -643,21 +646,21 @@ func rewriteSQLServerBitComparisons(expr string, cols []driver.Column) string {
 		}
 		quoted := `"` + sanitizePGIdentifier(col.Name) + `"`
 		ident := regexp.QuoteMeta(quoted)
-		leftRE := regexp.MustCompile(`(?i)(` + ident + `)\s*=\s*(?:\(([01])\)|([01])\b)`)
+		leftRE := regexp.MustCompile(`(?i)(` + ident + `)\s*(=|<>|!=)\s*(?:\(([01])\)|([01])\b)`)
 		out = leftRE.ReplaceAllStringFunc(out, func(match string) string {
 			parts := leftRE.FindStringSubmatch(match)
-			if len(parts) != 4 {
+			if len(parts) != 5 {
 				return match
 			}
-			return parts[1] + " = " + bitLiteral(firstNonEmpty(parts[2], parts[3]))
+			return parts[1] + " " + parts[2] + " " + bitLiteral(firstNonEmpty(parts[3], parts[4]))
 		})
-		rightRE := regexp.MustCompile(`(?i)(?:\(([01])\)|([01])\b)\s*=\s*(` + ident + `)`)
+		rightRE := regexp.MustCompile(`(?i)(?:\(([01])\)|([01])\b)\s*(=|<>|!=)\s*(` + ident + `)`)
 		out = rightRE.ReplaceAllStringFunc(out, func(match string) string {
 			parts := rightRE.FindStringSubmatch(match)
-			if len(parts) != 4 {
+			if len(parts) != 5 {
 				return match
 			}
-			return bitLiteral(firstNonEmpty(parts[1], parts[2])) + " = " + parts[3]
+			return bitLiteral(firstNonEmpty(parts[1], parts[2])) + " " + parts[3] + " " + parts[4]
 		})
 	}
 	return out
