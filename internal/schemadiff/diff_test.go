@@ -410,6 +410,48 @@ func TestRenderDeterministic_ChangedTableBitSideObjectsUseColumnContext(t *testi
 	}
 }
 
+func TestRenderDeterministic_AddedComputedColumnUsesTableBitContext(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{{
+		Name: "Customers",
+		Curr: driver.Table{
+			Name: "Customers",
+			Columns: []driver.Column{
+				{Name: "Id", DataType: "int", IsNullable: false},
+				{Name: "IsActive", DataType: "bit", IsNullable: false},
+				{
+					Name:               "ActiveRank",
+					DataType:           "int",
+					IsComputed:         true,
+					ComputedExpression: "(case when [IsActive]=(1) then (10) else (0) end)",
+					ComputedPersisted:  true,
+				},
+			},
+		},
+		AddedColumns: []driver.Column{{
+			Name:               "ActiveRank",
+			DataType:           "int",
+			IsComputed:         true,
+			ComputedExpression: "(case when [IsActive]=(1) then (10) else (0) end)",
+			ComputedPersisted:  true,
+		}},
+	}}}.Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	sql := plan.SQL()
+	want := `ADD COLUMN "activerank" integer GENERATED ALWAYS AS ((case when "isactive" = true then (10) else (0) end)) STORED`
+	if !strings.Contains(sql, want) {
+		t.Fatalf("expected SQL to contain %q, got:\n%s", want, sql)
+	}
+	if strings.Contains(sql, `"isactive"=(1)`) || strings.Contains(sql, "true))") {
+		t.Fatalf("added computed column bit context was not rendered cleanly:\n%s", sql)
+	}
+}
+
 func TestRenderDeterministic_AddedTableForeignKeysAfterAllCreateTables(t *testing.T) {
 	comments := driver.Table{
 		Schema: "dbo",

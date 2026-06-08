@@ -39,6 +39,11 @@ func RenderColumnDefinitionWithPolicy(col driver.Column, unknownTypePolicy strin
 	return def, err
 }
 
+func RenderColumnDefinitionWithContextAndPolicy(col driver.Column, tableColumns []driver.Column, unknownTypePolicy string) (string, error) {
+	def, _, err := newDeterministicDDL(unknownTypePolicy).columnDefinition(col, tableColumns)
+	return def, err
+}
+
 func RenderColumnType(col driver.Column) (string, error) {
 	return RenderColumnTypeWithPolicy(col, "")
 }

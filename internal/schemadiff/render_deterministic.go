@@ -132,7 +132,7 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 	}
 
 	for _, c := range td.AddedColumns {
-		def, err := pgddl.RenderColumnDefinitionWithPolicy(c, r.unknownTypePolicy)
+		def, err := pgddl.RenderColumnDefinitionWithContextAndPolicy(c, td.Curr.Columns, r.unknownTypePolicy)
 		if err != nil {
 			return err
 		}
