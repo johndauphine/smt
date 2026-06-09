@@ -277,7 +277,10 @@ func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 	return out, nil
 }
 
-var plainNumberLiteralRE = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?$`)
+var (
+	plainNumberLiteralRE   = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?$`)
+	bareCurrentTimestampRE = regexp.MustCompile(`^CURRENT_TIMESTAMP(?:\([0-9]*\))?$`)
+)
 
 // mysqlDefaultForm wraps a rendered default in parentheses where MySQL 8
 // requires the expression-default form: any non-literal expression, and every
@@ -288,9 +291,10 @@ func (r Renderer) mysqlDefaultForm(def string, col driver.Column) string {
 		return d
 	}
 	upper := strings.ToUpper(d)
-	// NULL and CURRENT_TIMESTAMP[(n)] are valid bare (and ON UPDATE accepts
-	// only the bare form).
-	if upper == "NULL" || strings.HasPrefix(upper, "CURRENT_TIMESTAMP") {
+	// NULL and bare CURRENT_TIMESTAMP[(n)] are valid unparenthesized (and ON
+	// UPDATE accepts only the bare form); larger expressions that merely start
+	// with CURRENT_TIMESTAMP still need wrapping.
+	if upper == "NULL" || bareCurrentTimestampRE.MatchString(upper) {
 		return d
 	}
 	if isPlainLiteral(d) {
@@ -652,10 +656,12 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 	case "uniqueidentifier", "uuid":
 		return "CHAR(36)", nil
 	case "varbinary", "binary", "bytea":
-		if col.MaxLength > 65535 {
+		// Unbounded sources (pg bytea reports 0, mssql varbinary(max) -1)
+		// must not truncate to a sized VARBINARY.
+		if col.MaxLength <= 0 || col.MaxLength > 65535 {
 			return "BLOB", nil
 		}
-		return sizedType("VARBINARY", col.MaxLength, "255"), nil
+		return fmt.Sprintf("VARBINARY(%d)", col.MaxLength), nil
 	case "image", "blob", "mediumblob", "longblob":
 		return "BLOB", nil
 	case "enum":
@@ -1554,12 +1560,24 @@ func parseInlineEnumSetValues(columnType string) ([]string, bool) {
 
 func rewriteSQLServerStringConcatToConcat(expr string) string {
 	// Handles the CRM-style "a + ' ' + b" computed expression without trying
-	// to become a SQL parser.
+	// to become a SQL parser. Only fires when a top-level operand is a string
+	// literal — numeric/date arithmetic ("subtotal + tax",
+	// "CURRENT_TIMESTAMP + INTERVAL '1' DAY") must stay arithmetic.
 	if !strings.Contains(expr, "+") || strings.ContainsAny(expr, "*/") {
 		return expr
 	}
 	parts := splitTopLevel(expr, '+')
 	if len(parts) < 2 {
+		return expr
+	}
+	hasStringOperand := false
+	for _, p := range parts {
+		if strings.HasPrefix(strings.TrimSpace(p), "'") {
+			hasStringOperand = true
+			break
+		}
+	}
+	if !hasStringOperand {
 		return expr
 	}
 	return "CONCAT(" + strings.Join(parts, ", ") + ")"

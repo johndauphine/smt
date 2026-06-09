@@ -124,6 +124,8 @@ func TestColumnDefault_MySQLExpressionForm(t *testing.T) {
 		{driver.Column{Name: "qty", DataType: "int", DefaultExpression: "0"}, "0"},
 		{driver.Column{Name: "ts", DataType: "datetime", DefaultExpression: "CURRENT_TIMESTAMP"}, "CURRENT_TIMESTAMP(6)"},
 		{driver.Column{Name: "note", DataType: "text", DefaultExpression: "'n/a'"}, "('n/a')"},
+		// Expressions that merely start with CURRENT_TIMESTAMP still need parens.
+		{driver.Column{Name: "due", DataType: "datetime", DefaultExpression: "(CURRENT_TIMESTAMP + INTERVAL '1' DAY)"}, "(CURRENT_TIMESTAMP + INTERVAL '1' DAY)"},
 	}
 	for _, tc := range cases {
 		got, err := r.ColumnDefault(tc.col)
@@ -162,6 +164,10 @@ func TestColumnType_LengthClamping(t *testing.T) {
 		{mysql, driver.Column{DataType: "varchar", MaxLength: 16383}, "VARCHAR(16383)"},
 		{mysql, driver.Column{DataType: "char", MaxLength: 300}, "VARCHAR(300)"},
 		{mysql, driver.Column{DataType: "varbinary", MaxLength: 70000}, "BLOB"},
+		// Unbounded binary sources (pg bytea = 0, mssql varbinary(max) = -1)
+		// must not truncate to VARBINARY(255).
+		{mysql, driver.Column{DataType: "bytea", MaxLength: 0}, "BLOB"},
+		{mysql, driver.Column{DataType: "varbinary", MaxLength: -1}, "BLOB"},
 	}
 	for _, tc := range cases {
 		got, err := tc.r.ColumnType(tc.col)
@@ -185,5 +191,40 @@ func TestColumnType_Rowversion(t *testing.T) {
 	}
 	if got, _ := mysql.ColumnType(col); got != "BINARY(8)" {
 		t.Errorf("mysql rowversion = %q, want BINARY(8)", got)
+	}
+}
+
+// Arithmetic '+' in CHECK constraints must not become CONCAT on MySQL targets.
+func TestCheckConstraint_MySQLArithmeticPlusStaysArithmetic(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	table := &driver.Table{Name: "orders", Columns: []driver.Column{
+		{Name: "total", DataType: "decimal", Precision: 18, Scale: 4},
+		{Name: "subtotal", DataType: "decimal", Precision: 18, Scale: 4},
+		{Name: "tax", DataType: "decimal", Precision: 18, Scale: 4},
+	}}
+	got, err := r.CreateCheckConstraintDDL(table, &driver.CheckConstraint{Name: "ck_total", Definition: "(total >= subtotal + tax)"})
+	if err != nil {
+		t.Fatalf("CreateCheckConstraintDDL: %v", err)
+	}
+	if strings.Contains(got, "CONCAT") {
+		t.Fatalf("arithmetic rewritten to CONCAT: %q", got)
+	}
+}
+
+// String concatenation still becomes CONCAT on MySQL targets.
+func TestComputedColumn_MySQLStringConcatStillRewritten(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	got, err := r.Expression("[FirstName] + ' ' + [LastName]", nil)
+	if err != nil {
+		t.Fatalf("Expression: %v", err)
+	}
+	if !strings.Contains(got, "CONCAT(") {
+		t.Fatalf("string concat not rewritten: %q", got)
 	}
 }
