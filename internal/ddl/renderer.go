@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"smt/internal/driver"
 	pgddl "smt/internal/driver/postgres"
@@ -1226,9 +1227,10 @@ func rewriteFunctionNames(expr, target string) string {
 	return out
 }
 
+var ciPatternCache sync.Map // pattern string -> *regexp.Regexp
+
 func replaceCaseInsensitive(s, old, new string) string {
-	re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(old))
-	return re.ReplaceAllString(s, new)
+	return cachedRegexp(`(?i)\b`+regexp.QuoteMeta(old)).ReplaceAllString(s, new)
 }
 
 func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote func(string) string) string {
@@ -1238,6 +1240,12 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 			continue
 		}
 		normalized := driver.NormalizeIdentifier(canonicalTarget(target), col.Name)
+		// Cheap pre-check: the patterns below can only match if the column
+		// name appears in the expression at all.
+		lowerOut := strings.ToLower(out)
+		if !strings.Contains(lowerOut, strings.ToLower(col.Name)) && !strings.Contains(lowerOut, strings.ToLower(normalized)) {
+			continue
+		}
 		identifiers := []struct {
 			pattern     string
 			replacement string
@@ -1246,6 +1254,10 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 			{`\b` + regexp.QuoteMeta(normalized) + `\b`, normalized},
 			{regexp.QuoteMeta(quote(normalized)), quote(normalized)},
 		}
+		// Compiled per use, not cached: these patterns derive from schema
+		// column names, so caching them would grow without bound across
+		// schemas in long-lived processes. The pre-check above keeps this
+		// path rare.
 		for _, ident := range identifiers {
 			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, true))
 			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, false))
@@ -1254,12 +1266,28 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 	return out
 }
 
+// cachedRegexp caches compiled patterns. Only call it with patterns drawn
+// from a bounded set (e.g. the static function-name rewrites) — schema-derived
+// patterns would grow the cache without bound.
+func cachedRegexp(pattern string) *regexp.Regexp {
+	cached, ok := ciPatternCache.Load(pattern)
+	if !ok {
+		cached, _ = ciPatternCache.LoadOrStore(pattern, regexp.MustCompile(pattern))
+	}
+	return cached.(*regexp.Regexp)
+}
+
+var pgRegexOperatorRE = regexp.MustCompile(`(\(?\s*(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+"|\[[^\]]+\]|` + "`[^`]+`" + `)\s*\)?)\s*~\s*('[^']*(?:''[^']*)*')`)
+
 func rewriteRegexOperators(expr, target string) (string, error) {
 	target = canonicalTarget(target)
 	if target != "mysql" && target != "mssql" {
 		return expr, nil
 	}
-	re := regexp.MustCompile(`(\(?\s*(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+"|\[[^\]]+\]|` + "`[^`]+`" + `)\s*\)?)\s*~\s*('[^']*(?:''[^']*)*')`)
+	if !strings.Contains(expr, "~") {
+		return expr, nil
+	}
+	re := pgRegexOperatorRE
 	var rewriteErr error
 	out := re.ReplaceAllStringFunc(expr, func(match string) string {
 		if rewriteErr != nil {

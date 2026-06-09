@@ -104,12 +104,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 			verifierMapper = vm
 		}
 
-		schemaGenerationMode := cfg.SchemaGeneration.Mode
-		if !needsTargetDDLGeneration {
-			schemaGenerationMode = driver.SchemaGenerationDeterministic
-		}
-
-		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, schemaGenerationMode, cfg.SchemaGeneration.UnknownTypePolicy, mapper, verifierMapper)
+		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, cfg.SchemaGeneration.UnknownTypePolicy, mapper, verifierMapper)
 		if err != nil {
 			src.Close()
 			return nil, fmt.Errorf("opening target: %w", err)

@@ -13,7 +13,6 @@ func TestValidateCreateSupport(t *testing.T) {
 		name      string
 		target    string
 		mode      string
-		apply     bool
 		wantError string
 	}{
 		{
@@ -22,10 +21,9 @@ func TestValidateCreateSupport(t *testing.T) {
 			mode:   driver.SchemaGenerationDeterministic,
 		},
 		{
-			name:      "rejects ai mode",
-			target:    "postgres",
-			mode:      "ai",
-			wantError: "schema_generation.mode: ai is no longer supported",
+			name:      "rejects unsupported target",
+			target:    "oracle",
+			wantError: "unsupported deterministic DDL target",
 		},
 		{
 			name:   "ddl only deterministic mssql",
@@ -36,7 +34,6 @@ func TestValidateCreateSupport(t *testing.T) {
 			name:   "apply deterministic mysql",
 			target: "mysql",
 			mode:   driver.SchemaGenerationDeterministic,
-			apply:  true,
 		},
 	}
 
@@ -46,7 +43,7 @@ func TestValidateCreateSupport(t *testing.T) {
 			cfg.Target.Type = tt.target
 			cfg.SchemaGeneration.Mode = tt.mode
 
-			err := validateCreateSupport(cfg, tt.apply)
+			err := validateCreateSupport(cfg)
 			if tt.wantError == "" {
 				if err != nil {
 					t.Fatalf("validateCreateSupport() error = %v, want nil", err)
@@ -57,5 +54,30 @@ func TestValidateCreateSupport(t *testing.T) {
 				t.Fatalf("validateCreateSupport() error = %v, want containing %q", err, tt.wantError)
 			}
 		})
+	}
+}
+
+// #92 — the derived grammar must cover the real value-taking globals that
+// the old hardcoded TUI list missed.
+func TestCLIFlagInfoCoversGlobals(t *testing.T) {
+	info := cliFlagInfo()
+	for _, name := range []string{"--state-file", "--verbosity", "--log-format", "--shutdown-timeout", "--config", "--profile"} {
+		if !info.TakesValue[name] {
+			t.Errorf("flag %s not marked as value-taking", name)
+		}
+		if !info.Global[name] {
+			t.Errorf("flag %s not marked global", name)
+		}
+	}
+	for _, name := range []string{"--out", "--source-schema", "--target-schema"} {
+		if !info.TakesValue[name] {
+			t.Errorf("command flag %s not marked as value-taking", name)
+		}
+		if info.Global[name] {
+			t.Errorf("command flag %s wrongly marked global", name)
+		}
+	}
+	if info.TakesValue["--apply"] {
+		t.Error("bool flag --apply wrongly marked as value-taking")
 	}
 }

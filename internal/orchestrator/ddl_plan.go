@@ -84,28 +84,28 @@ func (o *Orchestrator) renderDDLPlan(ctx context.Context, runID string) (schemad
 		})
 	}
 
-	tableStatements, tableDDLs, err := o.renderCreateTableStatements(ctx, runID, renderer)
+	tableStatements, err := o.renderCreateTableStatements(ctx, runID, renderer)
 	if err != nil {
 		return schemadiff.Plan{}, err
 	}
 	plan.Statements = append(plan.Statements, tableStatements...)
 
 	if o.config.Migration.CreateIndexes {
-		stmts, err := o.renderCreateIndexStatements(ctx, runID, renderer, tableDDLs)
+		stmts, err := o.renderCreateIndexStatements(ctx, runID, renderer)
 		if err != nil {
 			return schemadiff.Plan{}, err
 		}
 		plan.Statements = append(plan.Statements, stmts...)
 	}
 	if o.config.Migration.CreateForeignKeys {
-		stmts, err := o.renderCreateForeignKeyStatements(ctx, runID, renderer, tableDDLs)
+		stmts, err := o.renderCreateForeignKeyStatements(ctx, runID, renderer)
 		if err != nil {
 			return schemadiff.Plan{}, err
 		}
 		plan.Statements = append(plan.Statements, stmts...)
 	}
 	if o.config.Migration.CreateCheckConstraints {
-		stmts, err := o.renderCreateCheckStatements(ctx, runID, renderer, tableDDLs)
+		stmts, err := o.renderCreateCheckStatements(ctx, runID, renderer)
 		if err != nil {
 			return schemadiff.Plan{}, err
 		}
@@ -176,13 +176,12 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 	}, nil
 }
 
-func (o *Orchestrator) renderCreateTableStatements(ctx context.Context, runID string, renderer createDDLRenderer) ([]schemadiff.Statement, map[string]string, error) {
+func (o *Orchestrator) renderCreateTableStatements(ctx context.Context, runID string, renderer createDDLRenderer) ([]schemadiff.Statement, error) {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateTables))
 	total := len(o.tables)
 	logging.Info("[%s] rendering %d CREATE TABLE statement(s) (concurrency=%d)", TaskCreateTables, total, o.aiConcurrency())
 
 	statements := make([]schemadiff.Statement, total)
-	tableDDLs := make([]string, total)
 	var done atomic.Int64
 	if err := runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
 		ddl, err := renderer.renderTable(ctx, &t)
@@ -190,7 +189,6 @@ func (o *Orchestrator) renderCreateTableStatements(ctx context.Context, runID st
 			return fmt.Errorf("rendering table %s: %w", t.Name, err)
 		}
 		ddl = stripTrailingSemicolons(ddl)
-		tableDDLs[i] = ddl
 		statements[i] = schemadiff.Statement{
 			Table:       driver.NormalizeIdentifier(renderer.targetType, t.Name),
 			Description: fmt.Sprintf("create table %s", t.Name),
@@ -201,17 +199,12 @@ func (o *Orchestrator) renderCreateTableStatements(ctx context.Context, runID st
 		logging.Info("  ✓ [%d/%d] %s.%s", n, total, o.config.Source.Schema, t.Name)
 		return nil
 	}); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	ddlByTable := make(map[string]string, len(o.tables))
-	for i, t := range o.tables {
-		ddlByTable[t.Name] = tableDDLs[i]
-	}
-	return statements, ddlByTable, nil
+	return statements, nil
 }
 
-func (o *Orchestrator) renderCreateIndexStatements(ctx context.Context, runID string, renderer createDDLRenderer, tableDDLs map[string]string) ([]schemadiff.Statement, error) {
+func (o *Orchestrator) renderCreateIndexStatements(ctx context.Context, runID string, renderer createDDLRenderer) ([]schemadiff.Statement, error) {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateIndexes))
 	logging.Info("[%s] loading and rendering indexes (concurrency=%d)", TaskCreateIndexes, o.aiConcurrency())
 	results := make([][]schemadiff.Statement, len(o.tables))
@@ -223,7 +216,7 @@ func (o *Orchestrator) renderCreateIndexStatements(ctx context.Context, runID st
 		stmts := make([]schemadiff.Statement, 0, len(t.Indexes))
 		for j := range t.Indexes {
 			idx := t.Indexes[j]
-			ddl, err := renderer.renderIndex(ctx, &t, &idx, tableDDLs[t.Name])
+			ddl, err := renderer.renderIndex(ctx, &t, &idx)
 			if err != nil {
 				return fmt.Errorf("rendering index %s: %w", idx.Name, err)
 			}
@@ -242,7 +235,7 @@ func (o *Orchestrator) renderCreateIndexStatements(ctx context.Context, runID st
 	return flattenStatements(results), nil
 }
 
-func (o *Orchestrator) renderCreateForeignKeyStatements(ctx context.Context, runID string, renderer createDDLRenderer, tableDDLs map[string]string) ([]schemadiff.Statement, error) {
+func (o *Orchestrator) renderCreateForeignKeyStatements(ctx context.Context, runID string, renderer createDDLRenderer) ([]schemadiff.Statement, error) {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateFKs))
 	logging.Info("[%s] loading and rendering foreign keys (concurrency=%d)", TaskCreateFKs, o.aiConcurrency())
 	results := make([][]schemadiff.Statement, len(o.tables))
@@ -256,7 +249,7 @@ func (o *Orchestrator) renderCreateForeignKeyStatements(ctx context.Context, run
 			fk := t.ForeignKeys[j]
 			fkForTarget := fk
 			fkForTarget.RefSchema = renderer.targetSchema
-			ddl, err := renderer.renderForeignKey(ctx, &t, &fkForTarget, tableDDLs[t.Name])
+			ddl, err := renderer.renderForeignKey(ctx, &t, &fkForTarget)
 			if err != nil {
 				return fmt.Errorf("rendering FK %s: %w", fk.Name, err)
 			}
@@ -275,7 +268,7 @@ func (o *Orchestrator) renderCreateForeignKeyStatements(ctx context.Context, run
 	return flattenStatements(results), nil
 }
 
-func (o *Orchestrator) renderCreateCheckStatements(ctx context.Context, runID string, renderer createDDLRenderer, tableDDLs map[string]string) ([]schemadiff.Statement, error) {
+func (o *Orchestrator) renderCreateCheckStatements(ctx context.Context, runID string, renderer createDDLRenderer) ([]schemadiff.Statement, error) {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateChecks))
 	logging.Info("[%s] loading and rendering check constraints (concurrency=%d)", TaskCreateChecks, o.aiConcurrency())
 	results := make([][]schemadiff.Statement, len(o.tables))
@@ -287,7 +280,7 @@ func (o *Orchestrator) renderCreateCheckStatements(ctx context.Context, runID st
 		stmts := make([]schemadiff.Statement, 0, len(t.CheckConstraints))
 		for j := range t.CheckConstraints {
 			chk := t.CheckConstraints[j]
-			ddl, err := renderer.renderCheck(ctx, &t, &chk, tableDDLs[t.Name])
+			ddl, err := renderer.renderCheck(ctx, &t, &chk)
 			if err != nil {
 				return fmt.Errorf("rendering check %s: %w", chk.Name, err)
 			}
@@ -317,7 +310,7 @@ func (r createDDLRenderer) renderTable(ctx context.Context, t *driver.Table) (st
 	return ddl, nil
 }
 
-func (r createDDLRenderer) renderIndex(ctx context.Context, t *driver.Table, idx *driver.Index, _ string) (string, error) {
+func (r createDDLRenderer) renderIndex(ctx context.Context, t *driver.Table, idx *driver.Index) (string, error) {
 	ddl, err := r.ddlRenderer.CreateIndexDDL(t, idx)
 	if err != nil {
 		return "", err
@@ -328,7 +321,7 @@ func (r createDDLRenderer) renderIndex(ctx context.Context, t *driver.Table, idx
 	return ddl, nil
 }
 
-func (r createDDLRenderer) renderForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, _ string) (string, error) {
+func (r createDDLRenderer) renderForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey) (string, error) {
 	ddl, err := r.ddlRenderer.CreateForeignKeyDDL(t, fk)
 	if err != nil {
 		return "", err
@@ -339,7 +332,7 @@ func (r createDDLRenderer) renderForeignKey(ctx context.Context, t *driver.Table
 	return ddl, nil
 }
 
-func (r createDDLRenderer) renderCheck(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, _ string) (string, error) {
+func (r createDDLRenderer) renderCheck(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint) (string, error) {
 	ddl, err := r.ddlRenderer.CreateCheckConstraintDDL(t, chk)
 	if err != nil {
 		return "", err

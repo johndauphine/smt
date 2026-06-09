@@ -87,10 +87,38 @@ func applyGlobalFlags(c *cli.Context) error {
 
 func topLevelAction(c *cli.Context) error {
 	if c.NArg() == 0 {
-		return tui.Start()
+		return tui.Start(cliFlagInfo())
 	}
 	_ = cli.ShowAppHelp(c)
 	return exitcodes.NewExitError(fmt.Errorf("unknown command: %s", c.Args().First()), exitcodes.ConfigError)
+}
+
+// cliFlagInfo derives the flag grammar (which flags take values, which are
+// global) from the real flag definitions, so the TUI's arg splitter cannot
+// drift from the CLI (#92).
+func cliFlagInfo() tui.CLIFlagInfo {
+	info := tui.CLIFlagInfo{TakesValue: map[string]bool{}, Global: map[string]bool{}}
+	collect := func(flags []cli.Flag, global bool) {
+		for _, f := range flags {
+			_, isBool := f.(*cli.BoolFlag)
+			for _, name := range f.Names() {
+				for _, prefix := range []string{"-", "--"} {
+					key := prefix + name
+					if !isBool {
+						info.TakesValue[key] = true
+					}
+					if global {
+						info.Global[key] = true
+					}
+				}
+			}
+		}
+	}
+	collect(globalFlags(), true)
+	for _, cmd := range commands() {
+		collect(cmd.Flags, false)
+	}
+	return info
 }
 
 func commands() []*cli.Command {

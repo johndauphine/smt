@@ -1264,30 +1264,61 @@ func (m Model) profileExportCmd(name, outFile string) tea.Cmd {
 
 // Helper functions
 
+// CLIFlagInfo describes the CLI's flag grammar so the TUI arg splitter can
+// never drift from the cli.Command definitions (#92). main derives it from
+// globalFlags() and commands() and injects it via Start.
+type CLIFlagInfo struct {
+	// TakesValue maps a dash-prefixed flag name to whether it consumes the
+	// following argument.
+	TakesValue map[string]bool
+	// Global maps a dash-prefixed flag name to whether it is a global flag
+	// (must be placed before the command name).
+	Global map[string]bool
+}
+
+// cliFlags holds the injected grammar. The default covers the flags tests
+// exercise; Start replaces it with the set derived from the real CLI.
+var cliFlags = CLIFlagInfo{
+	TakesValue: map[string]bool{
+		"--config": true, "-c": true, "--profile": true,
+		"--out": true, "-o": true, "--source-schema": true, "--target-schema": true,
+	},
+	Global: map[string]bool{"--config": true, "-c": true, "--profile": true},
+}
+
 func cliBackedCommandArgs(commandName string, parts []string) []string {
 	configFile := ""
-	profileName := ""
-	commandArgs := make([]string, 0, len(parts))
-	expectingCommandValue := false
+	var globalArgs, commandArgs []string
 
 	for i := 1; i < len(parts); i++ {
 		arg := parts[i]
-		if expectingCommandValue {
-			commandArgs = append(commandArgs, arg)
-			expectingCommandValue = false
-			continue
-		}
 		switch {
 		case strings.HasPrefix(arg, "@"):
 			configFile = arg[1:]
-		case arg == "--profile" && i+1 < len(parts):
-			profileName = parts[i+1]
-			i++
-		case cliBackedCommandValueFlag(arg):
-			commandArgs = append(commandArgs, arg)
-			expectingCommandValue = !strings.Contains(arg, "=")
 		case strings.HasPrefix(arg, "-"):
-			commandArgs = append(commandArgs, arg)
+			name := arg
+			value := ""
+			hasInlineValue := false
+			if idx := strings.Index(name, "="); idx >= 0 {
+				name, value, hasInlineValue = name[:idx], name[idx+1:], true
+			}
+			takesValue := cliFlags.TakesValue[name]
+			if takesValue && !hasInlineValue && i+1 < len(parts) {
+				i++
+				value = parts[i]
+			}
+			if name == "--config" || name == "-c" {
+				configFile = value
+				continue
+			}
+			dst := &commandArgs
+			if cliFlags.Global[name] {
+				dst = &globalArgs
+			}
+			*dst = append(*dst, arg)
+			if takesValue && !hasInlineValue && value != "" {
+				*dst = append(*dst, value)
+			}
 		case configFile == "":
 			configFile = arg
 		default:
@@ -1295,29 +1326,14 @@ func cliBackedCommandArgs(commandName string, parts []string) []string {
 		}
 	}
 
-	args := make([]string, 0, 1+len(commandArgs)+4)
+	args := make([]string, 0, len(globalArgs)+len(commandArgs)+3)
 	if configFile != "" {
 		args = append(args, "--config", configFile)
 	}
-	if profileName != "" {
-		args = append(args, "--profile", profileName)
-	}
+	args = append(args, globalArgs...)
 	args = append(args, commandName)
 	args = append(args, commandArgs...)
 	return args
-}
-
-func cliBackedCommandValueFlag(arg string) bool {
-	flagName := arg
-	if idx := strings.Index(flagName, "="); idx >= 0 {
-		flagName = flagName[:idx]
-	}
-	switch flagName {
-	case "--out", "-o", "--source-schema", "--target-schema":
-		return true
-	default:
-		return false
-	}
 }
 
 func parseConfigArgs(parts []string) (string, string) {
@@ -1499,8 +1515,13 @@ func splitIntoWords(s string) []string {
 	return words
 }
 
-// Start launches the TUI program
-func Start() error {
+// Start launches the TUI program. flagInfo carries the CLI flag grammar
+// derived from the real cli.Command definitions; pass a zero value to keep
+// the built-in defaults.
+func Start(flagInfo CLIFlagInfo) error {
+	if flagInfo.TakesValue != nil {
+		cliFlags = flagInfo
+	}
 	logging.SetLevel(logging.LevelInfo)
 
 	m := InitialModel()
