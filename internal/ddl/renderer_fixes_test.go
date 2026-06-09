@@ -241,6 +241,13 @@ func TestColumnType_TimestamptzKeepsTZClassOnMSSQL(t *testing.T) {
 	if got != "DATETIMEOFFSET(6)" {
 		t.Fatalf("timestamptz = %q, want DATETIMEOFFSET(6)", got)
 	}
+	spelled, err := r.ColumnType(driver.Column{Name: "created_at", DataType: "timestamp with time zone"})
+	if err != nil {
+		t.Fatalf("ColumnType: %v", err)
+	}
+	if spelled != "DATETIMEOFFSET" {
+		t.Fatalf("timestamp with time zone = %q, want DATETIMEOFFSET", spelled)
+	}
 	naive, err := r.ColumnType(driver.Column{Name: "created_at", DataType: "timestamp without time zone"})
 	if err != nil {
 		t.Fatalf("ColumnType: %v", err)
