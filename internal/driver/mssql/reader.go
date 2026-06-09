@@ -243,6 +243,13 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 		}
 		col.IsNullable = isNullable == 1
 		col.IsIdentity = isIdentity == 1
+		if strings.EqualFold(col.DataType, "timestamp") {
+			// INFORMATION_SCHEMA reports rowversion under its deprecated
+			// synonym "timestamp" with NULL CHARACTER_MAXIMUM_LENGTH; rename
+			// so renderers don't conflate it with datetime types.
+			col.DataType = "rowversion"
+			col.MaxLength = 8
+		}
 		t.Columns = append(t.Columns, col)
 	}
 	if err := rows.Err(); err != nil {

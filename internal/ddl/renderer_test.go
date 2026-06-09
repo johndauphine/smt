@@ -296,7 +296,7 @@ func TestRenderer_RowversionAndUnsignedTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRenderer mssql: %v", err)
 	}
-	mssqlRowversion, err := mssqlRenderer.ColumnType(driver.Column{Name: "Version", DataType: "timestamp", MaxLength: 8})
+	mssqlRowversion, err := mssqlRenderer.ColumnType(driver.Column{Name: "Version", DataType: "rowversion", MaxLength: 8})
 	if err != nil {
 		t.Fatalf("ColumnType mssql rowversion: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestRenderer_RowversionAndUnsignedTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRenderer mysql: %v", err)
 	}
-	mysqlRowversion, err := mysqlRenderer.ColumnType(driver.Column{Name: "Version", DataType: "timestamp", MaxLength: 8})
+	mysqlRowversion, err := mysqlRenderer.ColumnType(driver.Column{Name: "Version", DataType: "rowversion", MaxLength: 8})
 	if err != nil {
 		t.Fatalf("ColumnType mysql rowversion: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestRenderer_DefaultsNormalizePostgresCastsAndTimestampPrecision(t *testing
 	if err != nil {
 		t.Fatalf("ColumnDefault mssql timestamp: %v", err)
 	}
-	assertEqualSQL(t, mssqlTime, "SYSUTCDATETIME()")
+	assertEqualSQL(t, mssqlTime, "SYSDATETIME()")
 
 	mysqlRenderer, err := NewRenderer("mysql", "crm", "fail")
 	if err != nil {
