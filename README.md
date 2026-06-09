@@ -107,13 +107,15 @@ SMT's core schema path should be deterministic: introspect schemas, map types, c
 source: { type, host, port, database, user, password, schema }
 target: { type, schema }       # optional; defaults to postgres/public
                                # host/database/user/password only needed for --apply
-migration:
-  include_tables: []           # optional glob patterns
-  exclude_tables: ["__*", "temp_*"]
-  create_indexes: true
-  create_foreign_keys: true
-  create_check_constraints: true
-  data_dir: ~/.smt
+schema_generation: { mode: deterministic } # optional; this is the default
+ai_review: { enabled: false }              # optional; this is the default
+
+# Optional migration overrides. When omitted, SMT generates the full schema:
+# tables, indexes, foreign keys, and check constraints.
+# migration:
+#   include_tables: []
+#   exclude_tables: ["__*", "temp_*"]
+#   data_dir: ~/.smt
 slack: { ... }                 # optional
 ```
 

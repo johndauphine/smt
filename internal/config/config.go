@@ -156,6 +156,14 @@ type Config struct {
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
 	autoConfig AutoConfig
+
+	// Tracks migration keys present in the loaded YAML so boolean defaults can
+	// distinguish omitted values from explicit false values.
+	migrationKeys map[string]bool
+
+	// Tracks migration values supplied by global defaults. Hard-coded defaults
+	// should not overwrite these, especially when a global default is false.
+	migrationDefaultKeys map[string]bool
 }
 
 // SlackConfig holds Slack notification settings.
@@ -443,6 +451,7 @@ func LoadBytes(data []byte) (*Config, error) {
 	}
 
 	var cfg Config
+	cfg.migrationKeys = migrationKeysFromYAML([]byte(expanded))
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
@@ -458,6 +467,35 @@ func LoadBytes(data []byte) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func migrationKeysFromYAML(data []byte) map[string]bool {
+	var raw struct {
+		Migration map[string]any `yaml:"migration"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil || len(raw.Migration) == 0 {
+		return nil
+	}
+	keys := make(map[string]bool, len(raw.Migration))
+	for key := range raw.Migration {
+		keys[key] = true
+	}
+	return keys
+}
+
+func (c *Config) hasMigrationKey(key string) bool {
+	return c.migrationKeys != nil && c.migrationKeys[key]
+}
+
+func (c *Config) markMigrationDefault(key string) {
+	if c.migrationDefaultKeys == nil {
+		c.migrationDefaultKeys = make(map[string]bool)
+	}
+	c.migrationDefaultKeys[key] = true
+}
+
+func (c *Config) hasMigrationDefault(key string) bool {
+	return c.migrationDefaultKeys != nil && c.migrationDefaultKeys[key]
 }
 
 // DefaultDataDir returns the default data directory for state storage.
@@ -513,27 +551,24 @@ func (c *Config) applyGlobalDefaults() {
 		c.Migration.ParallelReaders = defaults.ParallelReaders
 	}
 
-	// Boolean settings - apply from global defaults when explicitly set (non-nil pointer)
-	// and the migration config value is false.
-	//
-	// Limitation: Go's bool defaults to false, so we cannot distinguish between
-	// "user didn't set this" and "user explicitly set to false". This means:
-	//   - Global true  + migration unset/false → true  (global wins)
-	//   - Global true  + migration true        → true  (both agree)
-	//   - Global false + migration unset/false → false (both agree)
-	//   - Global false + migration true        → true  (migration wins)
-	//
-	// In practice: you CAN override a global "false" to "true" per-migration,
-	// but you CANNOT override a global "true" to "false" per-migration.
-	if defaults.CreateIndexes != nil && !c.Migration.CreateIndexes {
+	// Schema-object defaults use YAML key presence so explicit false in a
+	// migration config can override a global true default.
+	if defaults.CreateIndexes != nil && !c.hasMigrationKey("create_indexes") {
 		c.Migration.CreateIndexes = *defaults.CreateIndexes
+		c.markMigrationDefault("create_indexes")
 	}
-	if defaults.CreateForeignKeys != nil && !c.Migration.CreateForeignKeys {
+	if defaults.CreateForeignKeys != nil && !c.hasMigrationKey("create_foreign_keys") {
 		c.Migration.CreateForeignKeys = *defaults.CreateForeignKeys
+		c.markMigrationDefault("create_foreign_keys")
 	}
-	if defaults.CreateCheckConstraints != nil && !c.Migration.CreateCheckConstraints {
+	if defaults.CreateCheckConstraints != nil && !c.hasMigrationKey("create_check_constraints") {
 		c.Migration.CreateCheckConstraints = *defaults.CreateCheckConstraints
+		c.markMigrationDefault("create_check_constraints")
 	}
+
+	// Other booleans retain the historical bool limitation: global true wins
+	// over an unset/false migration value because these fields do not track
+	// YAML key presence yet.
 	if defaults.StrictConsistency != nil && !c.Migration.StrictConsistency {
 		c.Migration.StrictConsistency = *defaults.StrictConsistency
 	}
@@ -705,6 +740,15 @@ func (c *Config) applyDefaults() error {
 	}
 	if c.Migration.TargetMode == "" {
 		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
+	}
+	if !c.hasMigrationKey("create_indexes") && !c.hasMigrationDefault("create_indexes") {
+		c.Migration.CreateIndexes = true
+	}
+	if !c.hasMigrationKey("create_foreign_keys") && !c.hasMigrationDefault("create_foreign_keys") {
+		c.Migration.CreateForeignKeys = true
+	}
+	if !c.hasMigrationKey("create_check_constraints") && !c.hasMigrationDefault("create_check_constraints") {
+		c.Migration.CreateCheckConstraints = true
 	}
 	if c.SchemaGeneration.Mode == "" {
 		c.SchemaGeneration.Mode = driver.SchemaGenerationDeterministic

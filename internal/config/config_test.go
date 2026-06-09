@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"smt/internal/secrets"
 )
 
 func TestMSSQLDSNURLEncoding(t *testing.T) {
@@ -100,6 +102,13 @@ func TestMSSQLDSNURLEncoding(t *testing.T) {
 			}
 		})
 	}
+}
+
+func disableSecretsForTest(t *testing.T) {
+	t.Helper()
+	secrets.Reset()
+	t.Setenv(secrets.SecretsFileEnvVar, filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Cleanup(secrets.Reset)
 }
 
 func TestPostgresDSNURLEncoding(t *testing.T) {
@@ -1213,6 +1222,8 @@ func TestValidateAllowsTargetDescriptorWithoutConnection(t *testing.T) {
 }
 
 func TestLoadAllowsSourceOnlyConfig(t *testing.T) {
+	disableSecretsForTest(t)
+
 	configYAML := `
 source:
   type: mssql
@@ -1235,6 +1246,72 @@ source:
 	}
 	if cfg.HasTargetConnection() {
 		t.Fatal("HasTargetConnection() = true, want false")
+	}
+}
+
+func TestLoadDefaultsSchemaObjectPhasesWhenMigrationOmitted(t *testing.T) {
+	disableSecretsForTest(t)
+
+	configYAML := `
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: source
+  user: user
+  password: pass
+target:
+  type: postgres
+  schema: public
+`
+
+	cfg, err := LoadBytes([]byte(configYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes() unexpected error: %v", err)
+	}
+	if !cfg.Migration.CreateIndexes {
+		t.Fatal("CreateIndexes = false, want default true")
+	}
+	if !cfg.Migration.CreateForeignKeys {
+		t.Fatal("CreateForeignKeys = false, want default true")
+	}
+	if !cfg.Migration.CreateCheckConstraints {
+		t.Fatal("CreateCheckConstraints = false, want default true")
+	}
+}
+
+func TestLoadPreservesExplicitFalseSchemaObjectPhases(t *testing.T) {
+	disableSecretsForTest(t)
+
+	configYAML := `
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: source
+  user: user
+  password: pass
+target:
+  type: postgres
+  schema: public
+migration:
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+`
+
+	cfg, err := LoadBytes([]byte(configYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes() unexpected error: %v", err)
+	}
+	if cfg.Migration.CreateIndexes {
+		t.Fatal("CreateIndexes = true, want explicit false")
+	}
+	if cfg.Migration.CreateForeignKeys {
+		t.Fatal("CreateForeignKeys = true, want explicit false")
+	}
+	if cfg.Migration.CreateCheckConstraints {
+		t.Fatal("CreateCheckConstraints = true, want explicit false")
 	}
 }
 
@@ -1303,11 +1380,9 @@ func TestSanitizedRedactsPasswords(t *testing.T) {
 }
 
 func TestBooleanGlobalDefaultsLogic(t *testing.T) {
-	// This test documents the expected behavior of boolean global defaults.
-	// The logic is: apply global default only when migration config value is false.
-	//
-	// Limitation: We cannot distinguish "user didn't set" from "user set false",
-	// so global true always wins over migration false.
+	// This test documents the historical global-default behavior for boolean
+	// fields that do not track YAML key presence. Schema-object phase flags
+	// now use presence tracking so explicit false can be preserved.
 
 	boolPtr := func(b bool) *bool { return &b }
 
@@ -1346,8 +1421,8 @@ func TestBooleanGlobalDefaultsLogic(t *testing.T) {
 }
 
 func TestBooleanGlobalDefaultsDocumentedLimitation(t *testing.T) {
-	// This test explicitly documents the limitation:
-	// You CANNOT override a global "true" to "false" per-migration.
+	// This test explicitly documents the limitation that still applies to
+	// bool fields that do not track YAML key presence.
 
 	boolPtr := func(b bool) *bool { return &b }
 

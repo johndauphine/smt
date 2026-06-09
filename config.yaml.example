@@ -39,27 +39,17 @@ profile:
     Example profile, stored encrypted in SQLite.
     Edit this description for your environment.
 
-migration:
-  # Tables to include / exclude (glob patterns)
-  exclude_tables:
-    - __*
-    - temp_*
-  # include_tables: []                  # if set, only matching tables are scoped
-
-  # Which schema objects to create on the target
-  create_indexes: true
-  create_foreign_keys: true
-  create_check_constraints: true
-
-  # Deprecated alias for ai_review.enabled during the deterministic-DDL
-  # transition. Prefer the top-level ai_review block above.
-  ai_verify: false
-
-  # Deprecated alias for ai_review.model.
-  # ai_verifier_model: ""
-
-  # Where SMT keeps its state DB, schema artifacts, and DDL artifacts.
-  data_dir: ~/.smt
+# Optional migration overrides. Omit this block for the default full-schema
+# plan: tables, indexes, foreign keys, and check constraints.
+# migration:
+#   include_tables: []                  # if set, only matching tables are scoped
+#   exclude_tables:
+#     - __*
+#     - temp_*
+#   create_indexes: true
+#   create_foreign_keys: true
+#   create_check_constraints: true
+#   data_dir: ~/.smt
 
 # Slack notifications (optional). AI provider keys live in the secrets file
 # at ~/.secrets/smt-config.yaml — never put them here.
