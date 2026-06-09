@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"smt/internal/driver"
 	pgddl "smt/internal/driver/postgres"
@@ -1226,9 +1227,10 @@ func rewriteFunctionNames(expr, target string) string {
 	return out
 }
 
+var ciPatternCache sync.Map // pattern string -> *regexp.Regexp
+
 func replaceCaseInsensitive(s, old, new string) string {
-	re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(old))
-	return re.ReplaceAllString(s, new)
+	return cachedRegexp(`(?i)\b`+regexp.QuoteMeta(old)).ReplaceAllString(s, new)
 }
 
 func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote func(string) string) string {
@@ -1238,6 +1240,11 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 			continue
 		}
 		normalized := driver.NormalizeIdentifier(canonicalTarget(target), col.Name)
+		// Cheap pre-check: the patterns below can only match if the column
+		// name appears in the expression at all.
+		if !containsFold(out, col.Name) && !containsFold(out, normalized) {
+			continue
+		}
 		identifiers := []struct {
 			pattern     string
 			replacement string
@@ -1247,19 +1254,36 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 			{regexp.QuoteMeta(quote(normalized)), quote(normalized)},
 		}
 		for _, ident := range identifiers {
-			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, true))
-			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, false))
+			out = cachedRegexp(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, true))
+			out = cachedRegexp(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, false))
 		}
 	}
 	return out
 }
+
+func containsFold(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+func cachedRegexp(pattern string) *regexp.Regexp {
+	cached, ok := ciPatternCache.Load(pattern)
+	if !ok {
+		cached, _ = ciPatternCache.LoadOrStore(pattern, regexp.MustCompile(pattern))
+	}
+	return cached.(*regexp.Regexp)
+}
+
+var pgRegexOperatorRE = regexp.MustCompile(`(\(?\s*(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+"|\[[^\]]+\]|` + "`[^`]+`" + `)\s*\)?)\s*~\s*('[^']*(?:''[^']*)*')`)
 
 func rewriteRegexOperators(expr, target string) (string, error) {
 	target = canonicalTarget(target)
 	if target != "mysql" && target != "mssql" {
 		return expr, nil
 	}
-	re := regexp.MustCompile(`(\(?\s*(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+"|\[[^\]]+\]|` + "`[^`]+`" + `)\s*\)?)\s*~\s*('[^']*(?:''[^']*)*')`)
+	if !strings.Contains(expr, "~") {
+		return expr, nil
+	}
+	re := pgRegexOperatorRE
 	var rewriteErr error
 	out := re.ReplaceAllStringFunc(expr, func(match string) string {
 		if rewriteErr != nil {

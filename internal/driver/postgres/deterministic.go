@@ -686,8 +686,10 @@ func rewriteMySQLConcat(expr string) string {
 	return strings.Join(parts, " || ")
 }
 
+var mysqlRegexpLikeRE = regexp.MustCompile(`(?i)regexp_like\s*\(\s*([^,]+?)\s*,\s*('(?:''|[^'])*')\s*\)`)
+
 func rewriteMySQLRegexpLike(expr string) string {
-	re := regexp.MustCompile(`(?i)regexp_like\s*\(\s*([^,]+?)\s*,\s*('(?:''|[^'])*')\s*\)`)
+	re := mysqlRegexpLikeRE
 	return re.ReplaceAllString(expr, "($1 ~ $2)")
 }
 

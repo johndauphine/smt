@@ -86,10 +86,6 @@ type WriterOptions struct {
 	// SourceType is the source database type (for cross-engine type handling).
 	SourceType string
 
-	// SchemaGenerationMode is retained for config plumbing. Empty and
-	// "deterministic" both use deterministic schema DDL.
-	SchemaGenerationMode string
-
 	// UnknownTypePolicy controls deterministic handling of unsupported source
 	// types. Supported values are "fail", "warn", and "text_fallback".
 	UnknownTypePolicy string

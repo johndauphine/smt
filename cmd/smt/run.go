@@ -12,7 +12,6 @@ import (
 
 	"smt/internal/config"
 	"smt/internal/ddl"
-	"smt/internal/driver"
 	"smt/internal/orchestrator"
 )
 
@@ -47,7 +46,7 @@ func runCreate(c *cli.Context) error {
 	}
 
 	if !c.Bool("apply") {
-		if err := validateCreateSupport(cfg, false); err != nil {
+		if err := validateCreateSupport(cfg); err != nil {
 			return err
 		}
 		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
@@ -74,7 +73,7 @@ func runCreate(c *cli.Context) error {
 		return nil
 	}
 
-	if err := validateCreateSupport(cfg, true); err != nil {
+	if err := validateCreateSupport(cfg); err != nil {
 		return err
 	}
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
@@ -92,10 +91,10 @@ func runCreate(c *cli.Context) error {
 	return orch.Run(ctx)
 }
 
-func validateCreateSupport(cfg *config.Config, apply bool) error {
-	if cfg.SchemaGeneration.Mode != "" && cfg.SchemaGeneration.Mode != driver.SchemaGenerationDeterministic {
-		return fmt.Errorf("schema_generation.mode: ai is no longer supported; SMT authors schema DDL deterministically")
-	}
+// validateCreateSupport probes renderer constructibility before connecting
+// to the source, so an unsupported target type fails fast. Mode validation
+// lives in config.validate(), which runs at load — not duplicated here.
+func validateCreateSupport(cfg *config.Config) error {
 	if _, err := ddl.NewRenderer(cfg.Target.Type, cfg.Target.Schema, cfg.SchemaGeneration.UnknownTypePolicy); err != nil {
 		return err
 	}

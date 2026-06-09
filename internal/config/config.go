@@ -287,11 +287,6 @@ type MigrationConfig struct {
 	// compatibility even though core DDL generation is deterministic.
 	AIConcurrency int `yaml:"ai_concurrency"`
 
-	// AIMaxRetries is retained only so older config files continue to parse.
-	// It no longer affects schema DDL because SMT does not ask AI to repair
-	// executable DDL.
-	AIMaxRetries *int `yaml:"ai_max_retries"`
-
 	// AIVerify is a deprecated alias for ai_review.enabled. AI review can
 	// inspect deterministic DDL but cannot rewrite it or feed changes back
 	// into generation.

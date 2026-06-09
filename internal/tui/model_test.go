@@ -73,3 +73,37 @@ func TestCLIBackedCommandArgsAcceptsBareConfigAfterFlagValue(t *testing.T) {
 		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
 	}
 }
+
+// #92 — value-taking global flags must not have their values swallowed as
+// the config path, and globals must be placed before the command name.
+func TestCLIBackedCommandArgsGlobalValueFlags(t *testing.T) {
+	prev := cliFlags
+	defer func() { cliFlags = prev }()
+	cliFlags = CLIFlagInfo{
+		TakesValue: map[string]bool{
+			"--config": true, "-c": true, "--profile": true,
+			"--state-file": true, "--out": true, "-o": true,
+		},
+		Global: map[string]bool{
+			"--config": true, "-c": true, "--profile": true, "--state-file": true,
+		},
+	}
+
+	args := cliBackedCommandArgs("create", []string{"/create", "--state-file", "/tmp/state.db", "crm.yaml"})
+	want := "--config crm.yaml --state-file /tmp/state.db create"
+	if got := strings.Join(args, " "); got != want {
+		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
+	}
+
+	args = cliBackedCommandArgs("create", []string{"/create", "--config", "crm.yaml", "--out", "schema.sql"})
+	want = "--config crm.yaml create --out schema.sql"
+	if got := strings.Join(args, " "); got != want {
+		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
+	}
+
+	args = cliBackedCommandArgs("create", []string{"/create", "--out=schema.sql", "crm.yaml"})
+	want = "--config crm.yaml create --out=schema.sql"
+	if got := strings.Join(args, " "); got != want {
+		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
+	}
+}
