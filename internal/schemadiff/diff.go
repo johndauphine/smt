@@ -273,6 +273,8 @@ func normalizeTableDiff(td TableDiff, norm func(string) string) TableDiff {
 // indexes, FKs, and checks are matched by name; differences in attributes
 // (column type/nullability, etc.) become ChangedColumns entries.
 func Compute(prev, curr Snapshot) Diff {
+	prev = backfillPreVersionFields(prev, curr)
+
 	d := Diff{
 		PrevCapturedAt: prev.CapturedAt,
 		CurrCapturedAt: curr.CapturedAt,
@@ -300,6 +302,52 @@ func Compute(prev, curr Snapshot) Diff {
 	}
 
 	return d
+}
+
+// backfillPreVersionFields copies snapshot-version-gated Column fields from
+// the current extraction into an older snapshot before diffing. A snapshot
+// written before a field existed stores its zero value, and comparing that
+// against the freshly-extracted value would mark every such column as changed
+// (#78) — e.g. every unsigned MySQL column after the v2 upgrade. Assuming the
+// field is unchanged is the conservative read: a wrong assumption misses one
+// real change (the next snapshot captures it) instead of emitting spurious
+// rebuild ALTERs.
+func backfillPreVersionFields(prev, curr Snapshot) Snapshot {
+	if prev.Version >= CurrentSnapshotVersion {
+		return prev
+	}
+
+	currTables := indexTablesByName(curr.Tables)
+	tables := make([]driver.Table, len(prev.Tables))
+	copy(tables, prev.Tables)
+	for ti := range tables {
+		ct, ok := currTables[tables[ti].Name]
+		if !ok {
+			continue
+		}
+		currCols := make(map[string]driver.Column, len(ct.Columns))
+		for _, c := range ct.Columns {
+			currCols[c.Name] = c
+		}
+		cols := make([]driver.Column, len(tables[ti].Columns))
+		copy(cols, tables[ti].Columns)
+		for ci := range cols {
+			cc, ok := currCols[cols[ci].Name]
+			if !ok {
+				continue
+			}
+			if prev.Version < 2 {
+				cols[ci].IsUnsigned = cc.IsUnsigned
+				cols[ci].OnUpdateExpression = cc.OnUpdateExpression
+				if len(cols[ci].EnumValues) == 0 {
+					cols[ci].EnumValues = cc.EnumValues
+				}
+			}
+		}
+		tables[ti].Columns = cols
+	}
+	prev.Tables = tables
+	return prev
 }
 
 func indexTablesByName(tables []driver.Table) map[string]driver.Table {

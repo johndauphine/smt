@@ -65,6 +65,7 @@ func runSnapshot(c *cli.Context) error {
 	}
 
 	snap := schemadiff.Snapshot{
+		Version:    schemadiff.CurrentSnapshotVersion,
 		Schema:     cfg.Source.Schema,
 		SourceType: cfg.Source.Type,
 		CapturedAt: time.Now().UTC(),
@@ -149,6 +150,7 @@ func runSync(c *cli.Context) error {
 	}
 
 	currSnap := schemadiff.Snapshot{
+		Version:    schemadiff.CurrentSnapshotVersion,
 		Schema:     cfg.Source.Schema,
 		SourceType: cfg.Source.Type,
 		CapturedAt: time.Now().UTC(),

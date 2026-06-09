@@ -57,17 +57,140 @@ func (r deterministicRenderer) render(diff Diff) (Plan, error) {
 		}
 	}
 
-	for _, t := range diff.RemovedTables {
+	for _, action := range orderTablesForDrop(diff.RemovedTables) {
+		if action.dropFK != nil {
+			plan.Statements = append(plan.Statements, Statement{
+				Table:       action.table,
+				Description: fmt.Sprintf("drop foreign key %s (breaks drop-order cycle)", action.dropFK.Name),
+				SQL:         r.renderer.DropForeignKeyDDL(action.table, action.dropFK.Name),
+				Risk:        RiskSafe,
+			})
+			continue
+		}
 		plan.Statements = append(plan.Statements, Statement{
-			Table:       t.Name,
-			Description: fmt.Sprintf("drop table %s", t.Name),
-			SQL:         r.renderer.DropTableDDL(t.Name),
+			Table:       action.table,
+			Description: fmt.Sprintf("drop table %s", action.table),
+			SQL:         r.renderer.DropTableDDL(action.table),
 			Risk:        RiskDataLoss,
 			RiskNotes:   "drops the table and its data",
 		})
 	}
 
 	return plan, nil
+}
+
+// dropAction is one step of the removed-table drop sequence: either a table
+// drop, or (when dropFK is set) an FK drop that breaks a drop-order cycle.
+type dropAction struct {
+	table  string
+	dropFK *driver.ForeignKey
+}
+
+// orderTablesForDrop sequences removed-table drops children-first so a DROP
+// TABLE never fails on a still-referencing child (#84). Only FKs between
+// removed tables matter — a surviving referencing table would make the drop
+// invalid in any order. When the remaining tables contain an FK cycle, the
+// FKs between cycle members (and only those) are dropped first, then ordering
+// resumes — tables merely blocked by the cycle drop in dependency order once
+// it is broken.
+func orderTablesForDrop(tables []driver.Table) []dropAction {
+	remaining := make(map[string]driver.Table, len(tables))
+	for _, t := range tables {
+		remaining[t.Name] = t
+	}
+	droppedFK := make(map[string]bool)
+	fkActive := func(t driver.Table, fk driver.ForeignKey) bool {
+		if droppedFK[t.Name+"\x00"+fk.Name] || fk.RefTable == t.Name {
+			return false // dropped, or self-reference (never blocks)
+		}
+		_, ok := remaining[fk.RefTable]
+		return ok
+	}
+
+	var actions []dropAction
+	for len(remaining) > 0 {
+		// referenced[p] is true while a remaining table still points at p.
+		referenced := make(map[string]bool, len(remaining))
+		for _, t := range remaining {
+			for _, fk := range t.ForeignKeys {
+				if fkActive(t, fk) {
+					referenced[fk.RefTable] = true
+				}
+			}
+		}
+		progressed := false
+		for _, name := range sortedKeys(remaining) {
+			if !referenced[name] {
+				actions = append(actions, dropAction{table: name})
+				delete(remaining, name)
+				progressed = true
+			}
+		}
+		if progressed {
+			continue
+		}
+
+		// Stuck: every remaining table is referenced, so there is at least
+		// one cycle. Drop the FKs between cycle members.
+		cyc := cycleMembers(remaining, fkActive)
+		broke := false
+		for _, name := range sortedKeys(remaining) {
+			if !cyc[name] {
+				continue
+			}
+			t := remaining[name]
+			for i := range t.ForeignKeys {
+				fk := t.ForeignKeys[i]
+				if fkActive(t, fk) && cyc[fk.RefTable] {
+					droppedFK[t.Name+"\x00"+fk.Name] = true
+					actions = append(actions, dropAction{table: t.Name, dropFK: &t.ForeignKeys[i]})
+					broke = true
+				}
+			}
+		}
+		if !broke {
+			// Defensive: cannot make progress (should be unreachable). Emit
+			// the rest in name order rather than looping forever.
+			for _, name := range sortedKeys(remaining) {
+				actions = append(actions, dropAction{table: name})
+				delete(remaining, name)
+			}
+		}
+	}
+	return actions
+}
+
+// cycleMembers returns the remaining tables that sit on an FK cycle (i.e.
+// can reach themselves through active FKs between remaining tables).
+func cycleMembers(remaining map[string]driver.Table, fkActive func(driver.Table, driver.ForeignKey) bool) map[string]bool {
+	members := make(map[string]bool)
+	for start := range remaining {
+		seen := map[string]bool{}
+		stack := []string{start}
+		for len(stack) > 0 {
+			name := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			t, ok := remaining[name]
+			if !ok {
+				continue
+			}
+			for _, fk := range t.ForeignKeys {
+				if !fkActive(t, fk) {
+					continue
+				}
+				if fk.RefTable == start {
+					members[start] = true
+					stack = nil
+					break
+				}
+				if !seen[fk.RefTable] {
+					seen[fk.RefTable] = true
+					stack = append(stack, fk.RefTable)
+				}
+			}
+		}
+	}
+	return members
 }
 
 func (r deterministicRenderer) renderAddedTableDefinition(plan *Plan, t driver.Table) error {

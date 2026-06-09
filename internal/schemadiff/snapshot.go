@@ -15,8 +15,19 @@ import (
 	"smt/internal/driver"
 )
 
+// CurrentSnapshotVersion is stamped into every new snapshot. Bump it whenever
+// driver.Column (or anything else snapshot-persisted) gains a field that
+// columnsEqual compares, and teach backfillPreVersionFields how to fill the
+// gap for older snapshots.
+//
+// Version history:
+//   - 0/1: original format (a snapshot without a version field decodes as 0)
+//   - 2: Column gained IsUnsigned, EnumValues, OnUpdateExpression
+const CurrentSnapshotVersion = 2
+
 // Snapshot is a serializable point-in-time view of a source schema.
 type Snapshot struct {
+	Version    int            `json:"version,omitempty"`
 	Schema     string         `json:"schema"`
 	SourceType string         `json:"source_type"`
 	CapturedAt time.Time      `json:"captured_at"`
