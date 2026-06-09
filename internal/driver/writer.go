@@ -87,40 +87,13 @@ type TableOptions struct {
 	Unlogged bool
 
 	// SourceContext contains metadata about the source database.
-	// This is passed to AI type mapper for better DDL generation.
+	// This is passed to optional AI review for additional context.
 	SourceContext *DatabaseContext
 
-	// MaxRetries caps the number of validate-and-retry attempts when the AI's
-	// DDL is rejected by the database with a syntactically-suspect error
-	// (parser error, missing type, etc. — see each driver's
-	// isRetryableDDLError). On a retryable error the writer regenerates the
-	// DDL with the failed attempt + database error fed back into the prompt,
-	// then retries up to this many times before surfacing the final failure.
-	// Zero means "no retries" (current behavior); set in the orchestrator
-	// from migration.ai_max_retries (which defaults to 3 when configured).
-	// Non-retryable errors (FK violations, permission errors, real schema
-	// conflicts) bypass the loop and surface immediately. See #29.
-	MaxRetries int
-
-	// AIVerify enables the AI self-check pass between generation and exec.
-	// When true, every newly-generated DDL is sent back to the AI as an
-	// audit prompt; if the auditor flags issues, the writer retries
-	// generation with the issue list fed in as PreviousAttempt.
-	// Defaults to false (opt-in via migration.ai_verify in config).
-	//
-	// Cache hits skip the verify call. Note that this presumes the cache
-	// was populated with verify ENABLED — entries cached before
-	// migration.ai_verify was turned on were never audited, but they are
-	// known to have executed successfully against the target. Users who
-	// want the older cache re-verified after enabling the flag should
-	// clear ~/.smt/type-cache.json. (Same shape as #44's prompt-version
-	// concern.)
-	AIVerify bool
-
 	// AIReviewEnabled enables optional review of deterministic DDL before it
-	// is applied. Unlike AIVerify, reviewer findings are not fed back into a
-	// DDL generator; deterministic DDL is either allowed with warnings or
-	// blocked based on AIReviewMode.
+	// is applied. Reviewer findings are not fed back into a DDL generator;
+	// deterministic DDL is either allowed with warnings or blocked based on
+	// AIReviewMode.
 	AIReviewEnabled bool
 
 	// AIReviewMode controls what happens when AIReviewEnabled is true and the
@@ -138,29 +111,10 @@ type TableOptions struct {
 	// not included in the initial CREATE TABLE DDL.
 }
 
-// FinalizeOptions configures CreateIndex / CreateForeignKey / CreateCheckConstraint
-// retry behavior. Shared across the three finalize calls because today they only
-// differ in the metadata they need (Index vs FK vs Check), not in their retry
-// semantics. If a phase ever needs DDL-type-specific tunables (e.g. PG concurrent
-// index build) this can be split into per-phase structs without changing the
-// retry-loop helpers — the helpers only consume MaxRetries.
+// FinalizeOptions configures CreateIndex / CreateForeignKey /
+// CreateCheckConstraint behavior. Shared across the three finalize calls
+// because today they only differ in the metadata they need.
 type FinalizeOptions struct {
-	// MaxRetries caps validate-and-retry attempts when the AI's CREATE INDEX /
-	// FOREIGN KEY / CHECK CONSTRAINT DDL is rejected by the database with a
-	// retryable error (parser/binder class — see each driver's
-	// isRetryableDDLError). On a retryable failure the writer regenerates the
-	// DDL with the prior failed DDL + database error fed back into the prompt
-	// (FinalizationDDLRequest.PreviousAttempt) and retries up to this many
-	// times. Zero means no retries (current behavior); set in the orchestrator
-	// from migration.ai_max_retries. Non-retryable errors (object already
-	// exists, FK target missing, permissions) bypass the loop and surface
-	// immediately. See #29 PR B; PR A is the table-creation equivalent.
-	MaxRetries int
-
-	// AIVerify enables the AI self-check pass between generation and exec
-	// for finalization DDL. See TableOptions.AIVerify for semantics.
-	AIVerify bool
-
 	// AIReviewEnabled enables optional review of deterministic finalization DDL
 	// before it is applied.
 	AIReviewEnabled bool

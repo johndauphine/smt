@@ -101,8 +101,9 @@ func (d Diff) Summary() string {
 // names, index names, FK names + ref columns, check names) through the
 // supplied function. Callers use this to align source-original names
 // (e.g. MSSQL "Posts") with the target's on-disk convention (e.g.
-// PostgreSQL "posts") before handing the diff to the AI renderer, so
-// the generated ALTERs hit tables that actually exist on the target.
+// PostgreSQL "posts") before handing the diff to the deterministic
+// renderer, so the generated ALTERs hit tables that actually exist on
+// the target.
 //
 // The transformation is purely structural; data types and other column
 // attributes are left alone.
@@ -125,20 +126,20 @@ func (d Diff) Normalize(norm func(string) string) Diff {
 
 // WithTargetSchema rewrites every schema reference inside the diff to
 // the supplied target schema name. The structural diff carries SOURCE
-// schema names in two places that the AI renderer reads: Table.Schema
-// (the table's own qualifier) and ForeignKey.RefSchema (the referenced
-// table's qualifier in inline REFERENCES clauses). The AI honors both
-// when emitting qualified DDL — leaving either one as the source value
-// produces statements that fail on the target (e.g. MySQL source schema
-// "smt_src_test" against MSSQL target schema "dbo": "Cannot find the
-// object …", or "REFERENCES smt_src_test.parent" inside a target ADD FK).
+// schema names in two places used by renderers: Table.Schema (the table's
+// own qualifier) and ForeignKey.RefSchema (the referenced table's
+// qualifier in inline REFERENCES clauses). Leaving either one as the
+// source value produces statements that fail on the target (e.g. MySQL
+// source schema "smt_src_test" against MSSQL target schema "dbo":
+// "Cannot find the object ...", or "REFERENCES smt_src_test.parent"
+// inside a target ADD FK).
 //
 // SMT migrates source.X to target.Y; we don't preserve cross-schema
 // relationships across engines, so every schema reference in the diff
 // resolves to the target schema after rewriting.
 //
 // Parallels Normalize: structural-only transformation, leaves all other
-// fields alone. Call after Normalize and before Render.
+// fields alone. Call after Normalize and before RenderDeterministic.
 func (d Diff) WithTargetSchema(targetSchema string) Diff {
 	out := Diff{
 		PrevCapturedAt: d.PrevCapturedAt,
@@ -369,10 +370,25 @@ func columnsEqual(a, b driver.Column) bool {
 		a.Scale == b.Scale &&
 		a.IsNullable == b.IsNullable &&
 		a.SRID == b.SRID &&
+		a.IsUnsigned == b.IsUnsigned &&
+		stringSlicesEqual(a.EnumValues, b.EnumValues) &&
 		strings.TrimSpace(a.DefaultExpression) == strings.TrimSpace(b.DefaultExpression) &&
+		strings.TrimSpace(a.OnUpdateExpression) == strings.TrimSpace(b.OnUpdateExpression) &&
 		a.IsComputed == b.IsComputed &&
 		strings.TrimSpace(a.ComputedExpression) == strings.TrimSpace(b.ComputedExpression) &&
 		a.ComputedPersisted == b.ComputedPersisted
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func diffIndexes(prev, curr []driver.Index) (added, removed []driver.Index) {

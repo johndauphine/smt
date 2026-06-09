@@ -210,10 +210,10 @@ type AIConfig struct {
 	TypeMapping *AITypeMappingConfig `yaml:"type_mapping"`
 }
 
-// SchemaGenerationConfig controls how SMT builds target schema DDL.
+// SchemaGenerationConfig controls deterministic target schema DDL.
 type SchemaGenerationConfig struct {
-	// Mode is "deterministic" by default. Set to "ai" to preserve the legacy
-	// behavior where an AI provider authors executable schema DDL.
+	// Mode is "deterministic" by default. Model-authored executable schema
+	// DDL is no longer supported.
 	Mode string `yaml:"mode"`
 
 	// UnknownTypePolicy controls how deterministic mapping handles unsupported
@@ -281,99 +281,25 @@ type MigrationConfig struct {
 	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 
-	// AIConcurrency caps the number of concurrent AI calls during the
-	// create phases (CreateTables / CreateIndexes / CreateForeignKeys /
-	// CreateCheckConstraints). Each phase still runs sequentially relative
-	// to the others — only the per-table calls inside a phase parallelize.
-	//
-	// Cloud providers (Anthropic, OpenAI, Google): set 8-32. Throughput
-	// scales nearly linearly with concurrency until you hit the per-key
-	// rate limit; the existing 429 retry handles transient throttling.
-	// Live benchmark with Anthropic Haiku 4.5 on an 18-table schema:
-	// 1 → 61s, 8 → 10s (6.1×), 16 → 8s (7.6×).
-	//
-	// Local providers (LM Studio, Ollama): set to MATCH the server's
-	// own parallel-inference cap. LM Studio: "Max Concurrent Predictions".
-	// Ollama: OLLAMA_NUM_PARALLEL env var. Going higher than the server's
-	// cap just adds queue depth without more parallelism; going lower
-	// underutilizes the GPU. Live benchmark with LM Studio (MCP=8,
-	// gemma-4-e4b on M-series): 1 → 43s, matching 8 → 21s (2.0×).
-	//
-	// Default (0 → 8) is a sensible middle ground: 6× speedup on cloud
-	// with default tiers, 2× on local when the server allows ≥8 parallel
-	// predictions, no harm in either case.
+	// AIConcurrency is the legacy key for per-phase DDL concurrency. Each
+	// phase still runs sequentially relative to the others; only per-table
+	// work inside a phase is parallelized. The name is retained for config
+	// compatibility even though core DDL generation is deterministic.
 	AIConcurrency int `yaml:"ai_concurrency"`
 
-	// AIMaxRetries caps how many times the writer re-asks the AI to fix a
-	// CREATE TABLE / CREATE INDEX / FOREIGN KEY / CHECK CONSTRAINT that the
-	// database rejected with a syntactically-suspect error (parser error,
-	// missing type, non-immutable generation expression, MySQL Error
-	// 1064/1067/1101, MSSQL "Incorrect syntax near", etc.). On a retryable
-	// error the prior failed DDL plus the database's verbatim error are
-	// appended to the next AI prompt, giving the model exact corrective
-	// context. Non-retryable errors (object already exists, FK violations,
-	// permission denied, etc.) bypass the loop and surface immediately.
-	// Applies to all four DDL phases — see #29 PR A (table) and PR B (finalize).
-	//
-	// Resolution (applied in orchestrator.aiMaxRetries):
-	//   - omitted        → 3 (the recommended default; see defaultAIMaxRetries)
-	//   - 0              → 0 (explicit opt-out — disables retries)
-	//   - positive value → use that exact budget
-	//
-	// Pointer type lets us distinguish "user didn't set it" (nil) from
-	// "user explicitly set 0" (zero pointer to int) — without that
-	// distinction we'd have to overload one of the values, which is what
-	// an earlier draft did with negatives. YAML unmarshalling reads an
-	// omitted key as nil and a present key as a non-nil *int.
+	// AIMaxRetries is retained only so older config files continue to parse.
+	// It no longer affects schema DDL because SMT does not ask AI to repair
+	// executable DDL.
 	AIMaxRetries *int `yaml:"ai_max_retries"`
 
-	// AIVerify enables the AI self-check pass: between generation and exec,
-	// the just-generated DDL is sent back to the AI as an audit prompt
-	// listing six per-column criteria (max_length / precision / scale,
-	// nullability, identity, timezone-awareness, default-class, type
-	// semantics). If the auditor flags issues, the writer feeds them back
-	// as PreviousAttempt and retries generation, sharing the
-	// `ai_max_retries` budget with exec-fail retries.
-	//
-	// Cost shape: cold-cache runs roughly double per-table AI calls
-	// (gen + verify). Cache hits skip verify (cached DDL was previously
-	// verified and executed). Re-runs are unaffected.
-	//
-	// Defaults to false (opt-in). To force re-verification of cached
-	// entries after enabling, clear ~/.smt/type-cache.json.
-	//
-	// By default uses the same provider/model for generation and
-	// verification. Set `ai_verifier_model` to a different provider entry
-	// (see below) to pair a cheap/local generator with a strong cloud
-	// auditor — recommended pattern when generation is local but the
-	// generator is sub-20B and same-model verify produces correlated
-	// false positives (see CLAUDE.md). Cross-model verify avoids the
-	// correlated-bias trap entirely.
+	// AIVerify is a deprecated alias for ai_review.enabled. AI review can
+	// inspect deterministic DDL but cannot rewrite it or feed changes back
+	// into generation.
 	AIVerify bool `yaml:"ai_verify"`
 
 	// AIVerifierModel names a provider entry in the secrets file
-	// (~/.secrets/smt-config.yaml under `ai.providers`) to use for the
-	// AI self-check pass. The value is a provider name (the key in the
-	// providers map), not a literal model string — the underlying model
-	// comes from that provider's `model` field.
-	//
-	// Empty (the default) means "use the same provider as generation"
-	// (i.e. ai.default_provider) — preserves Phase 1 behavior.
-	//
-	// Has no effect unless ai_verify is true. Cross-engine config example:
-	//
-	//   ai:
-	//     default_provider: anthropic-haiku   # cheap generator
-	//     providers:
-	//       anthropic-haiku: { provider: anthropic, model: claude-haiku-4-5, api_key: ... }
-	//       anthropic-sonnet: { provider: anthropic, model: claude-sonnet-4-6, api_key: ... }
-	//
-	//   migration:
-	//     ai_verify: true
-	//     ai_verifier_model: anthropic-sonnet  # strong auditor
-	//
-	// Validated at orchestrator startup — referencing a provider that
-	// isn't in the secrets file is a fatal config error.
+	// (~/.secrets/smt-config.yaml under `ai.providers`) to use for optional
+	// AI review. Deprecated alias for ai_review.model.
 	AIVerifierModel string `yaml:"ai_verifier_model"`
 
 	// Date-based incremental sync (upsert mode only)
@@ -1054,8 +980,8 @@ func (c *Config) validate() error {
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
-	if c.SchemaGeneration.Mode != "" && c.SchemaGeneration.Mode != driver.SchemaGenerationDeterministic && c.SchemaGeneration.Mode != driver.SchemaGenerationAI {
-		return fmt.Errorf("schema_generation.mode must be 'deterministic' or 'ai'")
+	if c.SchemaGeneration.Mode != "" && c.SchemaGeneration.Mode != driver.SchemaGenerationDeterministic {
+		return fmt.Errorf("schema_generation.mode must be 'deterministic'")
 	}
 	switch c.SchemaGeneration.UnknownTypePolicy {
 	case "", "fail", "warn", "text_fallback":

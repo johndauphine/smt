@@ -120,9 +120,6 @@ func (r deterministicDDL) columnDefinition(col driver.Column, tableColumns ...[]
 		contextColumns = tableColumns[0]
 	}
 	if col.IsComputed {
-		if !col.ComputedPersisted {
-			return "", "", fmt.Errorf("computed column %s is not persisted; PostgreSQL generated columns are stored only", col.Name)
-		}
 		expr, err := r.sqlServerExpression(col.ComputedExpression)
 		if err != nil {
 			return "", "", fmt.Errorf("mapping computed column %s: %w", col.Name, err)
@@ -277,11 +274,23 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 	dt := strings.ToLower(strings.TrimSpace(col.DataType))
 	var typ string
 	switch dt {
-	case "int", "integer":
+	case "int", "integer", "int4", "serial":
+		if col.IsUnsigned {
+			typ = "bigint"
+			break
+		}
 		typ = "integer"
-	case "bigint":
+	case "bigint", "int8", "bigserial":
+		if col.IsUnsigned && !col.IsIdentity {
+			typ = "numeric(20,0)"
+			break
+		}
 		typ = "bigint"
-	case "smallint":
+	case "smallint", "int2", "smallserial":
+		if col.IsUnsigned {
+			typ = "integer"
+			break
+		}
 		typ = "smallint"
 	case "tinyint":
 		typ = "smallint"
@@ -293,13 +302,13 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 		} else {
 			typ = fmt.Sprintf("character varying(%d)", col.MaxLength)
 		}
-	case "char", "nchar", "character":
+	case "char", "nchar", "character", "bpchar":
 		if col.MaxLength <= 0 || col.MaxLength == -1 {
 			typ = "text"
 		} else {
 			typ = fmt.Sprintf("character(%d)", col.MaxLength)
 		}
-	case "text", "ntext":
+	case "text", "ntext", "tinytext", "mediumtext", "longtext":
 		typ = "text"
 	case "datetime", "datetime2", "smalldatetime":
 		typ = "timestamp without time zone"
@@ -338,6 +347,16 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 		typ = "xml"
 	case "json", "jsonb":
 		typ = "jsonb"
+	case "enum", "set":
+		typ = "text"
+	case "_text", "text[]":
+		typ = "text[]"
+	case "_varchar", "varchar[]", "_bpchar", "bpchar[]":
+		typ = "text[]"
+	case "_int2", "int2[]", "_int4", "int4[]", "_int8", "int8[]":
+		typ = "integer[]"
+	case "_uuid", "uuid[]":
+		typ = "uuid[]"
 	default:
 		switch r.unknownTypePolicy {
 		case "warn":
@@ -382,8 +401,11 @@ func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
 			return "CURRENT_TIMESTAMP", nil
 		}
 		return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')", nil
-	case "newid()":
+	case "newid()", "uuid()":
 		return "gen_random_uuid()", nil
+	}
+	if strings.HasPrefix(lower, "current_timestamp(") || strings.HasPrefix(lower, "now(") {
+		return "CURRENT_TIMESTAMP", nil
 	}
 
 	if strings.EqualFold(col.DataType, "bit") {
@@ -394,6 +416,9 @@ func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
 			return "true", nil
 		}
 	}
+	if isTextualSourceType(col.DataType) && isBareSQLWord(expr) {
+		return "'" + strings.ReplaceAll(expr, "'", "''") + "'", nil
+	}
 
 	return r.sqlServerExpression(expr)
 }
@@ -403,7 +428,13 @@ func (r deterministicDDL) sqlServerExpression(expr string) (string, error) {
 	out = replaceBracketIdentifiers(out, func(name string) string {
 		return r.dialect.QuoteIdentifier(sanitizePGIdentifier(name))
 	})
+	out = replaceBacktickIdentifiers(out, func(name string) string {
+		return r.dialect.QuoteIdentifier(sanitizePGIdentifier(name))
+	})
 	out = stripSQLServerUnicodeStringPrefixes(out)
+	out = stripMySQLCharsetStringPrefixes(out)
+	out = rewriteMySQLConcat(out)
+	out = rewriteMySQLRegexpLike(out)
 	out = rewriteSQLServerLikePatterns(out)
 	out = strings.ReplaceAll(out, "GETDATE()", "CURRENT_TIMESTAMP")
 	out = strings.ReplaceAll(out, "getdate()", "CURRENT_TIMESTAMP")
@@ -435,7 +466,7 @@ func rejectUnsupportedSQLServerExpression(expr string) error {
 		}
 		name := strings.ToLower(match[1])
 		switch name {
-		case "and", "or", "case", "when", "then", "else", "end", "coalesce", "gen_random_uuid", "nullif", "lower", "upper", "in", "not", "exists":
+		case "and", "or", "case", "when", "then", "else", "end", "coalesce", "gen_random_uuid", "nullif", "lower", "upper", "in", "not", "exists", "any":
 			continue
 		default:
 			return fmt.Errorf("unsupported SQL expression function %q in %q", match[1], expr)
@@ -539,9 +570,48 @@ func replaceBracketIdentifiers(s string, quote func(string) string) string {
 			inSingleQuote = !inSingleQuote
 			continue
 		}
-		if !inSingleQuote && ch == '[' {
+		if !inSingleQuote && ch == '[' && startsBracketIdentifier(s, i) {
 			if end := strings.IndexByte(s[i+1:], ']'); end >= 0 {
 				name := s[i+1 : i+1+end]
+				if name != "" {
+					b.WriteString(quote(name))
+					i += end + 1
+					continue
+				}
+			}
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func startsBracketIdentifier(s string, idx int) bool {
+	if idx == 0 {
+		return true
+	}
+	prev := s[idx-1]
+	return !((prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_')
+}
+
+func replaceBacktickIdentifiers(s string, quote func(string) string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inSingleQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' {
+			b.WriteByte(ch)
+			if inSingleQuote && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				b.WriteByte(s[i])
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if !inSingleQuote && ch == '`' {
+			if end := strings.IndexByte(s[i+1:], '`'); end >= 0 {
+				name := strings.ReplaceAll(s[i+1:i+1+end], "``", "`")
 				b.WriteString(quote(name))
 				i += end + 1
 				continue
@@ -579,6 +649,17 @@ func stripSQLServerUnicodeStringPrefixes(s string) string {
 	return b.String()
 }
 
+var (
+	mysqlEscapedCharsetStringRE = regexp.MustCompile(`(?i)_[a-z0-9]+\\'([^\\]*)\\'`)
+	mysqlCharsetStringRE        = regexp.MustCompile(`(?i)_[a-z0-9]+'([^']*)'`)
+)
+
+func stripMySQLCharsetStringPrefixes(s string) string {
+	out := mysqlEscapedCharsetStringRE.ReplaceAllString(s, `'$1'`)
+	out = mysqlCharsetStringRE.ReplaceAllString(out, `'$1'`)
+	return out
+}
+
 func startsSQLStringPrefix(s string, idx int) bool {
 	if idx == 0 {
 		return true
@@ -591,11 +672,100 @@ func startsSQLStringPrefix(s string, idx int) bool {
 		prev == '"')
 }
 
+func rewriteMySQLConcat(expr string) string {
+	trimmed := strings.TrimSpace(expr)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "concat(") || !strings.HasSuffix(trimmed, ")") {
+		return expr
+	}
+	inner := strings.TrimSpace(trimmed[len("concat(") : len(trimmed)-1])
+	if !balancedParens(inner) {
+		return expr
+	}
+	parts := splitTopLevelSQL(inner, ',')
+	if len(parts) < 2 {
+		return expr
+	}
+	return strings.Join(parts, " || ")
+}
+
+func rewriteMySQLRegexpLike(expr string) string {
+	re := regexp.MustCompile(`(?i)regexp_like\s*\(\s*([^,]+?)\s*,\s*('(?:''|[^'])*')\s*\)`)
+	return re.ReplaceAllString(expr, "($1 ~ $2)")
+}
+
+func splitTopLevelSQL(expr string, sep rune) []string {
+	var parts []string
+	var b strings.Builder
+	depth := 0
+	inSingleQuote := false
+	inDoubleQuote := false
+	for i, r := range expr {
+		if r == '\'' && !inDoubleQuote {
+			inSingleQuote = !inSingleQuote
+			b.WriteRune(r)
+			continue
+		}
+		if r == '"' && !inSingleQuote {
+			inDoubleQuote = !inDoubleQuote
+			b.WriteRune(r)
+			continue
+		}
+		if !inSingleQuote && !inDoubleQuote {
+			switch r {
+			case '(':
+				depth++
+			case ')':
+				if depth > 0 {
+					depth--
+				}
+			default:
+				if r == sep && depth == 0 {
+					parts = append(parts, strings.TrimSpace(b.String()))
+					b.Reset()
+					continue
+				}
+			}
+		}
+		b.WriteRune(r)
+		if r == '\'' && inSingleQuote && i+1 < len(expr) && expr[i+1] == '\'' {
+			continue
+		}
+	}
+	parts = append(parts, strings.TrimSpace(b.String()))
+	return parts
+}
+
 func isTextualPGType(colType string) bool {
 	colType = strings.ToLower(strings.TrimSpace(colType))
 	return strings.HasPrefix(colType, "character varying") ||
 		strings.HasPrefix(colType, "character(") ||
 		colType == "text"
+}
+
+func isTextualSourceType(dataType string) bool {
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "varchar", "nvarchar", "character varying", "char", "nchar", "character", "bpchar", "text", "ntext", "enum", "set":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBareSQLWord(expr string) bool {
+	if expr == "" {
+		return false
+	}
+	for i, r := range expr {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func rewriteSQLServerStringConcat(expr string) string {

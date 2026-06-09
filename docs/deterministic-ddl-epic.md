@@ -98,16 +98,16 @@ SMT should translate these ideas into Go packages rather than introducing a depe
 - Do not rewrite unrelated data-copy behavior as part of this epic.
 - Do not require perfect semantic translation of every engine-specific default or check predicate in the first milestone.
 
-## Current SMT Flow To Change
+## Legacy SMT Flow Replaced
 
-Current schema creation is centered on AI-generated table DDL:
+Schema creation was previously centered on AI-generated table DDL:
 
 - `internal/orchestrator/orchestrator.go` wires the primary AI mapper and optional verifier mapper.
-- `internal/driver/ai_typemapper.go` exposes `GenerateTableDDL` and the AI cache key.
+- `internal/driver/ai_typemapper.go` exposed model-authored schema SQL and cache keys.
 - `internal/driver/postgres/writer.go` asks AI to generate table DDL, optionally sends that output to another AI for verification, and executes the resulting SQL.
 - `internal/config/config.go` exposes `ai_verify` and `ai_verifier_model`, currently meaning "second AI reviews first AI output."
 
-That flow should be replaced by deterministic generation plus optional AI review.
+That flow has been replaced by deterministic generation plus optional AI review.
 
 ## Proposed Architecture
 
@@ -300,7 +300,7 @@ Backward compatibility:
 - Continue accepting `ai_verify` temporarily as a deprecated alias for `ai_review.enabled`.
 - Continue accepting `ai_verifier_model` temporarily as a deprecated alias for `ai_review.model`.
 - Emit a deprecation warning when old fields are used.
-- Remove the retry loop where verifier feedback is fed back into AI DDL generation.
+- Remove the retry loop where verifier feedback is fed back into model-authored schema SQL.
 
 Reviewer output contract:
 
@@ -341,7 +341,7 @@ Acceptance criteria:
 
 ## Workstream 6: Schema Diff And Sync
 
-SMT's sync/update path should use deterministic schema diffing instead of AI-authored ALTER statements.
+SMT's sync/update path should use deterministic schema diffing instead of model-authored ALTER statements.
 
 Diff inputs:
 
@@ -368,7 +368,7 @@ Acceptance criteria:
 
 ## Workstream 7: Cache And Artifact Changes
 
-The current AI DDL cache is not valid for deterministic generation.
+The legacy model-authored schema SQL cache is not valid for deterministic generation.
 
 New artifacts should include:
 
@@ -391,7 +391,7 @@ Cache keys should include:
 
 Acceptance criteria:
 
-- Old AI-generated DDL cache entries are ignored by deterministic mode.
+- Old model-generated DDL cache entries are ignored by deterministic mode.
 - Cache invalidation happens automatically when mapper or renderer versions change.
 - Users can inspect the exact SQL that was reviewed and applied.
 
@@ -483,7 +483,7 @@ Milestone 3: PostgreSQL DDL Generation
 
 Milestone 4: AI Review
 
-- Replace AI DDL generation path with optional review path.
+- Replace the model-authored DDL path with optional review.
 - Add structured reviewer prompt and parser.
 - Add review modes.
 - Deprecate old verifier config.
@@ -499,11 +499,11 @@ Milestone 6: Hardening
 
 - Add broader live fixtures.
 - Add docs and examples.
-- Remove old AI-generation fallback unless explicitly retained behind an experimental flag.
+- Remove old model-generation fallback.
 
 ## Open Questions
 
-- Should SMT keep an experimental AI DDL generator behind a separate flag, or remove it completely after deterministic generation is stable?
+- Resolved: SMT removes the experimental model-authored DDL generator instead of keeping it behind a flag.
 - Should the first deterministic release support only MSSQL to PostgreSQL, then expand other dialect pairs?
 - Should AI review inspect the entire plan before apply, table-level chunks, or both?
 - Should `SERIAL` ever be emitted for PostgreSQL targets, or should identity always be the default?
@@ -514,7 +514,7 @@ Milestone 6: Hardening
 
 This epic is complete when:
 
-- SMT can migrate the SO2010 schema from MSSQL to PostgreSQL without AI DDL generation.
+- SMT can migrate the SO2010 schema from MSSQL to PostgreSQL without model-authored DDL.
 - SMT can complete the deterministic schema path with AI review disabled.
 - The deterministic run passes deep no-repair schema verification.
 - Repeated runs produce the same DDL plan for the same inputs.

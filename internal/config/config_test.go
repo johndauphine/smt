@@ -946,6 +946,32 @@ target:
 	}
 }
 
+func TestSchemaGenerationAIRejected(t *testing.T) {
+	yaml := `
+source:
+  type: mssql
+  host: mssql-server
+  database: sourcedb
+  user: sa
+  password: source-password
+target:
+  type: postgres
+  host: pg-server
+  database: targetdb
+  user: postgres
+  password: target-password
+schema_generation:
+  mode: ai
+`
+	_, err := LoadBytes([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected schema_generation.mode: ai to be rejected")
+	}
+	if !strings.Contains(err.Error(), "schema_generation.mode must be 'deterministic'") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestAIReviewExplicitConfig(t *testing.T) {
 	yaml := `
 source:

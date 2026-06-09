@@ -43,3 +43,59 @@ func TestParseGeneratedColumnExtra(t *testing.T) {
 		})
 	}
 }
+
+func TestParseEnumSetValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		columnType string
+		want       []string
+	}{
+		{name: "enum", columnType: "enum('billing','shipping','physical','mailing')", want: []string{"billing", "shipping", "physical", "mailing"}},
+		{name: "set", columnType: "set('vip','wholesale')", want: []string{"vip", "wholesale"}},
+		{name: "escaped quote", columnType: "enum('owner''s','customer')", want: []string{"owner's", "customer"}},
+		{name: "backslash escape", columnType: "enum('a\\'b','c')", want: []string{"a'b", "c"}},
+		{name: "comma in value", columnType: "enum('a,b','c')", want: []string{"a,b", "c"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseEnumSetValues(tt.columnType)
+			if err != nil {
+				t.Fatalf("parseEnumSetValues: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("len = %d, want %d: %#v", len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("value[%d] = %q, want %q; got %#v", i, got[i], tt.want[i], got)
+				}
+			}
+		})
+	}
+}
+
+func TestParseColumnTypeFlags(t *testing.T) {
+	if !isUnsignedColumnType("bigint unsigned") {
+		t.Fatal("expected bigint unsigned to be detected")
+	}
+	if isUnsignedColumnType("tinyint(1)") {
+		t.Fatal("did not expect signed tinyint to be unsigned")
+	}
+}
+
+func TestParseOnUpdateExpression(t *testing.T) {
+	tests := []struct {
+		extra string
+		want  string
+	}{
+		{"DEFAULT_GENERATED on update CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP"},
+		{"on update CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP(6)"},
+		{"DEFAULT_GENERATED", ""},
+	}
+	for _, tt := range tests {
+		if got := parseOnUpdateExpression(tt.extra); got != tt.want {
+			t.Fatalf("parseOnUpdateExpression(%q) = %q, want %q", tt.extra, got, tt.want)
+		}
+	}
+}

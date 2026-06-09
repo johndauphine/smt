@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"smt/internal/ddl"
 	"smt/internal/driver"
-	pgddl "smt/internal/driver/postgres"
 	"smt/internal/logging"
 	"smt/internal/schemadiff"
 	"smt/internal/source"
@@ -75,7 +75,7 @@ func (o *Orchestrator) renderDDLPlan(ctx context.Context, runID string) (schemad
 	}
 
 	plan := schemadiff.Plan{}
-	if ddl, err := renderCreateSchemaDDL(renderer.targetType, renderer.targetSchema); err != nil {
+	if ddl, err := renderer.ddlRenderer.CreateSchemaDDL(); err != nil {
 		return schemadiff.Plan{}, err
 	} else if ddl != "" {
 		plan.Statements = append(plan.Statements, schemadiff.Statement{
@@ -122,17 +122,19 @@ type createDDLRenderer struct {
 	targetSchema         string
 	sourceContext        *driver.DatabaseContext
 	unknownTypePolicy    string
+	ddlRenderer          ddl.Renderer
 	aiReviewEnabled      bool
 	aiReviewMode         string
-	tableVerifier        driver.TableTypeMapper
-	finalizationVerifier driver.FinalizationDDLMapper
+	tableVerifier        driver.TableDDLReviewer
+	finalizationVerifier driver.FinalizationDDLReviewer
 }
 
 func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 	targetType := canonicalDBType(o.config.Target.Type)
 	sourceType := canonicalDBType(o.config.Source.Type)
-	if targetType != "postgres" {
-		return createDDLRenderer{}, fmt.Errorf("deterministic DDL generation currently supports postgres targets; %s target renderer is not implemented", targetType)
+	ddlRenderer, err := ddl.NewRenderer(targetType, o.config.Target.Schema, o.config.SchemaGeneration.UnknownTypePolicy)
+	if err != nil {
+		return createDDLRenderer{}, err
 	}
 
 	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
@@ -154,11 +156,11 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 		}
 	}
 
-	var tableVerifier driver.TableTypeMapper
-	var finalizationVerifier driver.FinalizationDDLMapper
+	var tableVerifier driver.TableDDLReviewer
+	var finalizationVerifier driver.FinalizationDDLReviewer
 	if verifier != nil {
-		tableVerifier, _ = verifier.(driver.TableTypeMapper)
-		finalizationVerifier, _ = verifier.(driver.FinalizationDDLMapper)
+		tableVerifier, _ = verifier.(driver.TableDDLReviewer)
+		finalizationVerifier, _ = verifier.(driver.FinalizationDDLReviewer)
 	}
 
 	return createDDLRenderer{
@@ -167,6 +169,7 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 		targetSchema:         o.config.Target.Schema,
 		sourceContext:        o.source.DatabaseContext(),
 		unknownTypePolicy:    o.config.SchemaGeneration.UnknownTypePolicy,
+		ddlRenderer:          ddlRenderer,
 		aiReviewEnabled:      aiReviewEnabled,
 		aiReviewMode:         o.config.AIReview.Mode,
 		tableVerifier:        tableVerifier,
@@ -305,7 +308,7 @@ func (o *Orchestrator) renderCreateCheckStatements(ctx context.Context, runID st
 }
 
 func (r createDDLRenderer) renderTable(ctx context.Context, t *driver.Table) (string, error) {
-	ddl, _, err := pgddl.RenderCreateTableDDLWithPolicy(t, r.targetSchema, false, r.unknownTypePolicy)
+	ddl, _, err := r.ddlRenderer.CreateTableDDL(t)
 	if err != nil {
 		return "", err
 	}
@@ -316,7 +319,7 @@ func (r createDDLRenderer) renderTable(ctx context.Context, t *driver.Table) (st
 }
 
 func (r createDDLRenderer) renderIndex(ctx context.Context, t *driver.Table, idx *driver.Index, _ string) (string, error) {
-	ddl, err := pgddl.RenderCreateIndexDDL(t, idx, r.targetSchema)
+	ddl, err := r.ddlRenderer.CreateIndexDDL(t, idx)
 	if err != nil {
 		return "", err
 	}
@@ -327,7 +330,7 @@ func (r createDDLRenderer) renderIndex(ctx context.Context, t *driver.Table, idx
 }
 
 func (r createDDLRenderer) renderForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, _ string) (string, error) {
-	ddl, err := pgddl.RenderCreateForeignKeyDDL(t, fk, r.targetSchema)
+	ddl, err := r.ddlRenderer.CreateForeignKeyDDL(t, fk)
 	if err != nil {
 		return "", err
 	}
@@ -338,7 +341,7 @@ func (r createDDLRenderer) renderForeignKey(ctx context.Context, t *driver.Table
 }
 
 func (r createDDLRenderer) renderCheck(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, _ string) (string, error) {
-	ddl, err := pgddl.RenderCreateCheckConstraintDDL(t, chk, r.targetSchema)
+	ddl, err := r.ddlRenderer.CreateCheckConstraintDDL(t, chk)
 	if err != nil {
 		return "", err
 	}
@@ -404,30 +407,6 @@ func handleReviewVerdict(mode, label string, verdict *driver.VerifyResult) error
 	}
 	logging.Warn("AI review flagged %d issue(s) on %s:\n  %s", len(verdict.Issues), label, msg)
 	return nil
-}
-
-func renderCreateSchemaDDL(targetType, schema string) (string, error) {
-	schema = strings.TrimSpace(schema)
-	if schema == "" {
-		return "", nil
-	}
-	dialect := driver.GetDialect(targetType)
-	if dialect == nil {
-		return "", fmt.Errorf("unsupported target type %q", targetType)
-	}
-
-	switch targetType {
-	case "postgres":
-		return fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", dialect.QuoteIdentifier(schema)), nil
-	case "mssql":
-		escapedName := strings.ReplaceAll(schema, "'", "''")
-		escapedDDL := strings.ReplaceAll(fmt.Sprintf("CREATE SCHEMA %s", dialect.QuoteIdentifier(schema)), "'", "''")
-		return fmt.Sprintf("IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'%s') EXEC(N'%s')", escapedName, escapedDDL), nil
-	case "mysql":
-		return fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", dialect.QuoteIdentifier(schema)), nil
-	default:
-		return "", fmt.Errorf("unsupported target type %q", targetType)
-	}
 }
 
 func (o *Orchestrator) writeSQLArtifact(runID, name, sql string) error {

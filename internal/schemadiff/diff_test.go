@@ -1,27 +1,12 @@
 package schemadiff
 
 import (
-	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"smt/internal/driver"
 )
-
-// stubAsker is a deterministic AI replacement for tests. It returns
-// whatever JSON is registered in Responses keyed by prompt prefix, or
-// "" when nothing matches (which causes Render to return a parse error).
-type stubAsker struct {
-	Response  string
-	GotPrompt string
-}
-
-func (s *stubAsker) Ask(_ context.Context, prompt string) (string, error) {
-	s.GotPrompt = prompt
-	return s.Response, nil
-}
 
 func col(name, dtype string, nullable bool) driver.Column {
 	return driver.Column{Name: name, DataType: dtype, IsNullable: nullable}
@@ -106,6 +91,43 @@ func TestCompute_ChangedColumnDefault(t *testing.T) {
 	}
 }
 
+func TestCompute_ChangedEnumValues(t *testing.T) {
+	oldCol := driver.Column{Name: "CustomerType", DataType: "enum", EnumValues: []string{"individual", "company"}}
+	newCol := driver.Column{Name: "CustomerType", DataType: "enum", EnumValues: []string{"individual", "company", "government"}}
+	prev := Snapshot{Tables: []driver.Table{table("Customers", oldCol)}}
+	curr := Snapshot{Tables: []driver.Table{table("Customers", newCol)}}
+
+	d := Compute(prev, curr)
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %+v", d)
+	}
+	changed := d.ChangedTables[0].ChangedColumns
+	if len(changed) != 1 || changed[0].Name != "CustomerType" {
+		t.Fatalf("expected CustomerType enum values change, got %+v", changed)
+	}
+}
+
+func TestCompute_ChangedMySQLColumnFlags(t *testing.T) {
+	oldCol := driver.Column{Name: "UpdatedAt", DataType: "datetime", DefaultExpression: "CURRENT_TIMESTAMP"}
+	newCol := oldCol
+	newCol.OnUpdateExpression = "CURRENT_TIMESTAMP"
+	prev := Snapshot{Tables: []driver.Table{table("Events", oldCol)}}
+	curr := Snapshot{Tables: []driver.Table{table("Events", newCol)}}
+
+	d := Compute(prev, curr)
+	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].ChangedColumns) != 1 {
+		t.Fatalf("expected on-update change to be detected, got %+v", d)
+	}
+
+	oldID := driver.Column{Name: "ID", DataType: "int"}
+	newID := oldID
+	newID.IsUnsigned = true
+	d = Compute(Snapshot{Tables: []driver.Table{table("Events", oldID)}}, Snapshot{Tables: []driver.Table{table("Events", newID)}})
+	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].ChangedColumns) != 1 {
+		t.Fatalf("expected unsigned change to be detected, got %+v", d)
+	}
+}
+
 func TestCompute_AddedAndRemovedTables(t *testing.T) {
 	prev := Snapshot{Tables: []driver.Table{table("Users"), table("Sessions")}}
 	curr := Snapshot{Tables: []driver.Table{table("Users"), table("Audit")}}
@@ -124,171 +146,6 @@ func TestCompute_ColumnsEqualIgnoresOrdinalAndSamples(t *testing.T) {
 	c2 := driver.Column{Name: "X", DataType: "int", OrdinalPos: 5, SampleValues: []string{"99"}}
 	if !columnsEqual(c1, c2) {
 		t.Fatalf("expected columns to be considered equal despite ordinal/sample differences")
-	}
-}
-
-func TestRender_EmptyDiffSkipsAI(t *testing.T) {
-	asker := &stubAsker{Response: "should not be called"}
-	plan, err := Render(context.Background(), asker, Diff{}, "public", "postgres")
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if !plan.IsEmpty() {
-		t.Fatalf("expected empty plan")
-	}
-	if asker.GotPrompt != "" {
-		t.Fatalf("AI was called for empty diff")
-	}
-}
-
-func TestRender_ParsesAIResponse(t *testing.T) {
-	asker := &stubAsker{Response: `{"statements":[
-		{"table":"Users","description":"add Email column","sql":"ALTER TABLE \"public\".\"Users\" ADD COLUMN \"Email\" varchar NULL","risk":"safe"}
-	]}`}
-
-	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
-	curr := Snapshot{Tables: []driver.Table{table("Users",
-		col("Id", "int", false), col("Email", "varchar", true))}}
-	d := Compute(prev, curr)
-
-	plan, err := Render(context.Background(), asker, d, "public", "postgres")
-	if err != nil {
-		t.Fatalf("render failed: %v", err)
-	}
-	if len(plan.Statements) != 1 {
-		t.Fatalf("expected 1 stmt, got %d", len(plan.Statements))
-	}
-	if plan.Statements[0].Risk != RiskSafe {
-		t.Fatalf("expected RiskSafe, got %s", plan.Statements[0].Risk)
-	}
-}
-
-func TestRender_StripsCodeFences(t *testing.T) {
-	asker := &stubAsker{Response: "```json\n{\"statements\":[{\"sql\":\"SELECT 1\",\"risk\":\"safe\"}]}\n```"}
-
-	prev := Snapshot{Tables: []driver.Table{table("X")}}
-	curr := Snapshot{Tables: []driver.Table{table("X", col("Y", "int", true))}}
-	d := Compute(prev, curr)
-
-	plan, err := Render(context.Background(), asker, d, "public", "postgres")
-	if err != nil {
-		t.Fatalf("render failed: %v", err)
-	}
-	if len(plan.Statements) != 1 {
-		t.Fatalf("expected 1 stmt, got %d", len(plan.Statements))
-	}
-}
-
-// failingAsker always returns the configured error. Used to simulate AI
-// provider outages / timeouts.
-type failingAsker struct{ err error }
-
-func (f *failingAsker) Ask(_ context.Context, _ string) (string, error) {
-	return "", f.err
-}
-
-func TestRender_NilAskerReturnsError(t *testing.T) {
-	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
-	curr := Snapshot{Tables: []driver.Table{table("Users",
-		col("Id", "int", false), col("Email", "varchar", true))}}
-	d := Compute(prev, curr)
-
-	_, err := Render(context.Background(), nil, d, "public", "postgres")
-	if err == nil {
-		t.Fatal("expected error when ai is nil")
-	}
-	if !strings.Contains(err.Error(), "AI provider") {
-		t.Errorf("error should explain AI is required, got: %v", err)
-	}
-}
-
-func TestRender_AIErrorPropagates(t *testing.T) {
-	asker := &failingAsker{err: errors.New("anthropic 429: rate limit")}
-	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
-	curr := Snapshot{Tables: []driver.Table{table("Users",
-		col("Id", "int", false), col("Email", "varchar", true))}}
-	d := Compute(prev, curr)
-
-	_, err := Render(context.Background(), asker, d, "public", "postgres")
-	if err == nil {
-		t.Fatal("expected propagated AI error")
-	}
-	if !strings.Contains(err.Error(), "rate limit") {
-		t.Errorf("underlying error should be wrapped, got: %v", err)
-	}
-}
-
-func TestRender_NonJSONResponseSurfacesRawText(t *testing.T) {
-	// Some local providers (Ollama with the wrong model) return prose
-	// instead of JSON. The error must include the raw text so the operator
-	// can see what the model said.
-	asker := &stubAsker{Response: "I cannot help with that request."}
-	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
-	curr := Snapshot{Tables: []driver.Table{table("Users",
-		col("Id", "int", false), col("Email", "varchar", true))}}
-	d := Compute(prev, curr)
-
-	_, err := Render(context.Background(), asker, d, "public", "postgres")
-	if err == nil {
-		t.Fatal("expected parse error")
-	}
-	if !strings.Contains(err.Error(), "I cannot help") {
-		t.Errorf("error should include raw response for diagnosis, got: %v", err)
-	}
-}
-
-func TestRender_EmptyStatementsListReturnsEmptyPlan(t *testing.T) {
-	asker := &stubAsker{Response: `{"statements":[]}`}
-	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
-	curr := Snapshot{Tables: []driver.Table{table("Users",
-		col("Id", "int", false), col("Email", "varchar", true))}}
-	d := Compute(prev, curr)
-
-	plan, err := Render(context.Background(), asker, d, "public", "postgres")
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !plan.IsEmpty() {
-		t.Errorf("expected empty plan from empty statements list, got %+v", plan)
-	}
-}
-
-func TestRender_ResponseWithExtraTextStillParses(t *testing.T) {
-	// Models sometimes prefix the JSON with "Here is the migration plan:".
-	// The renderer must extract the JSON object regardless.
-	asker := &stubAsker{Response: `Here is your migration plan:
-{"statements":[{"sql":"ALTER TABLE foo","description":"d","risk":"safe"}]}
-Hope this helps!`}
-
-	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
-	curr := Snapshot{Tables: []driver.Table{table("Users",
-		col("Id", "int", false), col("Email", "varchar", true))}}
-	d := Compute(prev, curr)
-
-	plan, err := Render(context.Background(), asker, d, "public", "postgres")
-	if err != nil {
-		t.Fatalf("expected JSON to parse despite surrounding prose, got %v", err)
-	}
-	if len(plan.Statements) != 1 {
-		t.Errorf("expected 1 statement, got %d", len(plan.Statements))
-	}
-}
-
-func TestRender_PromptIncludesTargetDialectAndSchema(t *testing.T) {
-	asker := &stubAsker{Response: `{"statements":[]}`}
-	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
-	curr := Snapshot{Tables: []driver.Table{table("Users",
-		col("Id", "int", false), col("Email", "varchar", true))}}
-	d := Compute(prev, curr)
-
-	if _, err := Render(context.Background(), asker, d, "my_schema", "mysql"); err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	if !strings.Contains(asker.GotPrompt, "mysql") {
-		t.Errorf("prompt should mention target dialect, got: %s", asker.GotPrompt)
-	}
-	if !strings.Contains(asker.GotPrompt, "my_schema") {
-		t.Errorf("prompt should mention target schema, got: %s", asker.GotPrompt)
 	}
 }
 
@@ -573,6 +430,33 @@ func TestRenderDeterministic_ColumnDefaultChanges(t *testing.T) {
 	}
 }
 
+func TestRenderDeterministic_MSSQLDefaultOnlyChangeDropsOldDefaultFirst(t *testing.T) {
+	activeOld := driver.Column{Name: "IsActive", DataType: "bit", IsNullable: false, DefaultExpression: "((0))"}
+	activeNew := activeOld
+	activeNew.DefaultExpression = "((1))"
+	d := Compute(
+		Snapshot{Tables: []driver.Table{table("Users", activeOld)}},
+		Snapshot{Tables: []driver.Table{table("Users", activeNew)}},
+	)
+
+	plan, err := RenderDeterministic(d, "dbo", "mssql")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	if len(plan.Statements) != 2 {
+		t.Fatalf("expected 2 default statements, got %d: %+v", len(plan.Statements), plan.Statements)
+	}
+	sql := plan.SQL()
+	dropPos := strings.Index(sql, `DROP CONSTRAINT`)
+	setPos := strings.Index(sql, `ADD CONSTRAINT [df_Users_IsActive] DEFAULT 1 FOR [IsActive]`)
+	if dropPos < 0 || setPos < 0 {
+		t.Fatalf("expected drop old default before adding new default, got:\n%s", sql)
+	}
+	if dropPos > setPos {
+		t.Fatalf("expected old default drop before new default, got:\n%s", sql)
+	}
+}
+
 func TestRenderDeterministic_UnknownTypePolicyAppliesToSync(t *testing.T) {
 	prev := Snapshot{}
 	curr := Snapshot{Tables: []driver.Table{table("Events", driver.Column{Name: "Payload", DataType: "sql_variant", IsNullable: true})}}
@@ -614,14 +498,20 @@ func TestRenderDeterministic_RemovedColumnIsDataLoss(t *testing.T) {
 	}
 }
 
-func TestRenderDeterministic_UnsupportedTarget(t *testing.T) {
+func TestRenderDeterministic_AddedColumnMSSQL(t *testing.T) {
 	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
 	curr := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false), col("Email", "varchar", true))}}
 	d := Compute(prev, curr)
 
-	_, err := RenderDeterministic(d, "dbo", "mssql")
-	if err == nil {
-		t.Fatal("expected unsupported target error")
+	plan, err := RenderDeterministic(d, "dbo", "mssql")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	if len(plan.Statements) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(plan.Statements))
+	}
+	if !strings.Contains(plan.Statements[0].SQL, `ALTER TABLE [dbo].[Users] ADD [Email] VARCHAR(MAX)`) {
+		t.Fatalf("unexpected SQL: %s", plan.Statements[0].SQL)
 	}
 }
 
@@ -644,9 +534,8 @@ func TestDiff_NormalizeRewritesIdentifiers(t *testing.T) {
 
 // TestDiff_WithTargetSchemaRewritesTableSchema is a regression guard for
 // issue #4. The structural diff carries source schema names in
-// Table.Schema (populated by source introspection); when the AI sees
-// those values in the prompt JSON it emits ALTER TABLE qualified to the
-// source schema, which fails on the target. WithTargetSchema must
+// Table.Schema (populated by source introspection); renderers must not
+// use those source qualifiers for target DDL. WithTargetSchema must
 // rewrite Schema across added / removed / changed tables.
 func TestDiff_WithTargetSchemaRewritesTableSchema(t *testing.T) {
 	prev := Snapshot{Tables: []driver.Table{
@@ -682,10 +571,8 @@ func TestDiff_WithTargetSchemaRewritesTableSchema(t *testing.T) {
 }
 
 // TestDiff_WithTargetSchemaRewritesForeignKeyRefSchema is the second
-// regression guard for #4: foreign keys serialize ref_schema into the
-// AI prompt, so a same-schema FK addition that lands in the diff would
-// otherwise carry the source schema name and cause the AI to render
-// `REFERENCES smt_src_test.parent` against an MSSQL `dbo` target. Cover
+// regression guard for #4: same-schema FK additions must use the target
+// schema, not the source schema, in REFERENCES clauses. Cover
 // AddedTables.ForeignKeys, ChangedTables.Curr.ForeignKeys, and the
 // AddedForeignKeys / RemovedForeignKeys slices.
 func TestDiff_WithTargetSchemaRewritesForeignKeyRefSchema(t *testing.T) {
