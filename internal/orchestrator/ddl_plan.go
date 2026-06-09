@@ -81,6 +81,8 @@ func (o *Orchestrator) renderDDLPlan(ctx context.Context, runID string) (schemad
 			Description: fmt.Sprintf("create target schema %s", renderer.targetSchema),
 			SQL:         stripTrailingSemicolons(ddl),
 			Risk:        schemadiff.RiskSafe,
+			Kind:        schemadiff.StatementKindSchema,
+			Object:      renderer.targetSchema,
 		})
 	}
 
@@ -120,6 +122,7 @@ type createDDLRenderer struct {
 	targetType           string
 	targetSchema         string
 	sourceContext        *driver.DatabaseContext
+	targetContext        *driver.DatabaseContext // nil in generate-only mode (no target connection)
 	unknownTypePolicy    string
 	ddlRenderer          ddl.Renderer
 	aiReviewEnabled      bool
@@ -136,10 +139,10 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 		return createDDLRenderer{}, err
 	}
 
-	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
+	reviewEnabled := aiReviewEnabled(o.config)
 
 	var verifier driver.TypeMapper
-	if aiReviewEnabled {
+	if reviewEnabled {
 		if name := strings.TrimSpace(o.config.AIReview.Model); name != "" {
 			vm, err := driver.NewAITypeMapperByName(name)
 			if err != nil {
@@ -162,14 +165,20 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 		finalizationVerifier, _ = verifier.(driver.FinalizationDDLReviewer)
 	}
 
+	var targetContext *driver.DatabaseContext
+	if o.target != nil {
+		targetContext = o.target.DatabaseContext()
+	}
+
 	return createDDLRenderer{
 		sourceType:           sourceType,
 		targetType:           targetType,
 		targetSchema:         o.config.Target.Schema,
 		sourceContext:        o.source.DatabaseContext(),
+		targetContext:        targetContext,
 		unknownTypePolicy:    o.config.SchemaGeneration.UnknownTypePolicy,
 		ddlRenderer:          ddlRenderer,
-		aiReviewEnabled:      aiReviewEnabled,
+		aiReviewEnabled:      reviewEnabled,
 		aiReviewMode:         o.config.AIReview.Mode,
 		tableVerifier:        tableVerifier,
 		finalizationVerifier: finalizationVerifier,
@@ -189,11 +198,14 @@ func (o *Orchestrator) renderCreateTableStatements(ctx context.Context, runID st
 			return fmt.Errorf("rendering table %s: %w", t.Name, err)
 		}
 		ddl = stripTrailingSemicolons(ddl)
+		tableName := driver.NormalizeIdentifier(renderer.targetType, t.Name)
 		statements[i] = schemadiff.Statement{
-			Table:       driver.NormalizeIdentifier(renderer.targetType, t.Name),
+			Table:       tableName,
 			Description: fmt.Sprintf("create table %s", t.Name),
 			SQL:         ddl,
 			Risk:        schemadiff.RiskSafe,
+			Kind:        schemadiff.StatementKindTable,
+			Object:      tableName,
 		}
 		n := done.Add(1)
 		logging.Info("  ✓ [%d/%d] %s.%s", n, total, o.config.Source.Schema, t.Name)
@@ -225,6 +237,8 @@ func (o *Orchestrator) renderCreateIndexStatements(ctx context.Context, runID st
 				Description: fmt.Sprintf("create index %s on %s", idx.Name, t.Name),
 				SQL:         stripTrailingSemicolons(ddl),
 				Risk:        schemadiff.RiskSafe,
+				Kind:        schemadiff.StatementKindIndex,
+				Object:      driver.NormalizeIdentifier(renderer.targetType, idx.Name),
 			})
 		}
 		results[i] = stmts
@@ -258,6 +272,8 @@ func (o *Orchestrator) renderCreateForeignKeyStatements(ctx context.Context, run
 				Description: fmt.Sprintf("create foreign key %s on %s", fk.Name, t.Name),
 				SQL:         stripTrailingSemicolons(ddl),
 				Risk:        schemadiff.RiskSafe,
+				Kind:        schemadiff.StatementKindForeignKey,
+				Object:      driver.NormalizeIdentifier(renderer.targetType, fk.Name),
 			})
 		}
 		results[i] = stmts
@@ -289,6 +305,8 @@ func (o *Orchestrator) renderCreateCheckStatements(ctx context.Context, runID st
 				Description: fmt.Sprintf("create check constraint %s on %s", chk.Name, t.Name),
 				SQL:         stripTrailingSemicolons(ddl),
 				Risk:        schemadiff.RiskSafe,
+				Kind:        schemadiff.StatementKindCheck,
+				Object:      driver.NormalizeIdentifier(renderer.targetType, chk.Name),
 			})
 		}
 		results[i] = stmts
@@ -356,6 +374,7 @@ func (r createDDLRenderer) reviewTable(ctx context.Context, t *driver.Table, ddl
 		SourceTable:   t,
 		TargetSchema:  r.targetSchema,
 		SourceContext: r.sourceContext,
+		TargetContext: r.targetContext,
 		ProposedDDL:   ddl,
 	})
 	if err != nil {
@@ -377,6 +396,7 @@ func (r createDDLRenderer) reviewFinalization(ctx context.Context, ddlType drive
 		TargetDBType:    r.targetType,
 		Table:           t,
 		TargetSchema:    r.targetSchema,
+		TargetContext:   r.targetContext,
 		Index:           idx,
 		ForeignKey:      fk,
 		CheckConstraint: chk,

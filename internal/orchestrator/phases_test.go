@@ -11,48 +11,6 @@ import (
 
 func tbl(name string) source.Table { return source.Table{Name: name} }
 
-func TestNeedsDefaultAIMapper(t *testing.T) {
-	enabled := true
-	disabled := false
-
-	tests := []struct {
-		name string
-		cfg  *config.Config
-		opts Options
-		want bool
-	}{
-		{
-			name: "review disabled",
-			cfg:  &config.Config{AIReview: config.AIReviewConfig{Enabled: &disabled}},
-			want: false,
-		},
-		{
-			name: "review enabled uses default provider",
-			cfg:  &config.Config{AIReview: config.AIReviewConfig{Enabled: &enabled}},
-			want: true,
-		},
-		{
-			name: "explicit review model does not load default provider",
-			cfg:  &config.Config{AIReview: config.AIReviewConfig{Enabled: &enabled, Model: "reviewer"}},
-			want: false,
-		},
-		{
-			name: "skip target ddl generation",
-			cfg:  &config.Config{AIReview: config.AIReviewConfig{Enabled: &enabled}},
-			opts: Options{SkipTargetDDLGeneration: true},
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := needsDefaultAIMapper(tt.cfg, tt.opts); got != tt.want {
-				t.Fatalf("needsDefaultAIMapper() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRenderCreateSchemaDDL(t *testing.T) {
 	tests := []struct {
 		name       string

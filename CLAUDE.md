@@ -51,7 +51,7 @@ To add a new database engine: drop a package under `internal/driver/foo/` implem
 `internal/orchestrator/` is intentionally small — schema runs are short and synchronous, no parallelism:
 
 - `orchestrator.go` — struct + lifecycle + accessors (`New`, `NewWithOptions`, `Close`, `Source`, `Target`, `State`)
-- `phases.go` — one named method per phase (`ExtractSchema`, `CreateTargetSchema`, `CreateTables`, `CreateIndexes`, `CreateForeignKeys`, `CreateCheckConstraints`) plus `Run` which calls them in order
+- `phases.go` — `Run` renders the full DDL plan (the same `renderDDLPlan` path `smt create` preview uses, in `ddl_plan.go`) and then `executePlan` runs each statement through `Writer.ExecRaw`, skipping objects that already exist on the target (idempotent re-runs). One render pipeline means schema.sql is exactly what apply executes (#87). Execution is sequential; rendering is concurrent (`runParallel`)
 - `healthcheck.go` — connection ping + table count
 - `history.go` — `ShowHistory` / `ShowRunDetails` rendering of past runs from the state DB
 
@@ -197,7 +197,7 @@ Default model is `claude-sonnet-4-6`. Haiku was tried and reverted historically 
 - **#26** — MySQL `ENUM` / `SET` values are captured deterministically. `loadColumns` reads `COLUMN_TYPE`, parses the literal list into `driver.Column.EnumValues`, and the deterministic renderer preserves native `ENUM(...)` / `SET(...)` on MySQL targets.
 - **#29 family (PRs #30, #31, #33)** — superseded by deterministic DDL generation. The old AI-DDL validate-and-retry path and retry-classification marker were removed when executable DDL stopped being model-generated.
 - **#27** — MySQL function-call default parens (`DEFAULT (UUID())`, `DEFAULT (JSON_OBJECT())`) and MSSQL PERSISTED-implicit-nullability were explicit prompt rules; deterministic DDL now handles these as renderer rules.
-- **#48** — `migration.ai_verifier_model` plumbed end-to-end for optional DDL review. The orchestrator constructs a second `AITypeMapper` for the named provider when the field is set, passes it through `pool.NewTargetPool` → `WriterOptions.VerifierTypeMapper`, and each driver writer stores `verifierTableMapper` / `verifierFinalizationMapper` resolved by `driver.ResolveVerifierMappers`. Verify-hook callsites use the per-writer `tableVerifier()` / `finalizationVerifier()` helpers which return the verifier mapper when set, else fall back to the primary mapper. Empty config string is the default. Same PR added `secrets.Provider.Type` (`provider:` YAML field) so multiple entries can share one backend.
+- **#48** — `migration.ai_verifier_model` / `ai_review.model` select the AI review provider. Originally plumbed through `pool.NewTargetPool` → `WriterOptions.VerifierTypeMapper` into per-writer reviewer fields; since the preview/apply unification (#87) the reviewer is resolved once in `orchestrator.newCreateDDLRenderer` (`ddl_plan.go`) — writers execute pre-rendered statements and hold no AI mappers. Same PR added `secrets.Provider.Type` (`provider:` YAML field) so multiple entries can share one backend.
 
 ## Common gotchas
 

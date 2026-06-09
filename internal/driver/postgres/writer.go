@@ -35,27 +35,15 @@ func sanitizePGTableName(ident string) string {
 
 // Writer implements driver.Writer for PostgreSQL.
 type Writer struct {
-	pool               *pgxpool.Pool
-	config             *dbconfig.TargetConfig
-	maxConns           int
-	sourceType         string
-	dialect            *Dialect
-	typeMapper         driver.TypeMapper
-	tableMapper        driver.TableDDLReviewer        // Optional AI review fallback
-	finalizationMapper driver.FinalizationDDLReviewer // Optional AI review fallback
-	unknownTypePolicy  string
-	deterministicDDL   deterministicDDL
-
-	// Optional override mappers used for AI review when migration.ai_verifier_model
-	// or ai_review.model is set. Nil falls back to tableMapper /
-	// finalizationMapper.
-	// Use the tableVerifier()/finalizationVerifier() helpers at callsites
-	// instead of branching inline. See WriterOptions.VerifierTypeMapper.
-	verifierTableMapper        driver.TableDDLReviewer
-	verifierFinalizationMapper driver.FinalizationDDLReviewer
-	dbContext                  *driver.DatabaseContext // Cached database context for AI review
-	cachedDB                   *sql.DB                 // Cached database/sql wrapper for tuning analysis
-	copyBatchBytes             int                     // Max bytes per CopyFrom call (derived from TCP buffer size)
+	pool              *pgxpool.Pool
+	config            *dbconfig.TargetConfig
+	maxConns          int
+	sourceType        string
+	dialect           *Dialect
+	unknownTypePolicy string
+	dbContext         *driver.DatabaseContext // Cached database context for AI review
+	cachedDB          *sql.DB                 // Cached database/sql wrapper for tuning analysis
+	copyBatchBytes    int                     // Max bytes per CopyFrom call (derived from TCP buffer size)
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -88,70 +76,20 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		unknownTypePolicy = "fail"
 	}
 
-	var tableMapper driver.TableDDLReviewer
-	var finalizationMapper driver.FinalizationDDLReviewer
-	if opts.TypeMapper != nil {
-		tableMapper, _ = opts.TypeMapper.(driver.TableDDLReviewer)
-		finalizationMapper, _ = opts.TypeMapper.(driver.FinalizationDDLReviewer)
-
-		if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-			logging.Debug("AI review mapper available (provider: %s, model: %s)",
-				aiMapper.ProviderName(), aiMapper.Model())
-			if aiMapper.CacheSize() > 0 {
-				logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
-			}
-		}
-	}
-
-	verifierTableMapper, verifierFinalizationMapper := driver.ResolveVerifierMappers(opts)
-	if verifierTableMapper != nil {
-		// INFO not Debug — cross-model verify is a distinct deployment
-		// posture (a second AI provider sees every DDL) so a user who
-		// configures it should see confirmation in default-verbosity logs
-		// rather than having to enable --verbosity debug to verify their
-		// config took effect.
-		if aiMapper, ok := opts.VerifierTypeMapper.(*driver.AITypeMapper); ok {
-			logging.Info("AI Verifier provider enabled (provider: %s, model: %s)",
-				aiMapper.ProviderName(), aiMapper.Model())
-		}
-	}
-
 	w := &Writer{
-		pool:                       pool,
-		config:                     cfg,
-		maxConns:                   maxConns,
-		sourceType:                 opts.SourceType,
-		dialect:                    dialect,
-		typeMapper:                 opts.TypeMapper,
-		tableMapper:                tableMapper,
-		finalizationMapper:         finalizationMapper,
-		unknownTypePolicy:          unknownTypePolicy,
-		deterministicDDL:           newDeterministicDDL(unknownTypePolicy),
-		verifierTableMapper:        verifierTableMapper,
-		verifierFinalizationMapper: verifierFinalizationMapper,
-		copyBatchBytes:             probeCopyBatchBytes(pool),
+		pool:              pool,
+		config:            cfg,
+		maxConns:          maxConns,
+		sourceType:        opts.SourceType,
+		dialect:           dialect,
+		unknownTypePolicy: unknownTypePolicy,
+		copyBatchBytes:    probeCopyBatchBytes(pool),
 	}
 
 	// Gather database context for AI
 	w.dbContext = w.gatherDatabaseContext()
 
 	return w, nil
-}
-
-// tableVerifier returns the reviewer to use for VerifyTableDDL.
-func (w *Writer) tableVerifier() driver.TableDDLReviewer {
-	if w.verifierTableMapper != nil {
-		return w.verifierTableMapper
-	}
-	return w.tableMapper
-}
-
-// finalizationVerifier mirrors tableVerifier for finalization DDL.
-func (w *Writer) finalizationVerifier() driver.FinalizationDDLReviewer {
-	if w.verifierFinalizationMapper != nil {
-		return w.verifierFinalizationMapper
-	}
-	return w.finalizationMapper
 }
 
 // gatherDatabaseContext collects PostgreSQL database metadata for AI context.
@@ -280,6 +218,12 @@ func (w *Writer) DBType() string {
 	return "postgres"
 }
 
+// DatabaseContext returns the cached target database metadata gathered at
+// connect time, for optional AI review context.
+func (w *Writer) DatabaseContext() *driver.DatabaseContext {
+	return w.dbContext
+}
+
 // PoolStats returns connection pool statistics.
 func (w *Writer) PoolStats() stats.PoolStats {
 	poolStats := w.pool.Stat()
@@ -291,87 +235,6 @@ func (w *Writer) PoolStats() stats.PoolStats {
 		WaitCount:   poolStats.EmptyAcquireCount(),
 		WaitTimeMs:  0,
 	}
-}
-
-// CreateSchema creates the target schema if it doesn't exist.
-func (w *Writer) CreateSchema(ctx context.Context, schema string) error {
-	_, err := w.pool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", w.dialect.QuoteIdentifier(schema)))
-	return err
-}
-
-// CreateTable creates a table from source metadata.
-func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema string) error {
-	return w.CreateTableWithOptions(ctx, t, targetSchema, driver.TableOptions{})
-}
-
-// CreateTableWithOptions creates a table with deterministic DDL.
-func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	// Skip if the target table already exists. Idempotent re-runs land here
-	// instead of failing on "relation already exists" inside CREATE TABLE.
-	// Drift detection is out of scope — that's `smt sync`.
-	if exists, err := w.TableExists(ctx, targetSchema, t.Name); err != nil {
-		return fmt.Errorf("checking table existence for %s: %w", t.FullName(), err)
-	} else if exists {
-		logging.Info("  ✓ table %s already exists, skipping", t.FullName())
-		return nil
-	}
-
-	return w.createTableDeterministic(ctx, t, targetSchema, opts)
-}
-
-func (w *Writer) createTableDeterministic(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	ddl, columnTypes, err := w.deterministicDDL.createTable(t, targetSchema, opts.Unlogged)
-	if err != nil {
-		return err
-	}
-	logging.Debug("deterministic DDL for %s:\n%s", t.FullName(), ddl)
-	for colName, colType := range columnTypes {
-		logging.Debug("  Column %s -> %s", colName, colType)
-	}
-
-	if err := w.reviewDeterministicTableDDL(ctx, t, targetSchema, ddl, opts); err != nil {
-		return err
-	}
-	if err := driver.WriteDDLArtifact(opts.ArtifactDir, opts.ArtifactName, ddl); err != nil {
-		return err
-	}
-	if _, err := w.pool.Exec(ctx, ddl); err != nil {
-		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, ddl)
-	}
-	return nil
-}
-
-func (w *Writer) reviewDeterministicTableDDL(ctx context.Context, t *driver.Table, targetSchema, ddl string, opts driver.TableOptions) error {
-	if !opts.AIReviewEnabled {
-		return nil
-	}
-	reviewer := w.tableVerifier()
-	if reviewer == nil {
-		return fmt.Errorf("AI review enabled but no table reviewer is configured")
-	}
-	vReq := driver.VerifyTableDDLRequest{
-		SourceDBType:  w.sourceType,
-		TargetDBType:  "postgres",
-		SourceTable:   t,
-		TargetSchema:  targetSchema,
-		SourceContext: opts.SourceContext,
-		TargetContext: w.dbContext,
-		ProposedDDL:   ddl,
-	}
-	verdict, err := reviewer.VerifyTableDDL(ctx, vReq)
-	if err != nil {
-		return fmt.Errorf("AI review failed for table %s: %w", t.FullName(), err)
-	}
-	if verdict.OK {
-		logging.Debug("AI review OK: table %s", t.FullName())
-		return nil
-	}
-	msg := strings.Join(verdict.Issues, "\n  ")
-	if aiReviewFails(opts.AIReviewMode) {
-		return fmt.Errorf("AI review flagged %d issue(s) on table %s:\n  %s", len(verdict.Issues), t.FullName(), msg)
-	}
-	logging.Warn("AI review flagged %d issue(s) on table %s:\n  %s", len(verdict.Issues), t.FullName(), msg)
-	return nil
 }
 
 // DropTable drops a table.
@@ -405,39 +268,6 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 func (w *Writer) SetTableLogged(ctx context.Context, schema, table string) error {
 	sanitizedTable := sanitizePGTableName(table)
 	_, err := w.pool.Exec(ctx, fmt.Sprintf("ALTER TABLE %s SET LOGGED", w.dialect.QualifyTable(schema, sanitizedTable)))
-	return err
-}
-
-// CreatePrimaryKey creates the primary key constraint.
-// This is idempotent - it checks if a PK already exists before creating one.
-// CREATE TABLE emits the PK inline, so this usually has nothing to do.
-func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
-	if len(t.PrimaryKey) == 0 {
-		return nil
-	}
-
-	// Check if PK already exists (CREATE TABLE includes PK inline).
-	hasPK, err := w.HasPrimaryKey(ctx, targetSchema, t.Name)
-	if err != nil {
-		return fmt.Errorf("checking for existing PK: %w", err)
-	}
-	if hasPK {
-		return nil // PK already exists, nothing to do
-	}
-
-	sanitizedTable := sanitizePGTableName(t.Name)
-	cols := make([]string, len(t.PrimaryKey))
-	for i, c := range t.PrimaryKey {
-		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
-	}
-
-	pkName := fmt.Sprintf("pk_%s", sanitizedTable)
-	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (%s)",
-		w.dialect.QualifyTable(targetSchema, sanitizedTable),
-		w.dialect.QuoteIdentifier(pkName),
-		strings.Join(cols, ", "))
-
-	_, err = w.pool.Exec(ctx, sql)
 	return err
 }
 
@@ -529,169 +359,6 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 
 	sb.WriteString("\n);")
 	return sb.String()
-}
-
-// CreateIndex creates an index using deterministic DDL.
-func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	return w.CreateIndexWithOptions(ctx, t, idx, targetSchema, driver.FinalizeOptions{})
-}
-
-// CreateIndexWithOptions creates an index using deterministic DDL.
-func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string, opts driver.FinalizeOptions) error {
-	return w.createIndexDeterministic(ctx, t, idx, targetSchema, opts)
-}
-
-// CreateForeignKey creates a foreign key constraint using deterministic DDL.
-func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	return w.CreateForeignKeyWithOptions(ctx, t, fk, targetSchema, driver.FinalizeOptions{})
-}
-
-// CreateForeignKeyWithOptions creates a foreign key using deterministic DDL.
-func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string, opts driver.FinalizeOptions) error {
-	return w.createForeignKeyDeterministic(ctx, t, fk, targetSchema, opts)
-}
-
-// CreateCheckConstraint creates a check constraint using deterministic DDL.
-func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	return w.CreateCheckConstraintWithOptions(ctx, t, chk, targetSchema, driver.FinalizeOptions{})
-}
-
-// CreateCheckConstraintWithOptions creates a CHECK constraint using deterministic DDL.
-func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string, opts driver.FinalizeOptions) error {
-	return w.createCheckConstraintDeterministic(ctx, t, chk, targetSchema, opts)
-}
-
-func (w *Writer) createIndexDeterministic(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string, opts driver.FinalizeOptions) error {
-	sanitizedTableName := sanitizePGIdentifier(t.Name)
-	indexName := sanitizePGIdentifier(idx.Name)
-	if exists, err := w.IndexExists(ctx, targetSchema, sanitizedTableName, indexName); err != nil {
-		return fmt.Errorf("checking index existence for %s.%s: %w", t.Name, idx.Name, err)
-	} else if exists {
-		logging.Info("  ✓ index %s.%s already exists, skipping", t.Name, idx.Name)
-		return nil
-	}
-
-	ddl, err := w.deterministicDDL.createIndex(t, idx, targetSchema)
-	if err != nil {
-		return err
-	}
-	if err := w.reviewDeterministicFinalizationDDL(ctx, driver.DDLTypeIndex, t, idx, nil, nil, targetSchema, ddl, opts); err != nil {
-		return err
-	}
-	if err := driver.WriteDDLArtifact(opts.ArtifactDir, opts.ArtifactName, ddl); err != nil {
-		return err
-	}
-	if _, err := w.pool.Exec(ctx, ddl); err != nil {
-		return fmt.Errorf("creating index %s.%s: %w\nDDL: %s", t.Name, idx.Name, err, ddl)
-	}
-	return nil
-}
-
-func (w *Writer) createForeignKeyDeterministic(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string, opts driver.FinalizeOptions) error {
-	sanitizedTableName := sanitizePGIdentifier(t.Name)
-	fkName := sanitizePGIdentifier(fk.Name)
-	if exists, err := w.ForeignKeyExists(ctx, targetSchema, sanitizedTableName, fkName); err != nil {
-		return fmt.Errorf("checking FK existence for %s.%s: %w", t.Name, fk.Name, err)
-	} else if exists {
-		logging.Info("  ✓ FK %s.%s already exists, skipping", t.Name, fk.Name)
-		return nil
-	}
-
-	ddl, err := w.deterministicDDL.createForeignKey(t, fk, targetSchema)
-	if err != nil {
-		return err
-	}
-	if err := w.reviewDeterministicFinalizationDDL(ctx, driver.DDLTypeForeignKey, t, nil, fk, nil, targetSchema, ddl, opts); err != nil {
-		return err
-	}
-	if err := driver.WriteDDLArtifact(opts.ArtifactDir, opts.ArtifactName, ddl); err != nil {
-		return err
-	}
-	if _, err := w.pool.Exec(ctx, ddl); err != nil {
-		return fmt.Errorf("creating FK %s.%s: %w\nDDL: %s", t.Name, fk.Name, err, ddl)
-	}
-	return nil
-}
-
-func (w *Writer) createCheckConstraintDeterministic(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string, opts driver.FinalizeOptions) error {
-	sanitizedTableName := sanitizePGIdentifier(t.Name)
-	checkName := sanitizePGIdentifier(chk.Name)
-	if exists, err := w.CheckConstraintExists(ctx, targetSchema, sanitizedTableName, checkName); err != nil {
-		return fmt.Errorf("checking CHECK existence for %s.%s: %w", t.Name, chk.Name, err)
-	} else if exists {
-		logging.Info("  ✓ CHECK %s.%s already exists, skipping", t.Name, chk.Name)
-		return nil
-	}
-
-	ddl, err := w.deterministicDDL.createCheckConstraint(t, chk, targetSchema)
-	if err != nil {
-		return err
-	}
-	if err := w.reviewDeterministicFinalizationDDL(ctx, driver.DDLTypeCheckConstraint, t, nil, nil, chk, targetSchema, ddl, opts); err != nil {
-		return err
-	}
-	if err := driver.WriteDDLArtifact(opts.ArtifactDir, opts.ArtifactName, ddl); err != nil {
-		return err
-	}
-	if _, err := w.pool.Exec(ctx, ddl); err != nil {
-		return fmt.Errorf("creating CHECK %s.%s: %w\nDDL: %s", t.Name, chk.Name, err, ddl)
-	}
-	return nil
-}
-
-func (w *Writer) reviewDeterministicFinalizationDDL(ctx context.Context, ddlType driver.DDLType, t *driver.Table, idx *driver.Index, fk *driver.ForeignKey, chk *driver.CheckConstraint, targetSchema, ddl string, opts driver.FinalizeOptions) error {
-	if !opts.AIReviewEnabled {
-		return nil
-	}
-	reviewer := w.finalizationVerifier()
-	if reviewer == nil {
-		return fmt.Errorf("AI review enabled but no finalization reviewer is configured")
-	}
-	vReq := driver.VerifyFinalizationDDLRequest{
-		Type:            ddlType,
-		SourceDBType:    w.sourceType,
-		TargetDBType:    "postgres",
-		Table:           t,
-		TargetSchema:    targetSchema,
-		TargetContext:   w.dbContext,
-		Index:           idx,
-		ForeignKey:      fk,
-		CheckConstraint: chk,
-		ProposedDDL:     ddl,
-	}
-	verdict, err := reviewer.VerifyFinalizationDDL(ctx, vReq)
-	if err != nil {
-		return fmt.Errorf("AI review failed for %s %s.%s: %w", ddlType, t.Schema, t.Name, err)
-	}
-	if verdict.OK {
-		logging.Debug("AI review OK: %s %s.%s", ddlType, t.Schema, t.Name)
-		return nil
-	}
-	msg := strings.Join(verdict.Issues, "\n  ")
-	if aiReviewFails(opts.AIReviewMode) {
-		return fmt.Errorf("AI review flagged %d issue(s) on %s %s.%s:\n  %s", len(verdict.Issues), ddlType, t.Schema, t.Name, msg)
-	}
-	logging.Warn("AI review flagged %d issue(s) on %s %s.%s:\n  %s", len(verdict.Issues), ddlType, t.Schema, t.Name, msg)
-	return nil
-}
-
-func aiReviewFails(mode string) bool {
-	return strings.EqualFold(strings.TrimSpace(mode), "fail")
-}
-
-// HasPrimaryKey checks if a table has a primary key.
-func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
-	sanitizedTable := sanitizePGTableName(table)
-	var exists bool
-	err := w.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_index i
-			JOIN pg_class c ON c.oid = i.indrelid
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2
-		)
-	`, schema, sanitizedTable).Scan(&exists)
-	return exists, err
 }
 
 // IndexExists reports whether an index with the given name exists in the

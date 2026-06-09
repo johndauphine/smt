@@ -23,7 +23,24 @@ type Statement struct {
 	SQL         string `json:"sql"`
 	Risk        Risk   `json:"risk"`
 	RiskNotes   string `json:"risk_notes,omitempty"`
+	// Kind and Object classify the created object so `create --apply` can
+	// gate execution on target existence (idempotent re-runs, #87). Object
+	// is the target-normalized object name (table/index/FK/check). Sync-
+	// rendered plans leave both empty — sync statements run unconditionally.
+	Kind   StatementKind `json:"kind,omitempty"`
+	Object string        `json:"object,omitempty"`
 }
+
+// StatementKind classifies a plan statement for execution-time gating.
+type StatementKind string
+
+const (
+	StatementKindSchema     StatementKind = "schema"
+	StatementKindTable      StatementKind = "table"
+	StatementKindIndex      StatementKind = "index"
+	StatementKindForeignKey StatementKind = "foreign_key"
+	StatementKindCheck      StatementKind = "check"
+)
 
 // Plan is the ordered list of statements that, applied in order, brings
 // the target schema in line with the current source schema.

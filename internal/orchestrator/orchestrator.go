@@ -20,7 +20,6 @@ import (
 
 	"smt/internal/checkpoint"
 	"smt/internal/config"
-	"smt/internal/driver"
 	"smt/internal/notify"
 	"smt/internal/pool"
 	"smt/internal/source"
@@ -36,11 +35,6 @@ type Options struct {
 
 	// SourceOnly skips the target connection (used by inspection commands).
 	SourceOnly bool
-
-	// SkipTargetDDLGeneration tells construction that the target writer will
-	// only be used for ping/raw SQL, not CREATE/INDEX/FK/CHECK generation.
-	// Health checks and sync --apply can skip loading an AI generator.
-	SkipTargetDDLGeneration bool
 }
 
 // Orchestrator opens source/target connections via the driver registry and
@@ -80,31 +74,10 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	o.source = src
 
 	if !opts.SourceOnly {
-		needsTargetDDLGeneration := !opts.SkipTargetDDLGeneration
-
-		var mapper driver.TypeMapper
-		if needsDefaultAIMapper(cfg, opts) {
-			mapper, err = driver.GetAITypeMapper()
-			if err != nil {
-				src.Close()
-				return nil, fmt.Errorf("loading AI provider: %w", err)
-			}
-		}
-
-		// Build a separate AI reviewer when requested. Deterministic schema
-		// generation does not require this mapper unless ai_review.enabled is
-		// true, and reviewer feedback is not fed back into a generator.
-		var verifierMapper driver.TypeMapper
-		if name := cfg.AIReview.Model; needsTargetDDLGeneration && aiReviewEnabled(cfg) && name != "" {
-			vm, err := driver.NewAITypeMapperByName(name)
-			if err != nil {
-				src.Close()
-				return nil, fmt.Errorf("loading AI review provider %q: %w", name, err)
-			}
-			verifierMapper = vm
-		}
-
-		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, cfg.SchemaGeneration.UnknownTypePolicy, mapper, verifierMapper)
+		// AI review providers are resolved by the plan renderer
+		// (newCreateDDLRenderer); writers execute pre-rendered statements
+		// and need no mappers.
+		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, cfg.SchemaGeneration.UnknownTypePolicy)
 		if err != nil {
 			src.Close()
 			return nil, fmt.Errorf("opening target: %w", err)
@@ -126,12 +99,6 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 
 func aiReviewEnabled(cfg *config.Config) bool {
 	return cfg.AIReview.Enabled != nil && *cfg.AIReview.Enabled
-}
-
-func needsDefaultAIMapper(cfg *config.Config, opts Options) bool {
-	return !opts.SkipTargetDDLGeneration &&
-		aiReviewEnabled(cfg) &&
-		cfg.AIReview.Model == ""
 }
 
 // Close releases all underlying resources.

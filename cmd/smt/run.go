@@ -117,9 +117,8 @@ func runHealthCheck(c *cli.Context) error {
 		return err
 	}
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
-		StateFile:               c.String("state-file"),
-		SourceOnly:              !cfg.HasTargetConnection(),
-		SkipTargetDDLGeneration: true,
+		StateFile:  c.String("state-file"),
+		SourceOnly: !cfg.HasTargetConnection(),
 	})
 	if err != nil {
 		return err

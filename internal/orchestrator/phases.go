@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +18,7 @@ import (
 	"smt/internal/checkpoint"
 	"smt/internal/driver"
 	"smt/internal/logging"
+	"smt/internal/schemadiff"
 	"smt/internal/source"
 )
 
@@ -52,11 +52,11 @@ type TaskType string
 
 const (
 	TaskExtractSchema TaskType = "extract_schema"
-	TaskCreateSchema  TaskType = "create_schema"
 	TaskCreateTables  TaskType = "create_tables"
 	TaskCreateIndexes TaskType = "create_indexes"
 	TaskCreateFKs     TaskType = "create_fks"
 	TaskCreateChecks  TaskType = "create_checks"
+	TaskExecuteDDL    TaskType = "execute_ddl"
 )
 
 // Run executes the full schema build sequence in order. Each phase is its
@@ -88,34 +88,65 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	return nil
 }
 
-// runAllPhases drives the per-phase methods in order. Optional phases
-// (indexes, FKs, checks) are gated by config flags.
+// runAllPhases renders the full DDL plan — the exact same path `smt create`
+// (preview) uses, including optional AI review — and then executes it against
+// the target. One render pipeline means the schema.sql a user reviewed is the
+// SQL apply executes (#87).
 func (o *Orchestrator) runAllPhases(ctx context.Context, runID string) error {
-	if err := o.ExtractSchema(ctx, runID); err != nil {
+	plan, err := o.renderDDLPlan(ctx, runID)
+	if err != nil {
 		return err
 	}
-	if err := o.CreateTargetSchema(ctx, runID); err != nil {
-		return err
+	if err := o.writeSQLArtifact(runID, "schema.sql", plan.SQL()); err != nil {
+		return fmt.Errorf("writing DDL artifact: %w", err)
 	}
-	if err := o.CreateTables(ctx, runID); err != nil {
-		return err
-	}
-	if o.config.Migration.CreateIndexes {
-		if err := o.CreateIndexes(ctx, runID); err != nil {
-			return err
+	return o.executePlan(ctx, runID, plan)
+}
+
+// executePlan runs the rendered statements in order. Statements whose target
+// object already exists are skipped, so re-runs after a partial failure are
+// idempotent (the pre-#87 writer paths had the same semantics). Execution is
+// sequential: rendering (the expensive part) already happened concurrently,
+// plan order encodes dependencies, and serial DDL sidesteps the InnoDB
+// metadata-lock deadlocks concurrent CHECK creation used to hit (#25).
+func (o *Orchestrator) executePlan(ctx context.Context, runID string, plan schemadiff.Plan) error {
+	_ = o.state.UpdatePhase(runID, string(TaskExecuteDDL))
+	total := len(plan.Statements)
+	logging.Info("[%s] executing %d DDL statement(s)", TaskExecuteDDL, total)
+	for i, stmt := range plan.Statements {
+		exists, err := o.planObjectExists(ctx, stmt)
+		if err != nil {
+			return fmt.Errorf("checking existence for %s: %w", stmt.Description, err)
 		}
-	}
-	if o.config.Migration.CreateForeignKeys {
-		if err := o.CreateForeignKeys(ctx, runID); err != nil {
-			return err
+		if exists {
+			logging.Info("  ✓ [%d/%d] %s — already exists, skipping", i+1, total, stmt.Description)
+			continue
 		}
-	}
-	if o.config.Migration.CreateCheckConstraints {
-		if err := o.CreateCheckConstraints(ctx, runID); err != nil {
-			return err
+		if _, err := o.target.ExecRaw(ctx, stmt.SQL); err != nil {
+			return fmt.Errorf("%s: %w\nSQL: %s", stmt.Description, err, stmt.SQL)
 		}
+		logging.Info("  ✓ [%d/%d] %s", i+1, total, stmt.Description)
 	}
 	return nil
+}
+
+// planObjectExists consults the target catalog for the object a statement
+// creates. Schema statements render with IF NOT EXISTS semantics on every
+// target, so they never need gating.
+func (o *Orchestrator) planObjectExists(ctx context.Context, stmt schemadiff.Statement) (bool, error) {
+	schema := o.config.Target.Schema
+	switch stmt.Kind {
+	case schemadiff.StatementKindTable:
+		return o.target.TableExists(ctx, schema, stmt.Object)
+	case schemadiff.StatementKindIndex:
+		return o.target.IndexExists(ctx, schema, stmt.Table, stmt.Object)
+	case schemadiff.StatementKindForeignKey:
+		return o.target.ForeignKeyExists(ctx, schema, stmt.Table, stmt.Object)
+	case schemadiff.StatementKindCheck:
+		return o.target.CheckConstraintExists(ctx, schema, stmt.Table, stmt.Object)
+	default:
+		return false, nil
+	}
 }
 
 // ExtractSchema reads the source schema, applies include/exclude filters,
@@ -135,134 +166,6 @@ func (o *Orchestrator) ExtractSchema(ctx context.Context, runID string) error {
 		return fmt.Errorf("writing source schema artifact: %w", err)
 	}
 	return nil
-}
-
-// CreateTargetSchema ensures the target schema (namespace) exists.
-func (o *Orchestrator) CreateTargetSchema(ctx context.Context, runID string) error {
-	_ = o.state.UpdatePhase(runID, string(TaskCreateSchema))
-	logging.Info("[%s] ensuring target schema %q exists", TaskCreateSchema, o.config.Target.Schema)
-	if err := o.target.CreateSchema(ctx, o.config.Target.Schema); err != nil {
-		return fmt.Errorf("creating target schema: %w", err)
-	}
-	return nil
-}
-
-// CreateTables issues a CREATE TABLE for each table in scope. Calls run
-// concurrently up to Migration.AIConcurrency in flight at once; logging
-// is per-completion (so output order may differ from source order, but
-// each line clearly identifies the table).
-func (o *Orchestrator) CreateTables(ctx context.Context, runID string) error {
-	_ = o.state.UpdatePhase(runID, string(TaskCreateTables))
-	total := len(o.tables)
-	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
-	logging.Info("[%s] creating %d tables (concurrency=%d)", TaskCreateTables, total, o.aiConcurrency())
-	var done atomic.Int64
-	// Gather source DB context once up front (Reader caches; this primes the
-	// cache so the per-table goroutines all read the same value without racing
-	// on the sync.Once inside the Reader implementation). AI review, when
-	// enabled, also receives this context.
-	sourceCtx := o.source.DatabaseContext()
-	artifactDir := o.ddlArtifactDir(runID)
-	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
-		opts := driver.TableOptions{
-			SourceContext:   sourceCtx,
-			AIReviewEnabled: aiReviewEnabled,
-			AIReviewMode:    o.config.AIReview.Mode,
-			ArtifactDir:     artifactDir,
-			ArtifactName:    fmt.Sprintf("%03d_create_table_%s.sql", i+1, artifactName(t.Name)),
-		}
-		if err := o.target.CreateTableWithOptions(ctx, &t, o.config.Target.Schema, opts); err != nil {
-			return fmt.Errorf("creating table %s: %w", t.Name, err)
-		}
-		n := done.Add(1)
-		logging.Info("  ✓ [%d/%d] %s.%s", n, total, o.config.Source.Schema, t.Name)
-		return nil
-	})
-}
-
-// CreateIndexes loads each table's indexes from the source and creates
-// them on the target. Each table's load+create work runs in its own
-// goroutine; indexes within one table are still applied sequentially
-// (typically only a handful per table).
-func (o *Orchestrator) CreateIndexes(ctx context.Context, runID string) error {
-	_ = o.state.UpdatePhase(runID, string(TaskCreateIndexes))
-	logging.Info("[%s] loading and creating indexes (concurrency=%d)", TaskCreateIndexes, o.aiConcurrency())
-	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
-	opts := driver.FinalizeOptions{AIReviewEnabled: aiReviewEnabled, AIReviewMode: o.config.AIReview.Mode, ArtifactDir: o.ddlArtifactDir(runID)}
-	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
-		if err := o.source.LoadIndexes(ctx, &t); err != nil {
-			return fmt.Errorf("loading indexes for %s: %w", t.Name, err)
-		}
-		for j := range t.Indexes {
-			idx := t.Indexes[j]
-			callOpts := opts
-			callOpts.ArtifactName = fmt.Sprintf("%03d_%03d_create_index_%s_%s.sql", i+1, j+1, artifactName(t.Name), artifactName(idx.Name))
-			if err := o.target.CreateIndexWithOptions(ctx, &t, &idx, o.config.Target.Schema, callOpts); err != nil {
-				return fmt.Errorf("creating index %s: %w", idx.Name, err)
-			}
-		}
-		return nil
-	})
-}
-
-// CreateForeignKeys loads each table's foreign keys from the source and
-// creates them on the target. Same parallelism shape as CreateIndexes:
-// per-table goroutines, sequential FKs within a table.
-func (o *Orchestrator) CreateForeignKeys(ctx context.Context, runID string) error {
-	_ = o.state.UpdatePhase(runID, string(TaskCreateFKs))
-	logging.Info("[%s] loading and creating foreign keys (concurrency=%d)", TaskCreateFKs, o.aiConcurrency())
-	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
-	opts := driver.FinalizeOptions{AIReviewEnabled: aiReviewEnabled, AIReviewMode: o.config.AIReview.Mode, ArtifactDir: o.ddlArtifactDir(runID)}
-	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
-		if err := o.source.LoadForeignKeys(ctx, &t); err != nil {
-			return fmt.Errorf("loading FKs for %s: %w", t.Name, err)
-		}
-		for j := range t.ForeignKeys {
-			fk := t.ForeignKeys[j]
-			callOpts := opts
-			callOpts.ArtifactName = fmt.Sprintf("%03d_%03d_create_fk_%s_%s.sql", i+1, j+1, artifactName(t.Name), artifactName(fk.Name))
-			if err := o.target.CreateForeignKeyWithOptions(ctx, &t, &fk, o.config.Target.Schema, callOpts); err != nil {
-				return fmt.Errorf("creating FK %s: %w", fk.Name, err)
-			}
-		}
-		return nil
-	})
-}
-
-// CreateCheckConstraints loads each table's check constraints from the
-// source and creates them on the target. Same parallelism shape as the
-// other constraint phases.
-func (o *Orchestrator) CreateCheckConstraints(ctx context.Context, runID string) error {
-	_ = o.state.UpdatePhase(runID, string(TaskCreateChecks))
-	concurrency := o.checkConcurrency()
-	logging.Info("[%s] loading and creating check constraints (concurrency=%d)", TaskCreateChecks, concurrency)
-	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
-	opts := driver.FinalizeOptions{AIReviewEnabled: aiReviewEnabled, AIReviewMode: o.config.AIReview.Mode, ArtifactDir: o.ddlArtifactDir(runID)}
-	return runParallel(ctx, o.tables, concurrency, func(ctx context.Context, i int, t source.Table) error {
-		if err := o.source.LoadCheckConstraints(ctx, &t); err != nil {
-			return fmt.Errorf("loading checks for %s: %w", t.Name, err)
-		}
-		for j := range t.CheckConstraints {
-			chk := t.CheckConstraints[j]
-			callOpts := opts
-			callOpts.ArtifactName = fmt.Sprintf("%03d_%03d_create_check_%s_%s.sql", i+1, j+1, artifactName(t.Name), artifactName(chk.Name))
-			if err := o.target.CreateCheckConstraintWithOptions(ctx, &t, &chk, o.config.Target.Schema, callOpts); err != nil {
-				return fmt.Errorf("creating check %s: %w", chk.Name, err)
-			}
-		}
-		return nil
-	})
-}
-
-// checkConcurrency returns the concurrency for the CHECK-constraint phase.
-// MySQL targets are serialized: InnoDB takes metadata locks on the FK graph
-// when adding a CHECK, and concurrent ADD CONSTRAINT on related tables
-// deadlocks with Error 1213 (#25, #81).
-func (o *Orchestrator) checkConcurrency() int {
-	if driver.Canonicalize(o.config.Target.Type) == "mysql" {
-		return 1
-	}
-	return o.aiConcurrency()
 }
 
 // aiConcurrency returns the configured per-phase concurrency limit, or

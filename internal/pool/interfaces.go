@@ -24,9 +24,6 @@ type BulkWriter interface {
 
 // Re-export driver types for convenience
 type (
-	// TableOptions contains options for table creation.
-	TableOptions = driver.TableOptions
-
 	// WriteBatchOptions configures a bulk write operation.
 	WriteBatchOptions = driver.WriteBatchOptions
 
