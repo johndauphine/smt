@@ -1,7 +1,6 @@
 // Command smt is the schema migration tool. It extracts schemas from a
-// source database, generates matching DDL on a target database, and applies
-// ALTER statements derived from diffing the source schema against a stored
-// snapshot.
+// source database, generates matching target-dialect DDL, and optionally
+// applies CREATE/ALTER statements against a configured target database.
 //
 // SMT is the schema-only counterpart to DMT (the data migration tool): it
 // shares DMT's driver model, AI-assisted type mapping, and TUI scaffolding

@@ -116,7 +116,9 @@ func runSync(c *cli.Context) error {
 	}
 
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
-		StateFile: c.String("state-file"),
+		StateFile:               c.String("state-file"),
+		SourceOnly:              !c.Bool("apply"),
+		SkipTargetDDLGeneration: true,
 	})
 	if err != nil {
 		return err

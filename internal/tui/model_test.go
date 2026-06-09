@@ -37,3 +37,39 @@ func TestHandleCommand_BlocksSecondSchemaOperationWhileStarting(t *testing.T) {
 		t.Fatalf("output = %q, want already running message", output)
 	}
 }
+
+func TestCreateCommandUsesCLIBackedPath(t *testing.T) {
+	args := cliBackedCommandArgs("create", []string{"/create", "--apply", "@config.yaml", "--out", "schema.sql"})
+	got := strings.Join(args, " ")
+	want := "--config config.yaml create --apply --out schema.sql"
+	if got != want {
+		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestCLIBackedCommandArgsAcceptsBareConfigPath(t *testing.T) {
+	args := cliBackedCommandArgs("create", []string{"/create", "--apply", "crm.yaml", "--out", "schema.sql"})
+	got := strings.Join(args, " ")
+	want := "--config crm.yaml create --apply --out schema.sql"
+	if got != want {
+		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestCLIBackedCommandArgsDoesNotTreatFlagValueAsConfig(t *testing.T) {
+	args := cliBackedCommandArgs("create", []string{"/create", "--out", "schema.sql"})
+	got := strings.Join(args, " ")
+	want := "create --out schema.sql"
+	if got != want {
+		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestCLIBackedCommandArgsAcceptsBareConfigAfterFlagValue(t *testing.T) {
+	args := cliBackedCommandArgs("create", []string{"/create", "--out", "schema.sql", "crm.yaml"})
+	got := strings.Join(args, " ")
+	want := "--config crm.yaml create --out schema.sql"
+	if got != want {
+		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
+	}
+}

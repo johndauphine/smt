@@ -1,8 +1,8 @@
 # smt — Schema Migration Tool configuration
 #
-# SMT extracts the source schema and creates matching DDL on the target.
-# Unlike DMT, it does not transfer rows. Schema DDL is deterministic by
-# default; AI review is optional.
+# SMT extracts the source schema and writes matching target-dialect DDL.
+# Unlike DMT, it does not transfer rows. Applying DDL to a target database
+# is explicit via `smt create --apply` or `smt sync --apply`.
 
 source:
   type: mssql                           # mssql | postgres | mysql
@@ -15,15 +15,17 @@ source:
 
 target:
   type: postgres                        # mssql | postgres | mysql
-  host: localhost
-  port: 5432
-  database: stackoverflow
-  user: postgres
-  password: ${PG_PASSWORD}
   schema: public
+  # Connection fields are only required when using --apply or health-checking
+  # the target. Leave them out for DDL-only generation.
+  # host: localhost
+  # port: 5432
+  # database: stackoverflow
+  # user: postgres
+  # password: ${PG_PASSWORD}
 
 schema_generation:
-  mode: deterministic                  # deterministic | ai
+  mode: deterministic                  # deterministic | ai (legacy)
   unknown_type_policy: fail            # fail | warn | text_fallback
 
 ai_review:
@@ -37,27 +39,17 @@ profile:
     Example profile, stored encrypted in SQLite.
     Edit this description for your environment.
 
-migration:
-  # Tables to include / exclude (glob patterns)
-  exclude_tables:
-    - __*
-    - temp_*
-  # include_tables: []                  # if set, only matching tables are scoped
-
-  # Which schema objects to create on the target
-  create_indexes: true
-  create_foreign_keys: true
-  create_check_constraints: true
-
-  # Deprecated alias for ai_review.enabled during the deterministic-DDL
-  # transition. Prefer the top-level ai_review block above.
-  ai_verify: false
-
-  # Deprecated alias for ai_review.model.
-  # ai_verifier_model: ""
-
-  # Where SMT keeps its state DB, schema artifacts, and DDL artifacts.
-  data_dir: ~/.smt
+# Optional migration overrides. Omit this block for the default full-schema
+# plan: tables, indexes, foreign keys, and check constraints.
+# migration:
+#   include_tables: []                  # if set, only matching tables are scoped
+#   exclude_tables:
+#     - __*
+#     - temp_*
+#   create_indexes: true
+#   create_foreign_keys: true
+#   create_check_constraints: true
+#   data_dir: ~/.smt
 
 # Slack notifications (optional). AI provider keys live in the secrets file
 # at ~/.secrets/smt-config.yaml — never put them here.

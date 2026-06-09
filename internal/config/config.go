@@ -156,6 +156,14 @@ type Config struct {
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
 	autoConfig AutoConfig
+
+	// Tracks migration keys present in the loaded YAML so boolean defaults can
+	// distinguish omitted values from explicit false values.
+	migrationKeys map[string]bool
+
+	// Tracks migration values supplied by global defaults. Hard-coded defaults
+	// should not overwrite these, especially when a global default is false.
+	migrationDefaultKeys map[string]bool
 }
 
 // SlackConfig holds Slack notification settings.
@@ -443,6 +451,7 @@ func LoadBytes(data []byte) (*Config, error) {
 	}
 
 	var cfg Config
+	cfg.migrationKeys = migrationKeysFromYAML([]byte(expanded))
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
@@ -458,6 +467,35 @@ func LoadBytes(data []byte) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func migrationKeysFromYAML(data []byte) map[string]bool {
+	var raw struct {
+		Migration map[string]any `yaml:"migration"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil || len(raw.Migration) == 0 {
+		return nil
+	}
+	keys := make(map[string]bool, len(raw.Migration))
+	for key := range raw.Migration {
+		keys[key] = true
+	}
+	return keys
+}
+
+func (c *Config) hasMigrationKey(key string) bool {
+	return c.migrationKeys != nil && c.migrationKeys[key]
+}
+
+func (c *Config) markMigrationDefault(key string) {
+	if c.migrationDefaultKeys == nil {
+		c.migrationDefaultKeys = make(map[string]bool)
+	}
+	c.migrationDefaultKeys[key] = true
+}
+
+func (c *Config) hasMigrationDefault(key string) bool {
+	return c.migrationDefaultKeys != nil && c.migrationDefaultKeys[key]
 }
 
 // DefaultDataDir returns the default data directory for state storage.
@@ -513,27 +551,24 @@ func (c *Config) applyGlobalDefaults() {
 		c.Migration.ParallelReaders = defaults.ParallelReaders
 	}
 
-	// Boolean settings - apply from global defaults when explicitly set (non-nil pointer)
-	// and the migration config value is false.
-	//
-	// Limitation: Go's bool defaults to false, so we cannot distinguish between
-	// "user didn't set this" and "user explicitly set to false". This means:
-	//   - Global true  + migration unset/false → true  (global wins)
-	//   - Global true  + migration true        → true  (both agree)
-	//   - Global false + migration unset/false → false (both agree)
-	//   - Global false + migration true        → true  (migration wins)
-	//
-	// In practice: you CAN override a global "false" to "true" per-migration,
-	// but you CANNOT override a global "true" to "false" per-migration.
-	if defaults.CreateIndexes != nil && !c.Migration.CreateIndexes {
+	// Schema-object defaults use YAML key presence so explicit false in a
+	// migration config can override a global true default.
+	if defaults.CreateIndexes != nil && !c.hasMigrationKey("create_indexes") {
 		c.Migration.CreateIndexes = *defaults.CreateIndexes
+		c.markMigrationDefault("create_indexes")
 	}
-	if defaults.CreateForeignKeys != nil && !c.Migration.CreateForeignKeys {
+	if defaults.CreateForeignKeys != nil && !c.hasMigrationKey("create_foreign_keys") {
 		c.Migration.CreateForeignKeys = *defaults.CreateForeignKeys
+		c.markMigrationDefault("create_foreign_keys")
 	}
-	if defaults.CreateCheckConstraints != nil && !c.Migration.CreateCheckConstraints {
+	if defaults.CreateCheckConstraints != nil && !c.hasMigrationKey("create_check_constraints") {
 		c.Migration.CreateCheckConstraints = *defaults.CreateCheckConstraints
+		c.markMigrationDefault("create_check_constraints")
 	}
+
+	// Other booleans retain the historical bool limitation: global true wins
+	// over an unset/false migration value because these fields do not track
+	// YAML key presence yet.
 	if defaults.StrictConsistency != nil && !c.Migration.StrictConsistency {
 		c.Migration.StrictConsistency = *defaults.StrictConsistency
 	}
@@ -705,6 +740,15 @@ func (c *Config) applyDefaults() error {
 	}
 	if c.Migration.TargetMode == "" {
 		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
+	}
+	if !c.hasMigrationKey("create_indexes") && !c.hasMigrationDefault("create_indexes") {
+		c.Migration.CreateIndexes = true
+	}
+	if !c.hasMigrationKey("create_foreign_keys") && !c.hasMigrationDefault("create_foreign_keys") {
+		c.Migration.CreateForeignKeys = true
+	}
+	if !c.hasMigrationKey("create_check_constraints") && !c.hasMigrationDefault("create_check_constraints") {
+		c.Migration.CreateCheckConstraints = true
 	}
 	if c.SchemaGeneration.Mode == "" {
 		c.SchemaGeneration.Mode = driver.SchemaGenerationDeterministic
@@ -987,20 +1031,15 @@ func (c *Config) validate() error {
 		return fmt.Errorf("source.type '%s' is not a valid driver type (supported: %v)", c.Source.Type, availableDriverTypes())
 	}
 
-	// Validate target
-	if c.Target.Host == "" {
-		return fmt.Errorf("target.host is required")
-	}
-	if c.Target.Database == "" {
-		return fmt.Errorf("target.database is required")
-	}
+	// Validate target descriptor. A live target connection is only required
+	// by apply paths; DDL planning only needs the target dialect and schema.
 	if !isValidDriverType(c.Target.Type) {
 		return fmt.Errorf("target.type '%s' is not a valid driver type (supported: %v)", c.Target.Type, availableDriverTypes())
 	}
 
 	// Same-engine migration validation: prevent migration to the exact same database
 	// Compare canonical driver names to handle aliases (e.g., "mssql" == "sqlserver")
-	if canonicalDriverName(c.Source.Type) == canonicalDriverName(c.Target.Type) {
+	if c.HasTargetConnection() && canonicalDriverName(c.Source.Type) == canonicalDriverName(c.Target.Type) {
 		// Use case-insensitive comparison for hostnames (RFC 1035)
 		sameHost := strings.EqualFold(c.Source.Host, c.Target.Host)
 		samePort := c.Source.Port == c.Target.Port
@@ -1036,6 +1075,35 @@ func (c *Config) validate() error {
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/smt-config.yaml
 
+	return nil
+}
+
+// HasTargetConnection reports whether the config includes the minimum fields
+// needed to open a target connection. DDL-only commands intentionally do not
+// require this; apply paths should call RequireTargetConnection before opening
+// a target writer so the error is explicit.
+func (c *Config) HasTargetConnection() bool {
+	return strings.TrimSpace(c.Target.Host) != "" && strings.TrimSpace(c.Target.Database) != ""
+}
+
+// RequireTargetConnection validates the target connection fields needed by
+// commands that execute SQL against the target.
+func (c *Config) RequireTargetConnection() error {
+	if strings.TrimSpace(c.Target.Host) == "" {
+		return fmt.Errorf("target.host is required when applying DDL")
+	}
+	if strings.TrimSpace(c.Target.Database) == "" {
+		return fmt.Errorf("target.database is required when applying DDL")
+	}
+	if c.HasTargetConnection() && canonicalDriverName(c.Source.Type) == canonicalDriverName(c.Target.Type) {
+		sameHost := strings.EqualFold(c.Source.Host, c.Target.Host)
+		samePort := c.Source.Port == c.Target.Port
+		sameDB := c.Source.Database == c.Target.Database
+		if sameHost && samePort && sameDB {
+			return fmt.Errorf("source and target cannot be the same database (%s:%d/%s)",
+				c.Source.Host, c.Source.Port, c.Source.Database)
+		}
+	}
 	return nil
 }
 
