@@ -144,17 +144,72 @@ func TestRenderDeterministic_RemovedTableCycleDropsFKsFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDeterministic: %v", err)
 	}
-	sawFKDrop := false
+	fkDrops := 0
 	for _, st := range plan.Statements {
 		if strings.Contains(st.SQL, "DROP CONSTRAINT") {
-			sawFKDrop = true
+			fkDrops++
 		}
-		if strings.HasPrefix(st.SQL, "DROP TABLE") && !sawFKDrop {
-			t.Fatalf("table dropped before cycle FKs: %v", plan.Statements)
+		if strings.HasPrefix(st.SQL, "DROP TABLE") && fkDrops == 0 {
+			t.Fatalf("cyclic table dropped before its FKs: %v", plan.Statements)
 		}
 	}
-	if !sawFKDrop {
-		t.Fatal("no FK drop emitted for cycle")
+	if fkDrops != 2 {
+		t.Fatalf("expected 2 intra-cycle FK drops, got %d", fkDrops)
+	}
+}
+
+// #84 — only FKs pointing inside the cycle are dropped; an FK from a cyclic
+// table to an already-dropped (acyclic) or surviving table is left alone.
+func TestRenderDeterministic_CycleFKDropsAreScoped(t *testing.T) {
+	diff := Diff{
+		RemovedTables: []driver.Table{
+			{
+				Name:    "a",
+				Columns: []driver.Column{{Name: "id", DataType: "int"}},
+				ForeignKeys: []driver.ForeignKey{
+					{Name: "fk_a_b", Columns: []string{"b_id"}, RefTable: "b", RefColumns: []string{"id"}},
+					{Name: "fk_a_lookup", Columns: []string{"l_id"}, RefTable: "lookup", RefColumns: []string{"id"}},
+				},
+			},
+			{
+				Name:    "b",
+				Columns: []driver.Column{{Name: "id", DataType: "int"}},
+				ForeignKeys: []driver.ForeignKey{
+					{Name: "fk_b_a", Columns: []string{"a_id"}, RefTable: "a", RefColumns: []string{"id"}},
+				},
+			},
+			{
+				// Acyclic: must drop before any FK-drop statements appear.
+				Name:    "lookup",
+				Columns: []driver.Column{{Name: "id", DataType: "int"}},
+			},
+		},
+	}
+	plan, err := RenderDeterministic(diff, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	var tableOrder []string
+	fkDrops := 0
+	for _, st := range plan.Statements {
+		if strings.Contains(st.SQL, "fk_a_lookup") {
+			t.Fatalf("out-of-cycle FK dropped: %q", st.SQL)
+		}
+		if strings.Contains(st.SQL, "DROP CONSTRAINT") {
+			fkDrops++
+		}
+		if strings.HasPrefix(st.SQL, "DROP TABLE") {
+			tableOrder = append(tableOrder, st.Table)
+		}
+	}
+	if fkDrops != 2 {
+		t.Fatalf("expected 2 intra-cycle FK drops, got %d", fkDrops)
+	}
+	// lookup is referenced by cycle member a, so it can only drop after the
+	// cycle is broken and a is gone.
+	want := []string{"a", "b", "lookup"}
+	if strings.Join(tableOrder, ",") != strings.Join(want, ",") {
+		t.Fatalf("drop order = %v, want %v", tableOrder, want)
 	}
 }
 
@@ -165,8 +220,8 @@ func TestOrderTablesForDrop_SelfReferenceIsNotACycle(t *testing.T) {
 			{Name: "fk_mgr", Columns: []string{"manager_id"}, RefTable: "employees", RefColumns: []string{"id"}},
 		},
 	}}
-	ordered, cyclic := orderTablesForDrop(tables)
-	if len(cyclic) != 0 || len(ordered) != 1 {
-		t.Fatalf("self-reference treated as cycle: ordered=%v cyclic=%v", ordered, cyclic)
+	actions := orderTablesForDrop(tables)
+	if len(actions) != 1 || actions[0].dropFK != nil {
+		t.Fatalf("self-reference treated as cycle: %+v", actions)
 	}
 }
