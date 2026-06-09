@@ -221,6 +221,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			ISNULL(CHARACTER_MAXIMUM_LENGTH, 0),
 			ISNULL(NUMERIC_PRECISION, 0),
 			ISNULL(NUMERIC_SCALE, 0),
+			ISNULL(DATETIME_PRECISION, -1),
 			CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
 			COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity'),
 			ORDINAL_POSITION,
@@ -237,9 +238,13 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	t.Columns = nil
 	for rows.Next() {
 		var col driver.Column
-		var isNullable, isIdentity int
-		if err := rows.Scan(&col.Name, &col.DataType, &col.MaxLength, &col.Precision, &col.Scale, &isNullable, &isIdentity, &col.OrdinalPos, &col.DefaultExpression); err != nil {
+		var isNullable, isIdentity, dtPrecision int
+		if err := rows.Scan(&col.Name, &col.DataType, &col.MaxLength, &col.Precision, &col.Scale, &dtPrecision, &isNullable, &isIdentity, &col.OrdinalPos, &col.DefaultExpression); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
+		}
+		if dtPrecision >= 0 {
+			p := dtPrecision
+			col.DatetimePrecision = &p
 		}
 		col.IsNullable = isNullable == 1
 		col.IsIdentity = isIdentity == 1

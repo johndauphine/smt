@@ -343,6 +343,9 @@ func backfillPreVersionFields(prev, curr Snapshot) Snapshot {
 					cols[ci].EnumValues = cc.EnumValues
 				}
 			}
+			if prev.Version < 3 {
+				cols[ci].DatetimePrecision = cc.DatetimePrecision
+			}
 		}
 		tables[ti].Columns = cols
 	}
@@ -416,6 +419,7 @@ func columnsEqual(a, b driver.Column) bool {
 		a.MaxLength == b.MaxLength &&
 		a.Precision == b.Precision &&
 		a.Scale == b.Scale &&
+		equalIntPtr(a.DatetimePrecision, b.DatetimePrecision) &&
 		a.IsNullable == b.IsNullable &&
 		a.SRID == b.SRID &&
 		a.IsUnsigned == b.IsUnsigned &&
@@ -425,6 +429,13 @@ func columnsEqual(a, b driver.Column) bool {
 		a.IsComputed == b.IsComputed &&
 		strings.TrimSpace(a.ComputedExpression) == strings.TrimSpace(b.ComputedExpression) &&
 		a.ComputedPersisted == b.ComputedPersisted
+}
+
+func equalIntPtr(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func stringSlicesEqual(a, b []string) bool {

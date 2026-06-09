@@ -112,6 +112,7 @@ type Column struct {
 	MaxLength          int      `json:"max_length"`
 	Precision          int      `json:"precision"`
 	Scale              int      `json:"scale"`
+	DatetimePrecision  *int     `json:"datetime_precision,omitempty"` // fractional-seconds precision for datetime/time-class columns; nil = unknown (pre-v3 snapshots)
 	IsNullable         bool     `json:"is_nullable"`
 	IsIdentity         bool     `json:"is_identity"`
 	IsUnsigned         bool     `json:"is_unsigned,omitempty"` // true for MySQL unsigned numeric columns

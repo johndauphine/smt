@@ -311,17 +311,17 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 	case "text", "ntext", "tinytext", "mediumtext", "longtext":
 		typ = "text"
 	case "datetime", "datetime2", "smalldatetime", "timestamp":
-		typ = "timestamp without time zone"
+		typ = pgFspType("timestamp", col, "without time zone")
 	case "rowversion":
 		// SQL Server's rowversion (reported by old snapshots as "timestamp")
 		// is an opaque 8-byte binary counter.
 		typ = "bytea"
 	case "datetimeoffset", "timestamptz", "timestamp with time zone":
-		typ = "timestamp with time zone"
+		typ = pgFspType("timestamp", col, "with time zone")
 	case "date":
 		typ = "date"
 	case "time":
-		typ = "time"
+		typ = pgFspType("time", col, "")
 	case "decimal", "numeric", "number":
 		if col.Precision > 0 {
 			typ = fmt.Sprintf("numeric(%d,%d)", col.Precision, col.Scale)
@@ -738,6 +738,24 @@ func isTextualPGType(colType string) bool {
 	return strings.HasPrefix(colType, "character varying") ||
 		strings.HasPrefix(colType, "character(") ||
 		colType == "text"
+}
+
+// pgFspType renders a timestamp/time type with the source's
+// fractional-seconds precision when known (#88), clamped to PostgreSQL's
+// maximum of 6; unknown precision keeps the bare type.
+func pgFspType(base string, col driver.Column, suffix string) string {
+	out := base
+	if col.DatetimePrecision != nil && *col.DatetimePrecision >= 0 {
+		p := *col.DatetimePrecision
+		if p > 6 {
+			p = 6
+		}
+		out = fmt.Sprintf("%s(%d)", base, p)
+	}
+	if suffix != "" {
+		out += " " + suffix
+	}
+	return out
 }
 
 func isTextualSourceType(dataType string) bool {

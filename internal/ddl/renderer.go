@@ -244,7 +244,7 @@ func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 		}
 	case "mysql":
 		if strings.HasPrefix(lower, "current_timestamp(") || strings.HasPrefix(lower, "now(") {
-			return "CURRENT_TIMESTAMP(6)", nil
+			return mysqlNowDefault(col), nil
 		}
 		if isArraySourceType(col.DataType) {
 			switch lower {
@@ -262,7 +262,7 @@ func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 		}
 		switch lower {
 		case "current_timestamp", "now()", "getdate()", "getutcdate()", "sysdatetime()", "sysutcdatetime()", "sysdatetimeoffset()":
-			return "CURRENT_TIMESTAMP(6)", nil
+			return mysqlNowDefault(col), nil
 		case "gen_random_uuid()", "uuid_generate_v4()", "newid()", "uuid()":
 			return "(UUID())", nil
 		}
@@ -586,13 +586,13 @@ func (r Renderer) mssqlColumnType(col driver.Column, dt string) (string, error) 
 	case "rowversion":
 		return "ROWVERSION", nil
 	case "datetime", "datetime2", "smalldatetime", "timestamp", "timestamp without time zone", "timestamptz":
-		return "DATETIME2", nil
+		return fspType("DATETIME2", col, 7), nil
 	case "datetimeoffset", "timestamp with time zone":
-		return "DATETIMEOFFSET", nil
+		return fspType("DATETIMEOFFSET", col, 7), nil
 	case "date":
 		return "DATE", nil
 	case "time", "time without time zone", "time with time zone":
-		return "TIME", nil
+		return fspType("TIME", col, 7), nil
 	case "decimal", "numeric", "number":
 		return decimalType("DECIMAL", col), nil
 	case "money":
@@ -640,11 +640,11 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 	case "rowversion":
 		return "BINARY(8)", nil
 	case "datetime", "datetime2", "smalldatetime", "timestamp", "timestamp without time zone", "timestamptz", "datetimeoffset", "timestamp with time zone":
-		return "DATETIME(6)", nil
+		return mysqlFspType("DATETIME", col, 6), nil
 	case "date":
 		return "DATE", nil
 	case "time", "time without time zone", "time with time zone":
-		return "TIME", nil
+		return mysqlFspType("TIME", col, 0), nil
 	case "decimal", "numeric", "number":
 		return mysqlUnsignedType(decimalType("DECIMAL", col), col), nil
 	case "money":
@@ -788,6 +788,54 @@ func sizedTypeCapped(name string, length, max int, unbounded string) string {
 		return fmt.Sprintf("%s(%s)", name, unbounded)
 	}
 	return sizedType(name, length, unbounded)
+}
+
+// fspType renders a datetime/time type with the source's fractional-seconds
+// precision when known (#88), clamped to the target's maximum; unknown
+// precision keeps the bare type (target default).
+func fspType(name string, col driver.Column, max int) string {
+	if col.DatetimePrecision == nil || *col.DatetimePrecision < 0 {
+		return name
+	}
+	p := *col.DatetimePrecision
+	if p > max {
+		p = max
+	}
+	return fmt.Sprintf("%s(%d)", name, p)
+}
+
+// mysqlFspType is fspType for MySQL (max fsp 6), with a default precision for
+// unknown sources — 6 for DATETIME (the pre-#88 behavior), 0 for TIME. fsp 0
+// renders bare (DATETIME == DATETIME(0)).
+func mysqlFspType(name string, col driver.Column, def int) string {
+	p := def
+	if col.DatetimePrecision != nil && *col.DatetimePrecision >= 0 {
+		p = *col.DatetimePrecision
+		if p > 6 {
+			p = 6
+		}
+	}
+	if p == 0 {
+		return name
+	}
+	return fmt.Sprintf("%s(%d)", name, p)
+}
+
+// mysqlNowDefault renders the CURRENT_TIMESTAMP default with the same fsp the
+// column type will carry — MySQL rejects a default whose fsp differs from the
+// column's.
+func mysqlNowDefault(col driver.Column) string {
+	p := 6
+	if col.DatetimePrecision != nil && *col.DatetimePrecision >= 0 {
+		p = *col.DatetimePrecision
+		if p > 6 {
+			p = 6
+		}
+	}
+	if p == 0 {
+		return "CURRENT_TIMESTAMP"
+	}
+	return fmt.Sprintf("CURRENT_TIMESTAMP(%d)", p)
 }
 
 func decimalType(name string, col driver.Column) string {
