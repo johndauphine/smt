@@ -80,13 +80,10 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	o.source = src
 
 	if !opts.SourceOnly {
-		reviewEnabled := cfg.AIReview.Enabled != nil && *cfg.AIReview.Enabled
 		needsTargetDDLGeneration := !opts.SkipTargetDDLGeneration
-		needsDefaultAI := needsTargetDDLGeneration &&
-			(cfg.SchemaGeneration.Mode == driver.SchemaGenerationAI || (reviewEnabled && cfg.AIReview.Model == ""))
 
 		var mapper driver.TypeMapper
-		if needsDefaultAI {
+		if needsDefaultAIMapper(cfg, opts) {
 			mapper, err = driver.GetAITypeMapper()
 			if err != nil {
 				src.Close()
@@ -98,7 +95,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		// generation does not require this mapper unless ai_review.enabled is
 		// true, and reviewer feedback is not fed back into a generator.
 		var verifierMapper driver.TypeMapper
-		if name := cfg.AIReview.Model; needsTargetDDLGeneration && reviewEnabled && name != "" {
+		if name := cfg.AIReview.Model; needsTargetDDLGeneration && aiReviewEnabled(cfg) && name != "" {
 			vm, err := driver.NewAITypeMapperByName(name)
 			if err != nil {
 				src.Close()
@@ -130,6 +127,16 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	o.notifier = newNotifier(cfg)
 
 	return o, nil
+}
+
+func aiReviewEnabled(cfg *config.Config) bool {
+	return cfg.AIReview.Enabled != nil && *cfg.AIReview.Enabled
+}
+
+func needsDefaultAIMapper(cfg *config.Config, opts Options) bool {
+	return !opts.SkipTargetDDLGeneration &&
+		aiReviewEnabled(cfg) &&
+		cfg.AIReview.Model == ""
 }
 
 // Close releases all underlying resources.

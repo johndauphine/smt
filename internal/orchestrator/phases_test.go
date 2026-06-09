@@ -5,43 +5,49 @@ import (
 	"testing"
 
 	"smt/internal/config"
+	"smt/internal/ddl"
 	"smt/internal/source"
 )
 
 func tbl(name string) source.Table { return source.Table{Name: name} }
 
-// TestAIMaxRetries pins the contract for the unset / explicit-zero /
-// positive / negative cases. The pointer type on Migration.AIMaxRetries
-// is the key to making "user didn't set it" (nil → default) distinguishable
-// from "user explicitly opted out" (set to 0 → no retries). See the
-// helper's docstring.
-func TestAIMaxRetries(t *testing.T) {
-	intp := func(n int) *int { return &n }
+func TestNeedsDefaultAIMapper(t *testing.T) {
+	enabled := true
+	disabled := false
 
 	tests := []struct {
-		name     string
-		configIn *int
-		want     int
+		name string
+		cfg  *config.Config
+		opts Options
+		want bool
 	}{
-		{"unset (nil) → default", nil, defaultAIMaxRetries},
-		{"explicit zero is the opt-out → 0", intp(0), 0},
-		{"explicit 1", intp(1), 1},
-		{"explicit positive value passes through", intp(5), 5},
-		{"negative is treated as 0 (defensive clamp)", intp(-1), 0},
-		{"deeply negative still maps to 0", intp(-42), 0},
+		{
+			name: "review disabled",
+			cfg:  &config.Config{AIReview: config.AIReviewConfig{Enabled: &disabled}},
+			want: false,
+		},
+		{
+			name: "review enabled uses default provider",
+			cfg:  &config.Config{AIReview: config.AIReviewConfig{Enabled: &enabled}},
+			want: true,
+		},
+		{
+			name: "explicit review model does not load default provider",
+			cfg:  &config.Config{AIReview: config.AIReviewConfig{Enabled: &enabled, Model: "reviewer"}},
+			want: false,
+		},
+		{
+			name: "skip target ddl generation",
+			cfg:  &config.Config{AIReview: config.AIReviewConfig{Enabled: &enabled}},
+			opts: Options{SkipTargetDDLGeneration: true},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{}
-			cfg.Migration.AIMaxRetries = tt.configIn
-			o := &Orchestrator{config: cfg}
-			if got := o.aiMaxRetries(); got != tt.want {
-				var in any = "nil"
-				if tt.configIn != nil {
-					in = *tt.configIn
-				}
-				t.Errorf("aiMaxRetries() with config=%v = %d, want %d", in, got, tt.want)
+			if got := needsDefaultAIMapper(tt.cfg, tt.opts); got != tt.want {
+				t.Fatalf("needsDefaultAIMapper() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -82,12 +88,16 @@ func TestRenderCreateSchemaDDL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := renderCreateSchemaDDL(tt.targetType, tt.schema)
+			renderer, err := ddl.NewRenderer(tt.targetType, tt.schema, "")
 			if err != nil {
-				t.Fatalf("renderCreateSchemaDDL() error: %v", err)
+				t.Fatalf("NewRenderer() error: %v", err)
+			}
+			got, err := renderer.CreateSchemaDDL()
+			if err != nil {
+				t.Fatalf("CreateSchemaDDL() error: %v", err)
 			}
 			if strings.TrimSpace(got) != tt.want {
-				t.Fatalf("renderCreateSchemaDDL() = %q, want %q", got, tt.want)
+				t.Fatalf("CreateSchemaDDL() = %q, want %q", got, tt.want)
 			}
 		})
 	}

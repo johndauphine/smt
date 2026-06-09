@@ -57,47 +57,30 @@ To add a new database engine: drop a package under `internal/driver/foo/` implem
 
 Optional phases (indexes, FKs, checks) are gated by `cfg.Migration.Create*` booleans. There is no transfer phase, no validate-row-counts phase, no chunk-level resume.
 
-### Philosophy: SMT feeds the AI, the AI does the work
+### Philosophy: deterministic first, AI optional
 
-SMT's job is to give the AI the context it needs and execute what comes back. Translation, generation, and judgment belong to the AI:
+SMT must be able to generate schema DDL without an AI model. AI is an optional enhancement for review and diagnostics, not the source of executable DDL.
 
-- **type mapping** (source dialect → target dialect): AI, via `MapType`
-- **DDL generation** for new schemas: AI, via `tableMapper.GenerateTableDDL` (CREATE TABLE) and `finalizationMapper.GenerateFinalizationDDL` (indexes, FKs, checks) inside each driver's Writer
-- **Identifier naming convention** for the target: `driver.NormalizeIdentifier(targetType, name)` — single source of truth shared by `create`'s pre-sanitization and `sync`'s `Diff.Normalize`
-- **ALTER generation** in `sync`: AI, via `Render` in `schemadiff/render.go`
-- **Risk judgment** for ALTERs (safe / blocking / rebuild / data-loss-risk): AI, in the same prompt
-- **Error diagnosis** when DDL fails: AI, via `internal/driver/ai_errordiag.go`
+Deterministic SMT code owns:
 
-What stays deterministic in SMT code:
+- **Type mapping and DDL generation** for supported source/target pairs through `internal/ddl.Renderer` and per-driver deterministic helpers.
+- **Identifier naming convention** for the target: `driver.NormalizeIdentifier(targetType, name)` — single source of truth shared by `create` and `sync`.
+- **ALTER generation** in `sync`: deterministic rendering from `schemadiff.Compute`.
+- **Risk labels** for sync plans: deterministic classification in `schemadiff`.
+- Schema introspection (`ExtractSchema`, `LoadIndexes`, etc.) through catalog queries against `information_schema` / `sys.*`.
+- Structural diffing (`schemadiff.Compute`) and statement execution (`Writer.ExecRaw`).
 
-- Schema introspection (`ExtractSchema`, `LoadIndexes`, etc.) — well-defined queries against `information_schema` / `sys.*`. Cheap and reliable, no AI needed.
-- Structural diffing (`schemadiff.Compute`) — pure data comparison, no SQL knowledge.
-- Statement execution (`Writer.ExecRaw`) — passes the AI's output to the database.
-- CLI / TUI / config / state DB plumbing — non-AI work that has nothing to translate.
-
-If you find yourself writing SQL syntax in Go code (a new ALTER variant, a new dialect quirk), stop — that's AI work. Add it to the prompt instead.
+AI may still be used for optional review (`ai_review.enabled`) and diagnostics, but it must not generate or patch executable DDL.
 
 ### AI infrastructure
 
 The full multi-provider HTTP plumbing (Anthropic / OpenAI / Google / Ollama / LM Studio) lives in `internal/driver/ai_typemapper.go`:
 
-- `MapType` / `MapTypeWithError` — cached type-mapping API, used by every driver's `CreateTable` for source-to-target type inference
-- `Ask(ctx, prompt)` — generic free-form prompt entrypoint, used by `internal/schemadiff/render.go` for SQL rendering
-- `dispatch` — single switch over providers; adding a new provider is a one-place edit
+- `MapType` / `MapTypeWithError` — legacy cached type-mapping API retained for optional callers, not required by core schema DDL generation.
+- `Ask(ctx, prompt)` / `CallAI(ctx, prompt)` — generic prompt entrypoints used by optional review and diagnostics.
+- `dispatch` — single switch over providers; adding a new provider is a one-place edit.
 
-The table-DDL prompt (`buildTableDDLPrompt` → `buildSourceIntrospectionBlock`) hands the AI **raw introspection facts** (data_type, max_length, precision, scale, nullable, default_expression, computed/computed_expression/computed_storage), not a synthesized source DDL string. Earlier versions assembled a per-dialect CREATE TABLE in Go and asked the AI to translate it; PR #16 dropped that intermediate step because Go-side synthesis was duplicating work the AI already does well and was hiding metadata behind dialect quoting. If you need to give the AI more source context, extend the introspection block — don't rebuild the source-DDL synthesizer.
-
-The source side of that prompt (the `=== SOURCE DATABASE ===` block) is populated via `Reader.DatabaseContext()` — each driver's Reader caches a `*DatabaseContext` (sync.Once) and the orchestrator passes it through `TableOptions.SourceContext` on the first `CreateTableWithOptions` call. PR #24 (closes #13) added this; before that the source block had only `Type:` and the prompt was a one-sided ask.
-
-### AI-DDL validate-and-retry
-
-`internal/driver/retry.go` is the shared retry primitive that wraps every AI-rendered DDL phase (CREATE TABLE + the three finalize phases). The flow inside each writer's `Create*WithOptions` is: ask AI → exec → on failure, feed the verbatim prior DDL + verbatim DB error back into the next prompt → up to `migration.ai_max_retries` retries. There is **no SQLSTATE allowlist** — instead the AI itself classifies hopeless cases by emitting the literal `NOT_RETRYABLE` marker (parsed by `classifyRetryResponse` into `ErrNotRetryable`), in which case the loop exits and the original DB error surfaces to the user. `IsCanceled` short-circuits ctx cancellation/deadline so Ctrl-C doesn't get re-prompted as a "fix this" round-trip.
-
-Cache discipline matters here: the type-mapper's cache is **read-only on the AI path**. Only the writer caches DDL, and only after a successful exec — so a structurally-valid-but-semantically-wrong first attempt can't poison the cache for future runs (PR #33 closes #32). Postgres's `Unlogged` rewrite is applied to `execDDL` while `aiDDL` is what gets cached, so future calls with `Unlogged=false` get the un-rewritten form back.
-
-Config: `migration.ai_max_retries` is `*int` — omitted defaults to 3, `0` is the explicit opt-out, negative values clamp to 0. Resolved in `orchestrator.aiMaxRetries`.
-
-`internal/driver/ai_errordiag.go` diagnoses DDL failures (used outside the retry loop, e.g. for surfacing a final error). All AI prompts are in-source string builders, not template files. Provider config and API keys live in `~/.secrets/smt-config.yaml` (env var override: `SMT_SECRETS_FILE`).
+`internal/driver/ai_verify.go` can parse/review deterministic DDL when `ai_review.enabled` is on. Review may warn or fail, but it does not rewrite DDL. `internal/driver/ai_errordiag.go` can diagnose DDL failures for user-facing context. Provider config and API keys live in `~/.secrets/smt-config.yaml` (env var override: `SMT_SECRETS_FILE`).
 
 ### Schema diff + sync (the new SMT-specific feature)
 
@@ -105,15 +88,15 @@ Config: `migration.ai_max_retries` is `*int` — omitted defaults to 3, `0` is t
 
 - `snapshot.go` — `Snapshot` is a serializable point-in-time view (tables + columns + indexes + FKs + checks + captured_at)
 - `diff.go` — `Compute(prev, curr)` returns added/removed/changed tables and per-table column/index/FK/check deltas. Pure data, no SQL knowledge.
-- `render.go` — `Render(ctx, ai, diff, schema, dialect)` asks the LLM to convert the structural diff into one JSON statement per change, each with a SQL string + description + Risk classification (`safe` / `blocking` / `rebuild` / `data-loss-risk`). The whole diff goes in one prompt so the AI sees cross-statement context.
+- `render_deterministic.go` — converts the structural diff into deterministic target-dialect DDL statements plus Risk classification (`safe` / `blocking` / `rebuild` / `data-loss-risk`).
 
-There is no hand-coded ALTER syntax table — the AI renders SQL. `Plan.FilterByRisk` lets `sync --apply` refuse data-loss without `--allow-data-loss`.
+`Plan.FilterByRisk` lets `sync --apply` refuse data-loss without `--allow-data-loss`.
 
 Storage: `internal/checkpoint/snapshots.go` adds a `schema_snapshots` table to the SQLite state DB (`SaveSnapshot` / `GetLatestSnapshot` / `ListSnapshots`).
 
 CLI flow:
 - `smt snapshot` — extract source, save to state DB
-- `smt sync` — diff vs latest snapshot, AI renders SQL, write to `migration.sql` (default) or apply with `--apply`
+- `smt sync` — diff vs latest snapshot, deterministically render SQL, write to `migration.sql` (default) or apply with `--apply`
 
 ### Config + secrets split
 
@@ -147,7 +130,6 @@ Some files preserve DMT's original code shape unchanged (verbatim copy with modu
 Active work is tracked in GitHub issues. Run `gh issue list --state open` and read the bodies — each carries Symptom + Root cause + Proposed fix:
 
 - **#25** — MySQL InnoDB CHECK-constraint creation deadlocks (Error 1213) at `ai_concurrency: 16`. InnoDB takes metadata locks on parent + child tables when adding a CHECK; SMT fans out across goroutines and the lock graph deadlocks on related tables. Mssql/pg targets tolerate it. Cleanest fix: cap CHECK-phase concurrency at 1 for MySQL targets in `Orchestrator.CreateCheckConstraints`. Surfaced only after #17 was fixed (no PG-source CHECKs to create before that).
-- **#26** — MySQL reader doesn't extract ENUM/SET value lists. `loadColumns` reads `DATA_TYPE` (`enum`) but not `COLUMN_TYPE` (`enum('billing','shipping','physical','mailing')`), so the AI sees no values and on `*→mysql` fabricates `ENUM('','')` (Error 1291: duplicated empty value). Fix: add `EnumValues []string` to `driver.Column`, parse `COLUMN_TYPE`, surface in the introspection block. Same shape as #18.
 - **#28** — Documentation-only: gpt-oss-20b → MSSQL whack-a-mole. Pre-#27 prompt rules and post-#27 prompt rules give the same 5/9 net score on the matrix but redistribute which pairs fail (rule-following inconsistency, not missing rules). Standing rule "no per-model AI workarounds" applies — the issue exists to document the model-selection guidance, not as a fix target. Note: the validate-and-retry work landed since (#29 family) helps materially on local models, partially answering this issue's "out of scope" suggestion.
 
 Older non-issue follow-ups:
@@ -200,7 +182,6 @@ When editing prompts, re-run the CRM fixture end-to-end with the column-diff har
 
 Caveats:
 - **`pg → mysql` at high `ai_concurrency`** can hit MySQL InnoDB CHECK deadlocks (#25). Workaround: drop `ai_concurrency` to 1 for MySQL targets, or run only the affected phase serially. Other 8 pairs are unaffected.
-- **`* → mysql` ENUM/SET columns** rely on the AI inferring values from column names because the reader doesn't expose `COLUMN_TYPE` (#26). Sonnet usually infers plausibly; gpt-oss-20b emits empty strings and trips Error 1291.
 - **Local models** (gpt-oss-20b, qwen3-coder-30b) score around 3-5/9 with model-specific failure patterns; see #28 for the documented analysis. The validate-and-retry feature (`migration.ai_max_retries`, default 3) materially helps local-model reliability — gpt-oss-20b mssql→mssql went 6/14 → 14/22/31 at temperature=0 with retries fixing parser-rejected DDL on the second attempt.
 - **Local models + `ai_verify: true`** — works cleanly at 20B+ parameters (gpt-oss-20b, qwen3-coder-30b, gemma-4-26b-a4b-it-mlx all verified). Sub-20B local (gemma-4-e4b-it-mlx) hits same-model correlated-bias false positives that net-regress the schema; either upgrade the local or use cross-model verify via `ai_verifier_model` (Phase 2 — see below).
 
@@ -208,14 +189,15 @@ Default model is `claude-sonnet-4-6`. Haiku was tried and reverted historically 
 
 ### Resolved (kept here as decision log)
 
-- `create` and `sync` now agree on identifier naming. Both go through `driver.NormalizeIdentifier(targetType, name)` — a single source of truth that matches PostgreSQL's case-folding (lowercases + slugs non-alphanumeric) and passes MSSQL/MySQL through. Earlier I misread the codebase and thought `create` was hand-coding ~3000 lines of DDL string assembly per driver; in fact the per-driver `Writer.CreateTable` / `CreateIndex` / `CreateForeignKey` / `CreateCheckConstraint` already use AI rendering (via `tableMapper.GenerateTableDDL` and `finalizationMapper.GenerateFinalizationDDL`). The actual divergence was a small per-driver pre-sanitization step that `sync` skipped. See `internal/driver/identifiers.go` and the `Diff.Normalize` call in `cmd/smt/sync.go`.
+- `create` and `sync` now agree on identifier naming. Both go through `driver.NormalizeIdentifier(targetType, name)` — a single source of truth that matches PostgreSQL's case-folding (lowercases + slugs non-alphanumeric) and passes MSSQL/MySQL through. The deterministic DDL renderer also uses this path for create and sync statements.
 - **#13 (PR #24)** — SourceContext now populated. `Reader.DatabaseContext()` returns a sync.Once-cached `*DatabaseContext`; `Orchestrator.CreateTables` passes it via `TableOptions.SourceContext`. The `=== SOURCE DATABASE ===` prompt block is now symmetric to TARGET (version, charset, collation, identifier case, varchar semantics, version-gated features). The "No source context available" string is gone.
 - **#17 (PR #22)** — Postgres `LoadForeignKeys` / `LoadCheckConstraints` are real implementations against `pg_constraint`. Composite FKs handled via `LATERAL UNNEST(c.conkey) WITH ORDINALITY` indexed into `c.confkey`. CHECK predicates via `pg_get_expr(c.conbin, ...)`. Action keywords mapped to the same uppercase strings the mssql/mysql readers produce.
 - **#18 (PR #21)** — MySQL `EXTRA` parsing via `parseGeneratedColumnExtra` matches `VIRTUAL GENERATED` / `STORED GENERATED` explicitly, no longer false-matching `DEFAULT_GENERATED`.
-- **#19 (PR #23)** — MySQL `DATETIME(N)` precision rule lives in `mysql/dialect.go::AIPromptAugmentation` (engine-specific rules belong in the per-driver Dialect, not in `writeMigrationRules`).
-- **#29 family (PRs #30, #31, #33)** — AI-DDL validate-and-retry across all four DDL phases. Cache writes are writer-controlled (post-exec only). AI classifies futile retries via `NOT_RETRYABLE` marker rather than per-driver SQLSTATE allowlists. `IsCanceled` short-circuit on context cancellation/deadline.
-- **#27** — MySQL function-call default parens (`DEFAULT (UUID())`, `DEFAULT (JSON_OBJECT())`) and MSSQL PERSISTED-implicit-nullability are explicit prompt rules in the per-driver Dialect.
-- **#48** — `migration.ai_verifier_model` plumbed end-to-end. The orchestrator constructs a second `AITypeMapper` for the named provider when the field is set, passes it through `pool.NewTargetPool` → `WriterOptions.VerifierTypeMapper`, and each driver writer stores `verifierTableMapper` / `verifierFinalizationMapper` resolved by `driver.ResolveVerifierMappers`. Verify-hook callsites use the per-writer `tableVerifier()` / `finalizationVerifier()` helpers which return the verifier mapper when set, else fall back to the generator mapper (preserving Phase 1 same-model behavior). Empty config string is the default. Same PR added `secrets.Provider.Type` (`provider:` YAML field) so multiple entries can share one backend — e.g. `anthropic-haiku` and `anthropic-sonnet` both dispatch through the Anthropic API but with different `model:` fields. Without the alias, dispatch (which switches on the YAML key) would reject any label that isn't a built-in provider name, blocking same-backend multi-model pairings.
+- **#19 (PR #23)** — MySQL `DATETIME(N)` precision was originally handled in prompt augmentation; deterministic DDL now owns this through the renderer.
+- **#26** — MySQL `ENUM` / `SET` values are captured deterministically. `loadColumns` reads `COLUMN_TYPE`, parses the literal list into `driver.Column.EnumValues`, and the deterministic renderer preserves native `ENUM(...)` / `SET(...)` on MySQL targets.
+- **#29 family (PRs #30, #31, #33)** — superseded by deterministic DDL generation. The old AI-DDL validate-and-retry path and retry-classification marker were removed when executable DDL stopped being model-generated.
+- **#27** — MySQL function-call default parens (`DEFAULT (UUID())`, `DEFAULT (JSON_OBJECT())`) and MSSQL PERSISTED-implicit-nullability were explicit prompt rules; deterministic DDL now handles these as renderer rules.
+- **#48** — `migration.ai_verifier_model` plumbed end-to-end for optional DDL review. The orchestrator constructs a second `AITypeMapper` for the named provider when the field is set, passes it through `pool.NewTargetPool` → `WriterOptions.VerifierTypeMapper`, and each driver writer stores `verifierTableMapper` / `verifierFinalizationMapper` resolved by `driver.ResolveVerifierMappers`. Verify-hook callsites use the per-writer `tableVerifier()` / `finalizationVerifier()` helpers which return the verifier mapper when set, else fall back to the primary mapper. Empty config string is the default. Same PR added `secrets.Provider.Type` (`provider:` YAML field) so multiple entries can share one backend.
 
 ## Common gotchas
 

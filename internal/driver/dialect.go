@@ -95,16 +95,6 @@ type Dialect interface {
 
 	// ValidDateTypes returns a map of valid date/timestamp types.
 	ValidDateTypes() map[string]bool
-
-	// AIPromptAugmentation returns database-specific instructions to append to AI prompts.
-	// This allows each driver to specify its own constraints for DDL generation.
-	// Returns empty string if no augmentation is needed.
-	AIPromptAugmentation() string
-
-	// AIDropTablePromptAugmentation returns database-specific instructions for DROP TABLE DDL.
-	// This allows each driver to specify how to handle foreign key constraints when dropping tables.
-	// Returns empty string if no augmentation is needed.
-	AIDropTablePromptAugmentation() string
 }
 
 // GetDialect returns the appropriate dialect for the given database type.

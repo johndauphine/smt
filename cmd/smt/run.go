@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/urfave/cli/v2"
 
 	"smt/internal/config"
+	"smt/internal/ddl"
 	"smt/internal/driver"
 	"smt/internal/orchestrator"
 )
@@ -93,28 +93,13 @@ func runCreate(c *cli.Context) error {
 }
 
 func validateCreateSupport(cfg *config.Config, apply bool) error {
-	targetType := canonicalCreateTargetType(cfg.Target.Type)
-	if !apply {
-		if cfg.SchemaGeneration.Mode == driver.SchemaGenerationAI {
-			return fmt.Errorf("smt create without --apply writes deterministic DDL only; schema_generation.mode: ai is only supported by --apply")
-		}
-		if targetType != "postgres" {
-			return fmt.Errorf("smt create without --apply currently supports deterministic DDL for postgres targets only; %s target renderer is tracked in issue #75", targetType)
-		}
-		return nil
+	if cfg.SchemaGeneration.Mode != "" && cfg.SchemaGeneration.Mode != driver.SchemaGenerationDeterministic {
+		return fmt.Errorf("schema_generation.mode: ai is no longer supported; SMT authors schema DDL deterministically")
 	}
-
-	if cfg.SchemaGeneration.Mode != driver.SchemaGenerationAI && targetType != "postgres" {
-		return fmt.Errorf("smt create --apply with deterministic DDL currently supports postgres targets only; %s target renderer is tracked in issue #75; set schema_generation.mode: ai only if you need the legacy apply path before deterministic coverage lands", targetType)
+	if _, err := ddl.NewRenderer(cfg.Target.Type, cfg.Target.Schema, cfg.SchemaGeneration.UnknownTypePolicy); err != nil {
+		return err
 	}
 	return nil
-}
-
-func canonicalCreateTargetType(dbType string) string {
-	if d, err := driver.Get(dbType); err == nil {
-		return d.Name()
-	}
-	return strings.ToLower(strings.TrimSpace(dbType))
 }
 
 // healthCheckCommand defines `smt health-check`: open both connections,

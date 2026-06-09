@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"strings"
 
+	"smt/internal/ddl"
 	"smt/internal/driver"
-	pgddl "smt/internal/driver/postgres"
 )
 
 // RenderDeterministic converts a structural diff into a local, deterministic
-// DDL plan. PostgreSQL is the first supported target because that is SMT's
-// primary target path and the first deterministic DDL renderer.
+// DDL plan for the target dialect.
 func RenderDeterministic(diff Diff, targetSchema, targetDialect string) (Plan, error) {
 	return RenderDeterministicWithUnknownTypePolicy(diff, targetSchema, targetDialect, "")
 }
@@ -19,21 +18,28 @@ func RenderDeterministicWithUnknownTypePolicy(diff Diff, targetSchema, targetDia
 	if diff.IsEmpty() {
 		return Plan{}, nil
 	}
-	if !isPostgresDialect(targetDialect) {
-		return Plan{}, fmt.Errorf("deterministic schema diff rendering currently supports postgres targets, got %q", targetDialect)
-	}
 
-	renderer := deterministicPostgresRenderer{schema: targetSchema, dialect: pgddl.Dialect{}, unknownTypePolicy: unknownTypePolicy}
+	renderer, err := newDeterministicRenderer(targetDialect, targetSchema, unknownTypePolicy)
+	if err != nil {
+		return Plan{}, err
+	}
 	return renderer.render(diff)
 }
 
-type deterministicPostgresRenderer struct {
-	schema            string
-	dialect           pgddl.Dialect
-	unknownTypePolicy string
+type deterministicRenderer struct {
+	target   string
+	renderer ddl.Renderer
 }
 
-func (r deterministicPostgresRenderer) render(diff Diff) (Plan, error) {
+func newDeterministicRenderer(targetDialect, targetSchema, unknownTypePolicy string) (deterministicRenderer, error) {
+	r, err := ddl.NewRenderer(targetDialect, targetSchema, unknownTypePolicy)
+	if err != nil {
+		return deterministicRenderer{}, err
+	}
+	return deterministicRenderer{target: r.Target(), renderer: r}, nil
+}
+
+func (r deterministicRenderer) render(diff Diff) (Plan, error) {
 	var plan Plan
 
 	for _, t := range diff.AddedTables {
@@ -55,7 +61,7 @@ func (r deterministicPostgresRenderer) render(diff Diff) (Plan, error) {
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       t.Name,
 			Description: fmt.Sprintf("drop table %s", t.Name),
-			SQL:         fmt.Sprintf("DROP TABLE %s", r.qualify(t.Name)),
+			SQL:         r.renderer.DropTableDDL(t.Name),
 			Risk:        RiskDataLoss,
 			RiskNotes:   "drops the table and its data",
 		})
@@ -64,21 +70,21 @@ func (r deterministicPostgresRenderer) render(diff Diff) (Plan, error) {
 	return plan, nil
 }
 
-func (r deterministicPostgresRenderer) renderAddedTableDefinition(plan *Plan, t driver.Table) error {
-	ddl, _, err := pgddl.RenderCreateTableDDLWithPolicy(&t, r.schema, false, r.unknownTypePolicy)
+func (r deterministicRenderer) renderAddedTableDefinition(plan *Plan, t driver.Table) error {
+	sql, _, err := r.renderer.CreateTableDDL(&t)
 	if err != nil {
 		return err
 	}
 	plan.Statements = append(plan.Statements, Statement{
 		Table:       t.Name,
 		Description: fmt.Sprintf("create table %s", t.Name),
-		SQL:         ddl,
+		SQL:         sql,
 		Risk:        RiskSafe,
 	})
 	return nil
 }
 
-func (r deterministicPostgresRenderer) renderAddedTableSideObjects(plan *Plan, tables []driver.Table) error {
+func (r deterministicRenderer) renderAddedTableSideObjects(plan *Plan, tables []driver.Table) error {
 	for _, t := range tables {
 		for _, idx := range t.Indexes {
 			if err := r.renderAddedIndex(plan, t, idx); err != nil {
@@ -103,14 +109,14 @@ func (r deterministicPostgresRenderer) renderAddedTableSideObjects(plan *Plan, t
 	return nil
 }
 
-func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
+func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 	tableName := td.Name
 
 	for _, fk := range td.RemovedForeignKeys {
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
 			Description: fmt.Sprintf("drop foreign key %s", fk.Name),
-			SQL:         fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", r.qualify(tableName), r.quote(fk.Name)),
+			SQL:         r.renderer.DropForeignKeyDDL(tableName, fk.Name),
 			Risk:        RiskSafe,
 		})
 	}
@@ -118,7 +124,7 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
 			Description: fmt.Sprintf("drop check constraint %s", chk.Name),
-			SQL:         fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", r.qualify(tableName), r.quote(chk.Name)),
+			SQL:         r.renderer.DropCheckDDL(tableName, chk.Name),
 			Risk:        RiskSafe,
 		})
 	}
@@ -126,13 +132,13 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
 			Description: fmt.Sprintf("drop index %s", idx.Name),
-			SQL:         fmt.Sprintf("DROP INDEX %s.%s", r.dialect.QuoteIdentifier(r.schema), r.quote(idx.Name)),
+			SQL:         r.renderer.DropIndexDDL(tableName, idx.Name),
 			Risk:        RiskSafe,
 		})
 	}
 
 	for _, c := range td.AddedColumns {
-		def, err := pgddl.RenderColumnDefinitionWithContextAndPolicy(c, td.Curr.Columns, r.unknownTypePolicy)
+		sql, err := r.renderer.AddColumnDDL(tableName, c, td.Curr.Columns)
 		if err != nil {
 			return err
 		}
@@ -145,7 +151,7 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
 			Description: fmt.Sprintf("add column %s", c.Name),
-			SQL:         fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", r.qualify(tableName), def),
+			SQL:         sql,
 			Risk:        risk,
 			RiskNotes:   notes,
 		})
@@ -161,7 +167,7 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
 			Description: fmt.Sprintf("drop column %s", c.Name),
-			SQL:         fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", r.qualify(tableName), r.quote(c.Name)),
+			SQL:         r.renderer.DropColumnDDL(tableName, c.Name),
 			Risk:        RiskDataLoss,
 			RiskNotes:   "drops column data",
 		})
@@ -186,16 +192,16 @@ func (r deterministicPostgresRenderer) renderTableDiff(plan *Plan, td TableDiff)
 	return nil
 }
 
-func (r deterministicPostgresRenderer) renderColumnChange(plan *Plan, tableName string, cc ColumnChange) error {
+func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, cc ColumnChange) error {
 	if cc.Old.IsComputed || cc.New.IsComputed {
-		return fmt.Errorf("computed column %s changes are not supported by deterministic PostgreSQL sync", cc.Name)
+		return fmt.Errorf("computed column %s changes are not supported by deterministic %s sync", cc.Name, r.target)
 	}
 
-	oldType, err := pgddl.RenderColumnTypeWithPolicy(cc.Old, r.unknownTypePolicy)
+	oldType, err := r.renderer.ColumnType(cc.Old)
 	if err != nil {
 		return err
 	}
-	newType, err := pgddl.RenderColumnTypeWithPolicy(cc.New, r.unknownTypePolicy)
+	newType, err := r.renderer.ColumnType(cc.New)
 	if err != nil {
 		return err
 	}
@@ -204,39 +210,45 @@ func (r deterministicPostgresRenderer) renderColumnChange(plan *Plan, tableName 
 	newDefault := strings.TrimSpace(cc.New.DefaultExpression)
 	typeChanged := oldType != newType
 	defaultChanged := oldDefault != newDefault
-	preDropDefault := typeChanged && oldDefault != ""
+	preDropDefault := oldDefault != "" && (typeChanged || (r.target == "mssql" && defaultChanged))
 
 	if preDropDefault {
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
 			Description: fmt.Sprintf("drop column %s default", cc.Name),
-			SQL:         fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT", r.qualify(tableName), r.quote(cc.Name)),
+			SQL:         r.renderer.DropColumnDefaultDDL(tableName, cc.Name),
 			Risk:        RiskSafe,
 		})
 	}
 
 	if typeChanged {
+		sql, err := r.renderer.AlterColumnTypeDDL(tableName, cc.New)
+		if err != nil {
+			return err
+		}
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
 			Description: fmt.Sprintf("change column %s type", cc.Name),
-			SQL:         fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s", r.qualify(tableName), r.quote(cc.Name), newType),
+			SQL:         sql,
 			Risk:        RiskRebuildNeeded,
 			RiskNotes:   "type changes may rewrite the table and can fail if existing values cannot be cast",
 		})
 	}
 	if cc.Old.IsNullable != cc.New.IsNullable {
-		action := "DROP NOT NULL"
 		risk := RiskSafe
 		notes := ""
 		if !cc.New.IsNullable {
-			action = "SET NOT NULL"
 			risk = RiskBlocking
 			notes = "setting NOT NULL validates existing rows"
+		}
+		sql, err := r.renderer.AlterColumnNullabilityDDL(tableName, cc.New)
+		if err != nil {
+			return err
 		}
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
 			Description: fmt.Sprintf("change column %s nullability", cc.Name),
-			SQL:         fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s", r.qualify(tableName), r.quote(cc.Name), action),
+			SQL:         sql,
 			Risk:        risk,
 			RiskNotes:   notes,
 		})
@@ -248,19 +260,19 @@ func (r deterministicPostgresRenderer) renderColumnChange(plan *Plan, tableName 
 				plan.Statements = append(plan.Statements, Statement{
 					Table:       tableName,
 					Description: fmt.Sprintf("drop column %s default", cc.Name),
-					SQL:         fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT", r.qualify(tableName), r.quote(cc.Name)),
+					SQL:         r.renderer.DropColumnDefaultDDL(tableName, cc.Name),
 					Risk:        RiskSafe,
 				})
 			}
 		} else {
-			def, err := pgddl.RenderColumnDefaultDDLWithPolicy(cc.New, r.unknownTypePolicy)
+			sql, err := r.renderer.SetColumnDefaultDDL(tableName, cc.New)
 			if err != nil {
 				return err
 			}
 			plan.Statements = append(plan.Statements, Statement{
 				Table:       tableName,
 				Description: fmt.Sprintf("change column %s default", cc.Name),
-				SQL:         fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s", r.qualify(tableName), r.quote(cc.Name), def),
+				SQL:         sql,
 				Risk:        RiskSafe,
 			})
 		}
@@ -268,67 +280,50 @@ func (r deterministicPostgresRenderer) renderColumnChange(plan *Plan, tableName 
 	return nil
 }
 
-func (r deterministicPostgresRenderer) renderAddedIndex(plan *Plan, t driver.Table, idx driver.Index) error {
+func (r deterministicRenderer) renderAddedIndex(plan *Plan, t driver.Table, idx driver.Index) error {
 	tableName := t.Name
-	ddl, err := pgddl.RenderCreateIndexDDL(&t, &idx, r.schema)
+	sql, err := r.renderer.CreateIndexDDL(&t, &idx)
 	if err != nil {
 		return err
 	}
 	plan.Statements = append(plan.Statements, Statement{
 		Table:       tableName,
 		Description: fmt.Sprintf("create index %s", idx.Name),
-		SQL:         ddl,
+		SQL:         sql,
 		Risk:        RiskBlocking,
 		RiskNotes:   "index creation can lock or scan the table",
 	})
 	return nil
 }
 
-func (r deterministicPostgresRenderer) renderAddedForeignKey(plan *Plan, tableName string, fk driver.ForeignKey) error {
+func (r deterministicRenderer) renderAddedForeignKey(plan *Plan, tableName string, fk driver.ForeignKey) error {
 	t := driver.Table{Name: tableName}
-	ddl, err := pgddl.RenderCreateForeignKeyDDL(&t, &fk, r.schema)
+	sql, err := r.renderer.CreateForeignKeyDDL(&t, &fk)
 	if err != nil {
 		return err
 	}
 	plan.Statements = append(plan.Statements, Statement{
 		Table:       tableName,
 		Description: fmt.Sprintf("create foreign key %s", fk.Name),
-		SQL:         ddl,
+		SQL:         sql,
 		Risk:        RiskBlocking,
 		RiskNotes:   "foreign key validation can scan existing rows",
 	})
 	return nil
 }
 
-func (r deterministicPostgresRenderer) renderAddedCheck(plan *Plan, t driver.Table, chk driver.CheckConstraint) error {
+func (r deterministicRenderer) renderAddedCheck(plan *Plan, t driver.Table, chk driver.CheckConstraint) error {
 	tableName := t.Name
-	ddl, err := pgddl.RenderCreateCheckConstraintDDL(&t, &chk, r.schema)
+	sql, err := r.renderer.CreateCheckConstraintDDL(&t, &chk)
 	if err != nil {
 		return err
 	}
 	plan.Statements = append(plan.Statements, Statement{
 		Table:       tableName,
 		Description: fmt.Sprintf("create check constraint %s", chk.Name),
-		SQL:         ddl,
+		SQL:         sql,
 		Risk:        RiskBlocking,
 		RiskNotes:   "check validation can scan existing rows",
 	})
 	return nil
-}
-
-func (r deterministicPostgresRenderer) qualify(table string) string {
-	return r.dialect.QualifyTable(r.schema, driver.NormalizeIdentifier("postgres", table))
-}
-
-func (r deterministicPostgresRenderer) quote(name string) string {
-	return r.dialect.QuoteIdentifier(driver.NormalizeIdentifier("postgres", name))
-}
-
-func isPostgresDialect(dialect string) bool {
-	switch strings.ToLower(strings.TrimSpace(dialect)) {
-	case "postgres", "postgresql", "pg":
-		return true
-	default:
-		return false
-	}
 }

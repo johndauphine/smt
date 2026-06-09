@@ -71,10 +71,6 @@ const (
 	// SchemaGenerationDeterministic renders schema DDL from source metadata
 	// without requiring an AI provider.
 	SchemaGenerationDeterministic = "deterministic"
-
-	// SchemaGenerationAI preserves the legacy behavior where an AI mapper
-	// authors executable schema DDL.
-	SchemaGenerationAI = "ai"
 )
 
 // WriterOptions contains options for creating a Writer.
@@ -90,47 +86,40 @@ type WriterOptions struct {
 	// SourceType is the source database type (for cross-engine type handling).
 	SourceType string
 
-	// SchemaGenerationMode controls whether the writer renders schema DDL
-	// deterministically or asks the configured AI mapper to author it.
-	// Empty means deterministic.
+	// SchemaGenerationMode is retained for config plumbing. Empty and
+	// "deterministic" both use deterministic schema DDL.
 	SchemaGenerationMode string
 
 	// UnknownTypePolicy controls deterministic handling of unsupported source
 	// types. Supported values are "fail", "warn", and "text_fallback".
 	UnknownTypePolicy string
 
-	// TypeMapper is the AI-powered type mapper for database type conversions.
-	// This is optional in deterministic schema-generation mode and required
-	// in AI schema-generation mode.
+	// TypeMapper is optional and is used only as an AI review fallback when
+	// deterministic DDL review is enabled without a separate verifier mapper.
 	TypeMapper TypeMapper
 
-	// VerifierTypeMapper, when non-nil, is used for the AI self-check pass
-	// (VerifyTableDDL / VerifyFinalizationDDL) instead of TypeMapper. Lets a
-	// caller pair a cheap/local generator with a strong cloud auditor — see
-	// migration.ai_verifier_model in config. Nil means "use TypeMapper for
-	// both gen and verify" (the default; preserves Phase 1 behavior).
+	// VerifierTypeMapper, when non-nil, is used for optional AI review
+	// (VerifyTableDDL / VerifyFinalizationDDL) instead of TypeMapper.
 	//
-	// The mapper is stored on the writer as verifierTableMapper /
-	// verifierFinalizationMapper after the same TableTypeMapper /
-	// FinalizationDDLMapper type assertions applied to TypeMapper. Has no
-	// effect unless TableOptions.AIVerify or FinalizeOptions.AIVerify is set
-	// on the call.
+	// The mapper is stored on the writer as reviewer interfaces. Has no
+	// effect unless TableOptions.AIReviewEnabled or
+	// FinalizeOptions.AIReviewEnabled is set.
 	VerifierTypeMapper TypeMapper
 }
 
-// ResolveVerifierMappers extracts the TableTypeMapper and FinalizationDDLMapper
+// ResolveVerifierMappers extracts the TableDDLReviewer and FinalizationDDLReviewer
 // from WriterOptions.VerifierTypeMapper. Called by each driver's NewWriter to
 // populate its verifier fields. Both return values are nil when the option is
-// nil — callsites must fall back to the generator mappers in that case.
+// nil; callsites may fall back to their default reviewer in that case.
 //
-// Type assertions are non-fatal: a verifier that doesn't implement one of the
+// Type assertions are non-fatal: a reviewer that doesn't implement one of the
 // interfaces just leaves that field nil. In practice AITypeMapper implements
-// both, so a fully configured verifier is always complete.
-func ResolveVerifierMappers(opts WriterOptions) (TableTypeMapper, FinalizationDDLMapper) {
+// both, so a fully configured reviewer is always complete.
+func ResolveVerifierMappers(opts WriterOptions) (TableDDLReviewer, FinalizationDDLReviewer) {
 	if opts.VerifierTypeMapper == nil {
 		return nil, nil
 	}
-	tm, _ := opts.VerifierTypeMapper.(TableTypeMapper)
-	fm, _ := opts.VerifierTypeMapper.(FinalizationDDLMapper)
+	tm, _ := opts.VerifierTypeMapper.(TableDDLReviewer)
+	fm, _ := opts.VerifierTypeMapper.(FinalizationDDLReviewer)
 	return tm, fm
 }

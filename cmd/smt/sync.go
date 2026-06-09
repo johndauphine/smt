@@ -163,7 +163,7 @@ func runSync(c *cli.Context) error {
 
 	// Re-write source-original identifiers (e.g. MSSQL "Posts") to whatever
 	// the target dialect actually uses on disk (PG lowercases to "posts").
-	// Without this the AI emits ALTERs against names the target doesn't have.
+	// Without this the renderer emits ALTERs against names the target doesn't have.
 	// See driver.NormalizeIdentifier for the per-dialect rules.
 	diff = diff.Normalize(func(name string) string {
 		return driver.NormalizeIdentifier(cfg.Target.Type, name)
@@ -171,31 +171,17 @@ func runSync(c *cli.Context) error {
 
 	// Point every table in the diff at the target schema. The diff carries
 	// source-side metadata in Table.Schema (e.g. the MySQL database name),
-	// and the AI uses that for the ALTER TABLE qualifier unless we override
+	// and renderers use that for the ALTER TABLE qualifier unless we override
 	// it. Without this, MySQL→MSSQL produces ALTER TABLE [smt_src_test].[Posts]
 	// against an MSSQL target whose schema is dbo. See issue #4.
 	diff = diff.WithTargetSchema(cfg.Target.Schema)
 
 	fmt.Printf("Diff: %s\n", diff.Summary())
 
-	var plan schemadiff.Plan
-	if cfg.SchemaGeneration.Mode == driver.SchemaGenerationAI {
-		mapper, err := driver.NewAITypeMapperFromSecrets()
-		if err != nil || mapper == nil {
-			return fmt.Errorf("sync requires an AI provider for SQL rendering when schema_generation.mode is ai; configure one in ~/.secrets/smt-config.yaml: %w", err)
-		}
-
-		logging.Info("asking AI to render diff as %s SQL...", cfg.Target.Type)
-		plan, err = schemadiff.Render(ctx, mapper, diff, cfg.Target.Schema, cfg.Target.Type)
-		if err != nil {
-			return err
-		}
-	} else {
-		logging.Info("rendering diff deterministically as %s SQL...", cfg.Target.Type)
-		plan, err = schemadiff.RenderDeterministicWithUnknownTypePolicy(diff, cfg.Target.Schema, cfg.Target.Type, cfg.SchemaGeneration.UnknownTypePolicy)
-		if err != nil {
-			return err
-		}
+	logging.Info("rendering diff deterministically as %s SQL...", cfg.Target.Type)
+	plan, err := schemadiff.RenderDeterministicWithUnknownTypePolicy(diff, cfg.Target.Schema, cfg.Target.Type, cfg.SchemaGeneration.UnknownTypePolicy)
+	if err != nil {
+		return err
 	}
 	if plan.IsEmpty() {
 		fmt.Println("Renderer returned no statements; nothing to apply.")

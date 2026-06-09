@@ -238,11 +238,94 @@ func parseGeneratedColumnExtra(extra string) (computed, persisted bool) {
 	return false, false
 }
 
+func isUnsignedColumnType(columnType string) bool {
+	fields := strings.Fields(strings.ToLower(columnType))
+	for _, f := range fields {
+		if f == "unsigned" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseOnUpdateExpression(extra string) string {
+	lower := strings.ToLower(extra)
+	idx := strings.Index(lower, "on update ")
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(extra[idx+len("on update "):])
+}
+
+func parseEnumSetValues(columnType string) ([]string, error) {
+	columnType = strings.TrimSpace(columnType)
+	open := strings.IndexByte(columnType, '(')
+	if open < 0 || !strings.HasSuffix(columnType, ")") {
+		return nil, fmt.Errorf("invalid enum/set column type %q", columnType)
+	}
+	kind := strings.ToLower(strings.TrimSpace(columnType[:open]))
+	if kind != "enum" && kind != "set" {
+		return nil, fmt.Errorf("column type %q is not enum/set", columnType)
+	}
+	body := columnType[open+1 : len(columnType)-1]
+	values := []string{}
+	for i := 0; i < len(body); {
+		for i < len(body) && (body[i] == ' ' || body[i] == '\t' || body[i] == '\n' || body[i] == '\r') {
+			i++
+		}
+		if i >= len(body) {
+			break
+		}
+		if body[i] != '\'' {
+			return nil, fmt.Errorf("invalid enum/set literal list %q", columnType)
+		}
+		i++
+		var b strings.Builder
+		for i < len(body) {
+			ch := body[i]
+			switch ch {
+			case '\\':
+				if i+1 >= len(body) {
+					return nil, fmt.Errorf("invalid enum/set escape in %q", columnType)
+				}
+				i++
+				b.WriteByte(body[i])
+			case '\'':
+				if i+1 < len(body) && body[i+1] == '\'' {
+					b.WriteByte('\'')
+					i += 2
+					continue
+				}
+				i++
+				values = append(values, b.String())
+				goto literalDone
+			default:
+				b.WriteByte(ch)
+			}
+			i++
+		}
+		return nil, fmt.Errorf("unterminated enum/set literal in %q", columnType)
+
+	literalDone:
+		for i < len(body) && (body[i] == ' ' || body[i] == '\t' || body[i] == '\n' || body[i] == '\r') {
+			i++
+		}
+		if i < len(body) {
+			if body[i] != ',' {
+				return nil, fmt.Errorf("invalid enum/set separator in %q", columnType)
+			}
+			i++
+		}
+	}
+	return values, nil
+}
+
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT
 			COLUMN_NAME,
 			DATA_TYPE,
+			COLUMN_TYPE,
 			COALESCE(CHARACTER_MAXIMUM_LENGTH, 0),
 			COALESCE(NUMERIC_PRECISION, 0),
 			COALESCE(NUMERIC_SCALE, 0),
@@ -263,12 +346,21 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 
 	for rows.Next() {
 		var c driver.Column
-		var extra, generationExpr string
-		if err := rows.Scan(&c.Name, &c.DataType, &c.MaxLength, &c.Precision, &c.Scale,
+		var columnType, extra, generationExpr string
+		if err := rows.Scan(&c.Name, &c.DataType, &columnType, &c.MaxLength, &c.Precision, &c.Scale,
 			&c.IsNullable, &c.IsIdentity, &c.OrdinalPos,
 			&c.DefaultExpression, &extra, &generationExpr); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
+		if strings.EqualFold(c.DataType, "enum") || strings.EqualFold(c.DataType, "set") {
+			values, err := parseEnumSetValues(columnType)
+			if err != nil {
+				return fmt.Errorf("parsing enum/set values for %s.%s: %w", t.Name, c.Name, err)
+			}
+			c.EnumValues = values
+		}
+		c.IsUnsigned = isUnsignedColumnType(columnType)
+		c.OnUpdateExpression = parseOnUpdateExpression(extra)
 		if computed, persisted := parseGeneratedColumnExtra(extra); computed {
 			c.IsComputed = true
 			c.ComputedExpression = generationExpr
@@ -277,6 +369,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			// any value information_schema reports here so the downstream
 			// prompt doesn't double-emit.
 			c.DefaultExpression = ""
+			c.OnUpdateExpression = ""
 		}
 		t.Columns = append(t.Columns, c)
 	}

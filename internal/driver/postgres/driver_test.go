@@ -216,84 +216,6 @@ func TestCopyBatchSize(t *testing.T) {
 	}
 }
 
-func TestAIPromptAugmentation(t *testing.T) {
-	dialect := &Dialect{}
-	aug := dialect.AIPromptAugmentation()
-
-	// Verify the augmentation contains critical PostgreSQL identifier rules
-	checks := []string{
-		"CRITICAL PostgreSQL identifier rules",
-		"MUST preserve the exact spelling and underscores from the source name",
-		"ONLY allowed transformation is lowercasing letters",
-		"Do NOT abbreviate, shorten, remove underscores, or change any non-letter characters",
-		"user_id → user_id (NOT userid)",
-		"LastEditorDisplayName → lasteditordisplayname",
-		"created_at → created_at (NOT createdat)",
-		"Do NOT use double-quotes around identifiers",
-	}
-
-	for _, check := range checks {
-		if !strings.Contains(aug, check) {
-			t.Errorf("AIPromptAugmentation should contain %q", check)
-		}
-	}
-}
-
-// TestAIPromptAugmentation_TimezoneAwareness pins the PG TZ mapping table
-// added in PR #45. The regression that motivated this test: gemma-4-e4b
-// emitted `TIMESTAMP WITH TIME ZONE` for a source MSSQL `datetime2`
-// (TZ-naive). Without this rule explicit, sub-Sonnet models silently add
-// timezone semantics the source doesn't have.
-func TestAIPromptAugmentation_TimezoneAwareness(t *testing.T) {
-	dialect := &Dialect{}
-	aug := dialect.AIPromptAugmentation()
-
-	for _, needle := range []string{
-		"timezone-awareness",
-		"WITHOUT timezone",
-		"WITH timezone",
-		"TIMESTAMP", // the right TZ-naive PG type
-		"TIMESTAMPTZ",
-		"MSSQL `datetime`",
-		"MSSQL `datetime2(N)`",
-		"MSSQL `datetimeoffset(N)`",
-		"MySQL `datetime(N)`",
-		"MySQL `timestamp(N)`",
-	} {
-		if !strings.Contains(aug, needle) {
-			t.Errorf("AIPromptAugmentation missing TZ-rule phrase %q", needle)
-		}
-	}
-}
-
-// TestAIPromptAugmentation_VarcharLengthRule pins the VARCHAR length-
-// preservation rule added in PR #45. mssql/mysql dialects already had
-// length rules; PG was missing one, which let sub-Sonnet models halve
-// `varchar(20)` to `varchar(10)`.
-func TestAIPromptAugmentation_VarcharLengthRule(t *testing.T) {
-	dialect := &Dialect{}
-	aug := dialect.AIPromptAugmentation()
-
-	for _, needle := range []string{
-		"VARCHAR length rule",
-		"varchar(20)",
-		"VARCHAR(20)",
-		"Do NOT round, halve, double, substitute",
-		"count CHARACTERS",
-	} {
-		if !strings.Contains(aug, needle) {
-			t.Errorf("AIPromptAugmentation missing length-rule phrase %q", needle)
-		}
-	}
-}
-
-// TestReaderDatabaseContext_Populated is the regression guard for issue #13.
-// The orchestrator passes Reader.DatabaseContext() into TableOptions.SourceContext;
-// returning nil here would silently produce one-sided AI prompts (full TARGET
-// block, empty SOURCE block) and fire the "No source context available" lie in
-// MIGRATION RULES. This test asserts the symbol is present in reader.go so
-// accidental refactors that drop it surface at test time, not in a debug-prompt
-// dump weeks later.
 func TestReaderDatabaseContext_Populated(t *testing.T) {
 	body := readReaderSource(t)
 	for _, needle := range []string{
@@ -304,41 +226,6 @@ func TestReaderDatabaseContext_Populated(t *testing.T) {
 		if !strings.Contains(body, needle) {
 			t.Errorf("reader.go missing required marker %q", needle)
 		}
-	}
-}
-
-// TestRetrySuccessCachesPreUnloggedDDL is the regression guard for the
-// cache-poisoning bug Copilot caught on PR #30: caching the post-Unlogged-
-// rewrite form would mean a successful retry stores `CREATE UNLOGGED TABLE
-// ...` in the AI cache. Because tableCacheKey doesn't include
-// TableOptions.Unlogged, a future call with opts.Unlogged=false would
-// hit that cache entry and unexpectedly create an UNLOGGED table.
-//
-// The fix is structural in the writer: hold the AI-returned DDL separately
-// from the execution-time DDL, cache only the AI form, let opts.Unlogged
-// drive the rewrite per-call. This test reads writer.go and asserts those
-// markers are present so a future refactor that collapses the two
-// variables back together fails the test instead of silently regressing.
-func TestRetrySuccessCachesPreUnloggedDDL(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(filepath.Dir(callerFile(t)), "writer.go"))
-	if err != nil {
-		t.Fatalf("read writer.go: %v", err)
-	}
-	body := string(src)
-	for _, needle := range []string{
-		"aiDDL := resp.CreateTableDDL", // canonical form held separately
-		"execDDL := aiDDL",             // execution form starts as the canonical
-		"CacheTableDDL(req, aiDDL)",    // cache the AI form, NOT the rewritten one
-	} {
-		if !strings.Contains(body, needle) {
-			t.Errorf("writer.go missing required marker %q — see PR #30 review", needle)
-		}
-	}
-	// And the inverse: ensure the reverse-direction bug (caching execDDL)
-	// is NOT lurking. If anyone reintroduces CacheTableDDL(req, execDDL) the
-	// cache-poisoning bug is back.
-	if strings.Contains(body, "CacheTableDDL(req, execDDL)") {
-		t.Error("writer.go regresses cache-poisoning bug from PR #30: caches execDDL (Unlogged-rewritten) instead of aiDDL")
 	}
 }
 

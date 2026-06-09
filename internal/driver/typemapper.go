@@ -16,51 +16,10 @@ type TypeMapper interface {
 	SupportedTargets() []string
 }
 
-// TableTypeMapper handles table-level DDL generation using AI.
-// Unlike TypeMapper which maps individual columns, TableTypeMapper receives
-// complete source table metadata and generates full target DDL.
-// This provides better context for AI to make smart decisions about:
-// - Character vs byte semantics (e.g., VARCHAR2 CHAR for Oracle)
-// - Appropriate type sizing based on column semantics
-// - Constraint handling across database platforms
-type TableTypeMapper interface {
-	// GenerateTableDDL generates complete CREATE TABLE DDL for the target database.
-	// It takes the full source table metadata and produces target-specific DDL.
-	// Returns an error if the AI fails - no fallback, caller must handle failure.
-	GenerateTableDDL(ctx context.Context, req TableDDLRequest) (*TableDDLResponse, error)
-
-	// CanMap returns true if this mapper can handle the given conversion.
-	CanMap(sourceDBType, targetDBType string) bool
-
-	// CacheTableDDL stores a known-good DDL for the request, replacing any prior
-	// cached value. This is the ONLY cache-write entry point — the mapper
-	// itself never writes the cache because it only sees AI output, not
-	// validated DDL (see #32). The writer calls this after every successful
-	// CREATE TABLE execution (first-try and retry alike); a failed exec leaves
-	// the cache untouched so the next call gets a fresh AI invocation rather
-	// than a poisoned hit.
-	//
-	// History: an earlier shape cached AI output inside the mapper, with the
-	// writer additionally calling CacheTableDDL on retry success to overwrite
-	// any bad-DDL cache poisoning. That worked when retries succeeded but left
-	// stale bad DDL cached when retries didn't fire (allowlist false negative)
-	// or didn't succeed (model couldn't converge), causing 0-second failures
-	// on subsequent runs against the same source-table shape. Moving the cache
-	// write to post-exec eliminates the entire failure mode.
-	CacheTableDDL(req TableDDLRequest, ddl string)
-
-	// VerifyTableDDL asks the AI to audit the just-generated CREATE TABLE
-	// against the source introspection facts. Returns OK or ISSUES with a
-	// list of attribute mismatches (max_length, nullability, identity,
-	// timezone-awareness, default expression, type semantics). The writer
-	// calls this between Generate and Exec when migration.ai_verify is on.
-	//
-	// Phase 1 uses the same model for generation and verification — useful
-	// for catching numerical/exact-attribute regressions (halved varchars,
-	// dropped NOT NULL, swapped TZ) where comparison-mode reasoning differs
-	// from generation-mode reasoning enough to spot the model's own slip.
-	// Cross-model verify (Phase 2) addresses correlated-bias gaps where the
-	// generator's misconception isn't caught by the same model rereading.
+// TableDDLReviewer audits deterministic CREATE TABLE DDL. It is intentionally
+// review-only so production DDL paths do not depend on AI generation
+// interfaces.
+type TableDDLReviewer interface {
 	VerifyTableDDL(ctx context.Context, req VerifyTableDDLRequest) (*VerifyResult, error)
 }
 
@@ -131,87 +90,6 @@ type DatabaseContext struct {
 	Notes string
 }
 
-// TableDDLRequest contains all information needed to generate target table DDL.
-type TableDDLRequest struct {
-	// SourceDBType is the source database type (e.g., "postgres", "mssql").
-	SourceDBType string
-
-	// TargetDBType is the target database type (e.g., "oracle", "mysql").
-	TargetDBType string
-
-	// SourceTable contains complete table metadata from the source database.
-	SourceTable *Table
-
-	// TargetSchema is the schema name in the target database.
-	TargetSchema string
-
-	// SourceContext contains metadata about the source database.
-	SourceContext *DatabaseContext
-
-	// TargetContext contains metadata about the target database.
-	TargetContext *DatabaseContext
-
-	// PreviousAttempt is set on retry calls to feed the AI the prior attempt's
-	// DDL plus the database error it produced. Lets the AI see exactly what was
-	// rejected and why so it can correct on the next try. When non-nil:
-	//   - the prompt builder appends a "PRIOR ATTEMPT FAILED" section
-	//   - the cache lookup is skipped (we need a fresh AI call, not the cached
-	//     bad answer from the prior attempt)
-	//   - the cache store is skipped (the writer is responsible for re-priming
-	//     the cache via CacheTableDDL after the retry's DDL successfully executes)
-	// Nil on first-try calls — the original cache-and-call path is unchanged.
-	PreviousAttempt *TableDDLAttempt
-
-	// Note: Indexes and CHECK constraints are always created separately in Finalize,
-	// not included in the initial CREATE TABLE DDL.
-}
-
-// TableDDLAttempt records a previous CREATE TABLE attempt that the database
-// rejected. Used to give the AI the exact text of its prior wrong answer plus
-// the database's complaint about it, in the hope that the next attempt corrects
-// the specific defect rather than rerolling at random.
-type TableDDLAttempt struct {
-	// DDL is the verbatim CREATE TABLE the AI emitted on the prior attempt.
-	DDL string
-
-	// Error is the verbatim text of the database error that rejected the DDL.
-	Error string
-
-	// FromVerifier is true when this attempt failed an AI self-check pass
-	// rather than a database execution. The prompt builder uses this flag
-	// to switch the "PRIOR ATTEMPT FAILED" section between database-error
-	// shape ("rejected by the target database") and verifier-feedback shape
-	// ("an AI auditor reviewed your DDL and flagged the issues below").
-	// Mixing the two would confuse the generator: a verifier complaint
-	// ("max_length 20 vs 10") looks nothing like a database error, and
-	// presenting it as one leads models to either emit prose ("OK, that's
-	// fine") instead of corrected DDL or to classify the "error" as
-	// NOT_RETRYABLE. Phase 1 fix on top of #29's PreviousAttempt design.
-	FromVerifier bool
-}
-
-// TableDDLResponse contains the generated DDL and metadata.
-type TableDDLResponse struct {
-	// CreateTableDDL is the complete CREATE TABLE statement for the target database.
-	CreateTableDDL string
-
-	// ColumnTypes maps column names to their target types (for reference/logging).
-	ColumnTypes map[string]string
-
-	// Notes contains any AI-generated notes about the mapping decisions.
-	Notes string
-
-	// FromCache is true when the DDL came from the on-disk cache rather
-	// than a fresh AI call. The writer uses this to skip the AI self-check
-	// pass on cache hits — cached DDL was previously verified-and-executed,
-	// so re-verifying would just double cost without catching anything.
-	// The skip-on-cache-hit semantic for verify presumes the cache was
-	// populated with verify enabled; entries cached pre-verify-enable
-	// won't be re-verified until the cache is cleared. Documented in
-	// migration.ai_verify config.
-	FromCache bool
-}
-
 // TypeInfo contains metadata about a column type.
 type TypeInfo struct {
 	// SourceDBType is the source database type (e.g., "mssql", "postgres").
@@ -237,34 +115,8 @@ type TypeInfo struct {
 	SampleValues []string
 }
 
-// FinalizationDDLResponse contains the generated DDL plus cache-hit metadata
-// (mirrors TableDDLResponse). The cache-hit flag lets the writer skip the AI
-// self-check pass on cache hits, since cached DDL was previously verified
-// and executed.
-type FinalizationDDLResponse struct {
-	DDL       string
-	FromCache bool
-}
-
-// FinalizationDDLMapper handles AI-driven DDL generation for finalization phase.
-type FinalizationDDLMapper interface {
-	// GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints.
-	GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (*FinalizationDDLResponse, error)
-
-	// CacheFinalizationDDL stores a known-good DDL for the request, replacing
-	// any prior cached value. This is the ONLY entry point that writes to the
-	// finalization-DDL cache — the mapper itself never caches because it only
-	// sees AI output, not validated DDL. The writer calls this after every
-	// successful CREATE INDEX / FOREIGN KEY / CHECK CONSTRAINT execution
-	// (first-try and retry alike); a failed exec leaves the cache untouched
-	// so the next call gets a fresh AI invocation rather than a poisoned hit.
-	// Mirrors TableTypeMapper.CacheTableDDL — see #32 for the rationale.
-	CacheFinalizationDDL(req FinalizationDDLRequest, ddl string)
-
-	// VerifyFinalizationDDL audits a generated finalization DDL (index, FK,
-	// or CHECK) against the source metadata. Same self-check pattern as
-	// VerifyTableDDL — verifies that columns, ref-table, FK actions,
-	// uniqueness, filter expressions, and CHECK predicates were preserved.
+// FinalizationDDLReviewer audits deterministic index/FK/CHECK DDL.
+type FinalizationDDLReviewer interface {
 	VerifyFinalizationDDL(ctx context.Context, req VerifyFinalizationDDLRequest) (*VerifyResult, error)
 }
 
@@ -275,67 +127,11 @@ const (
 	DDLTypeIndex           DDLType = "index"
 	DDLTypeForeignKey      DDLType = "foreign_key"
 	DDLTypeCheckConstraint DDLType = "check_constraint"
-	DDLTypeDropTable       DDLType = "drop_table"
 )
 
-// FinalizationDDLRequest contains information needed to generate finalization DDL.
-type FinalizationDDLRequest struct {
-	// Type specifies what kind of DDL to generate.
-	Type DDLType
-
-	// SourceDBType is the source database type (e.g., "postgres", "mssql").
-	SourceDBType string
-
-	// TargetDBType is the target database type (e.g., "oracle", "mysql").
-	TargetDBType string
-
-	// Table contains the target table metadata.
-	Table *Table
-
-	// TargetSchema is the schema name in the target database.
-	TargetSchema string
-
-	// TargetContext contains metadata about the target database.
-	TargetContext *DatabaseContext
-
-	// Index contains index metadata (when Type is DDLTypeIndex).
-	Index *Index
-
-	// ForeignKey contains FK metadata (when Type is DDLTypeForeignKey).
-	ForeignKey *ForeignKey
-
-	// CheckConstraint contains check constraint metadata (when Type is DDLTypeCheckConstraint).
-	CheckConstraint *CheckConstraint
-
-	// TargetTableDDL is the CREATE TABLE DDL for the target table.
-	// This helps AI understand the actual table structure when generating indexes/FKs.
-	TargetTableDDL string
-
-	// PreviousAttempt is set on retry calls (see #29 PR B) and carries the
-	// prior failed DDL plus the database error that rejected it. When non-nil,
-	// the per-DDL-type prompt builders append a "PRIOR ATTEMPT FAILED" section
-	// at the end of the prompt so the AI can correct the specific defect.
-	// The finalization mapper has no cache, so unlike TableDDLRequest there's
-	// no cache-skip / cache-reprime concern — retries just produce a fresh AI
-	// call with the corrective context.
-	PreviousAttempt *FinalizationDDLAttempt
-}
-
-// FinalizationDDLAttempt records a previous CREATE INDEX / FOREIGN KEY /
-// CHECK CONSTRAINT attempt that the database rejected. Mirrors
-// TableDDLAttempt's role for the table-creation phase. See #29.
-type FinalizationDDLAttempt struct {
-	// DDL is the verbatim DDL the AI emitted on the prior attempt.
-	DDL string
-	// Error is the verbatim text of the database error that rejected it.
-	Error string
-	// FromVerifier — see TableDDLAttempt.FromVerifier.
-	FromVerifier bool
-}
-
-// VerifyTableDDLRequest is the input to VerifyTableDDL. Carries the same
-// source metadata the generator used plus the proposed target DDL so the
-// auditor can compare attribute-by-attribute.
+// VerifyTableDDLRequest is the input to VerifyTableDDL. Carries the source
+// metadata plus the proposed target DDL so the auditor can compare
+// attribute-by-attribute.
 type VerifyTableDDLRequest struct {
 	SourceDBType  string
 	TargetDBType  string
@@ -348,8 +144,7 @@ type VerifyTableDDLRequest struct {
 	ProposedDDL string
 }
 
-// VerifyFinalizationDDLRequest is the input to VerifyFinalizationDDL. The
-// shape mirrors FinalizationDDLRequest plus the proposed DDL.
+// VerifyFinalizationDDLRequest is the input to VerifyFinalizationDDL.
 type VerifyFinalizationDDLRequest struct {
 	Type            DDLType
 	SourceDBType    string
@@ -376,41 +171,10 @@ type VerifyFinalizationDDLRequest struct {
 //
 // On a malformed AI response that's neither parseable as OK nor as ISSUES,
 // the parser returns OK=false with a single synthetic issue containing the
-// raw response (truncated). Fail-closed by design — surfacing a malformed
-// response as a hard verify failure forces a retry rather than letting
-// possibly-bad DDL through.
+// raw response (truncated). Fail-closed by design.
 type VerifyResult struct {
 	OK     bool
 	Issues []string
-}
-
-// TableDropDDLMapper handles AI-driven DDL generation for dropping tables.
-type TableDropDDLMapper interface {
-	// GenerateDropTableDDL generates DDL statement(s) for dropping a table.
-	// The AI will generate database-specific syntax that properly handles
-	// foreign key constraints and other database-specific requirements.
-	GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error)
-
-	// CacheDropTableDDL stores a known-good DDL for the request, replacing any
-	// prior cached value. The DROP prompt mandates IF EXISTS so the cached DDL
-	// is naturally idempotent across re-runs; this method is the writer's
-	// post-exec hook. Mirrors TableTypeMapper.CacheTableDDL — see #32.
-	CacheDropTableDDL(req DropTableDDLRequest, ddl string)
-}
-
-// DropTableDDLRequest contains information needed to generate DROP TABLE DDL.
-type DropTableDDLRequest struct {
-	// TargetDBType is the target database type (e.g., "mysql", "postgres").
-	TargetDBType string
-
-	// TargetSchema is the schema name in the target database.
-	TargetSchema string
-
-	// TableName is the name of the table to drop.
-	TableName string
-
-	// TargetContext contains metadata about the target database.
-	TargetContext *DatabaseContext
 }
 
 // GetAITypeMapper returns the global AI type mapper loaded from secrets.

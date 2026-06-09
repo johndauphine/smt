@@ -42,11 +42,9 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 //   - cfg: Target database configuration (includes chunk_size for batch operations)
 //   - maxConns: Maximum number of connections in the pool
 //   - sourceType: Source database type for cross-engine type handling
-//   - schemaGenerationMode: deterministic or AI-authored schema DDL
-//   - typeMapper: AI type mapper for database type conversions (required only for AI schema generation)
-//   - verifierTypeMapper: optional second mapper for the AI self-check pass
-//     (cross-model verify, see migration.ai_verifier_model). Nil falls back
-//     to typeMapper for both gen and verify.
+//   - schemaGenerationMode: retained config plumbing; deterministic schema DDL is always used
+//   - typeMapper: optional AI reviewer fallback
+//   - verifierTypeMapper: optional explicit AI reviewer
 func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, schemaGenerationMode string, unknownTypePolicy string, typeMapper driver.TypeMapper, verifierTypeMapper driver.TypeMapper) (TargetPool, error) {
 	// Normalize empty type to default
 	dbType := cfg.Type
