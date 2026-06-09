@@ -122,12 +122,12 @@ func TestDeterministicUnsupportedTypeFails(t *testing.T) {
 
 func TestDeterministicMSSQLTimestampRowversionMapsToBytea(t *testing.T) {
 	renderer := newDeterministicDDL()
-	got, err := renderer.columnType(driver.Column{Name: "Version", DataType: "timestamp", MaxLength: 8})
+	got, err := renderer.columnType(driver.Column{Name: "Version", DataType: "rowversion", MaxLength: 8})
 	if err != nil {
 		t.Fatalf("columnType: %v", err)
 	}
 	if got != "bytea" {
-		t.Fatalf("timestamp max_length=8 maps to %q, want bytea", got)
+		t.Fatalf("rowversion maps to %q, want bytea", got)
 	}
 }
 

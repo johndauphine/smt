@@ -208,17 +208,37 @@ func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 		}
 	}
 	if isTextualSourceType(col.DataType) && isBareSQLWord(expr) {
-		return "'" + escapeSQLString(expr) + "'", nil
+		lit := "'" + escapeSQLString(expr) + "'"
+		if r.target == "mysql" {
+			lit = r.mysqlDefaultForm(lit, col)
+		}
+		return lit, nil
 	}
 	lower := strings.ToLower(expr)
 	switch r.target {
 	case "mssql":
+		// MSSQL-native functions pass through unchanged; foreign now-style
+		// functions translate to the equivalent with the same local-vs-UTC
+		// class (now()/current_timestamp are local time, never UTC).
 		if strings.HasPrefix(lower, "current_timestamp(") || strings.HasPrefix(lower, "now(") {
+			return "SYSDATETIME()", nil
+		}
+		if strings.HasPrefix(lower, "utc_timestamp") {
 			return "SYSUTCDATETIME()", nil
 		}
 		switch lower {
-		case "current_timestamp", "now()", "getdate()":
+		case "current_timestamp", "now()":
+			return "SYSDATETIME()", nil
+		case "getdate()":
+			return "GETDATE()", nil
+		case "getutcdate()":
+			return "GETUTCDATE()", nil
+		case "sysdatetime()":
+			return "SYSDATETIME()", nil
+		case "sysutcdatetime()":
 			return "SYSUTCDATETIME()", nil
+		case "sysdatetimeoffset()":
+			return "SYSDATETIMEOFFSET()", nil
 		case "gen_random_uuid()", "uuid_generate_v4()", "uuid()", "newid()":
 			return "NEWID()", nil
 		}
@@ -247,7 +267,57 @@ func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 			return "(UUID())", nil
 		}
 	}
-	return r.Expression(expr, nil)
+	out, err := r.Expression(expr, nil)
+	if err != nil {
+		return "", err
+	}
+	if r.target == "mysql" {
+		out = r.mysqlDefaultForm(out, col)
+	}
+	return out, nil
+}
+
+var plainNumberLiteralRE = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?$`)
+
+// mysqlDefaultForm wraps a rendered default in parentheses where MySQL 8
+// requires the expression-default form: any non-literal expression, and every
+// default on a BLOB/TEXT/JSON column (which accept only expression defaults).
+func (r Renderer) mysqlDefaultForm(def string, col driver.Column) string {
+	d := strings.TrimSpace(def)
+	if d == "" || strings.HasPrefix(d, "(") {
+		return d
+	}
+	upper := strings.ToUpper(d)
+	// NULL and CURRENT_TIMESTAMP[(n)] are valid bare (and ON UPDATE accepts
+	// only the bare form).
+	if upper == "NULL" || strings.HasPrefix(upper, "CURRENT_TIMESTAMP") {
+		return d
+	}
+	if isPlainLiteral(d) {
+		if r.mysqlRequiresExpressionDefault(col) {
+			return "(" + d + ")"
+		}
+		return d
+	}
+	return "(" + d + ")"
+}
+
+func isPlainLiteral(d string) bool {
+	if len(d) >= 2 && d[0] == '\'' && d[len(d)-1] == '\'' {
+		_, ok := unquoteSQLString(d)
+		return ok
+	}
+	return plainNumberLiteralRE.MatchString(d)
+}
+
+func (r Renderer) mysqlRequiresExpressionDefault(col driver.Column) bool {
+	typ, err := r.ColumnType(col)
+	if err != nil {
+		return false
+	}
+	base := strings.ToUpper(normalizeTypeName(typ))
+	return base == "JSON" || base == "GEOMETRY" ||
+		strings.HasSuffix(base, "TEXT") || strings.HasSuffix(base, "BLOB")
 }
 
 func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, error) {
@@ -488,12 +558,18 @@ func (r Renderer) mssqlColumnType(col driver.Column, dt string) (string, error) 
 	case "bit", "bool", "boolean":
 		return "BIT", nil
 	case "varchar", "character varying":
-		return sizedType("VARCHAR", col.MaxLength, "MAX"), nil
+		return sizedTypeCapped("VARCHAR", col.MaxLength, 8000, "MAX"), nil
 	case "nvarchar":
-		return sizedType("NVARCHAR", col.MaxLength, "MAX"), nil
+		return sizedTypeCapped("NVARCHAR", col.MaxLength, 4000, "MAX"), nil
 	case "char", "character", "bpchar":
+		if col.MaxLength > 8000 {
+			return "VARCHAR(MAX)", nil
+		}
 		return sizedType("CHAR", col.MaxLength, "1"), nil
 	case "nchar":
+		if col.MaxLength > 4000 {
+			return "NVARCHAR(MAX)", nil
+		}
 		return sizedType("NCHAR", col.MaxLength, "1"), nil
 	case "text", "ntext", "tinytext", "mediumtext", "longtext", "json", "jsonb", "xml", "array", "_text", "text[]", "_varchar", "varchar[]", "_bpchar", "bpchar[]", "_int2", "int2[]", "_int4", "int4[]", "_int8", "int8[]", "_uuid", "uuid[]":
 		return "NVARCHAR(MAX)", nil
@@ -504,9 +580,6 @@ func (r Renderer) mssqlColumnType(col driver.Column, dt string) (string, error) 
 	case "rowversion":
 		return "ROWVERSION", nil
 	case "datetime", "datetime2", "smalldatetime", "timestamp", "timestamp without time zone", "timestamptz":
-		if dt == "timestamp" && col.MaxLength == 8 {
-			return "ROWVERSION", nil
-		}
 		return "DATETIME2", nil
 	case "datetimeoffset", "timestamp with time zone":
 		return "DATETIMEOFFSET", nil
@@ -527,7 +600,7 @@ func (r Renderer) mssqlColumnType(col driver.Column, dt string) (string, error) 
 	case "uniqueidentifier", "uuid":
 		return "UNIQUEIDENTIFIER", nil
 	case "varbinary", "binary", "image", "bytea", "blob", "mediumblob", "longblob":
-		return sizedType("VARBINARY", col.MaxLength, "MAX"), nil
+		return sizedTypeCapped("VARBINARY", col.MaxLength, 8000, "MAX"), nil
 	default:
 		return r.unknownType(dt)
 	}
@@ -550,6 +623,9 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 	case "varchar", "nvarchar", "character varying":
 		return mysqlVarcharType(col.MaxLength), nil
 	case "char", "nchar", "character", "bpchar":
+		if col.MaxLength > 255 {
+			return mysqlVarcharType(col.MaxLength), nil
+		}
 		return sizedType("CHAR", col.MaxLength, "1"), nil
 	case "text", "ntext", "tinytext", "mediumtext", "longtext":
 		return mysqlTextType(dt), nil
@@ -558,9 +634,6 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 	case "rowversion":
 		return "BINARY(8)", nil
 	case "datetime", "datetime2", "smalldatetime", "timestamp", "timestamp without time zone", "timestamptz", "datetimeoffset", "timestamp with time zone":
-		if dt == "timestamp" && col.MaxLength == 8 {
-			return "BINARY(8)", nil
-		}
 		return "DATETIME(6)", nil
 	case "date":
 		return "DATE", nil
@@ -579,6 +652,9 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 	case "uniqueidentifier", "uuid":
 		return "CHAR(36)", nil
 	case "varbinary", "binary", "bytea":
+		if col.MaxLength > 65535 {
+			return "BLOB", nil
+		}
 		return sizedType("VARBINARY", col.MaxLength, "255"), nil
 	case "image", "blob", "mediumblob", "longblob":
 		return "BLOB", nil
@@ -671,12 +747,14 @@ func canonicalTarget(target string) string {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "postgres", "postgresql", "pg":
 		return "postgres"
-	case "mssql", "sqlserver", "sql_server":
+	case "mssql", "sqlserver", "sql-server", "sql_server":
 		return "mssql"
-	case "mysql", "mariadb":
+	case "mysql", "mariadb", "maria":
 		return "mysql"
 	default:
-		return strings.ToLower(strings.TrimSpace(target))
+		// Defer to the driver registry so any alias a driver registers
+		// (including future engines) resolves without editing this list.
+		return strings.ToLower(driver.Canonicalize(strings.TrimSpace(target)))
 	}
 }
 
@@ -693,6 +771,15 @@ func sizedType(name string, length int, unbounded string) string {
 		return fmt.Sprintf("%s(%s)", name, unbounded)
 	}
 	return fmt.Sprintf("%s(%d)", name, length)
+}
+
+// sizedTypeCapped degrades lengths above the target dialect's maximum for the
+// type to the unbounded form instead of emitting DDL the target rejects.
+func sizedTypeCapped(name string, length, max int, unbounded string) string {
+	if length > max {
+		return fmt.Sprintf("%s(%s)", name, unbounded)
+	}
+	return sizedType(name, length, unbounded)
 }
 
 func decimalType(name string, col driver.Column) string {
@@ -714,6 +801,11 @@ func mysqlVarcharType(length int) string {
 		return "LONGTEXT"
 	}
 	if length <= 0 {
+		return "TEXT"
+	}
+	// 16383 is the longest VARCHAR that fits MySQL's 65535-byte row limit
+	// under utf8mb4 (the charset our CREATE TABLE emits).
+	if length > 16383 {
 		return "TEXT"
 	}
 	return fmt.Sprintf("VARCHAR(%d)", length)
@@ -1098,8 +1190,11 @@ func rewriteFunctionNames(expr, target string) string {
 	replacements := map[string]string{}
 	switch canonicalTarget(target) {
 	case "mssql":
+		// CURRENT_TIMESTAMP is valid T-SQL (local time) and stays as-is;
+		// rewriting it to SYSUTCDATETIME() would silently change local-time
+		// semantics to UTC.
 		replacements = map[string]string{
-			"CURRENT_TIMESTAMP":  "SYSUTCDATETIME()",
+			"NOW()":              "SYSDATETIME()",
 			"gen_random_uuid()":  "NEWID()",
 			"uuid_generate_v4()": "NEWID()",
 			"UUID()":             "NEWID()",
@@ -1124,7 +1219,7 @@ func rewriteFunctionNames(expr, target string) string {
 }
 
 func replaceCaseInsensitive(s, old, new string) string {
-	re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(old))
+	re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(old))
 	return re.ReplaceAllString(s, new)
 }
 
@@ -1506,7 +1601,12 @@ func splitTopLevel(expr string, sep rune) []string {
 func stripOuterCheckParens(expr string) string {
 	expr = strings.TrimSpace(expr)
 	if strings.HasPrefix(strings.ToUpper(expr), "CHECK") {
-		expr = strings.TrimSpace(expr[5:])
+		// Only strip the keyword, not identifiers like "checked_in": the next
+		// character must end the word.
+		rest := expr[5:]
+		if rest == "" || rest[0] == '(' || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' || rest[0] == '\r' {
+			expr = strings.TrimSpace(rest)
+		}
 	}
 	return unwrapDefaultParens(expr)
 }

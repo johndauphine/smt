@@ -310,15 +310,12 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 		}
 	case "text", "ntext", "tinytext", "mediumtext", "longtext":
 		typ = "text"
-	case "datetime", "datetime2", "smalldatetime":
+	case "datetime", "datetime2", "smalldatetime", "timestamp":
 		typ = "timestamp without time zone"
-	case "timestamp":
-		// SQL Server's timestamp is the legacy rowversion binary type.
-		if col.MaxLength == 8 {
-			typ = "bytea"
-		} else {
-			typ = "timestamp without time zone"
-		}
+	case "rowversion":
+		// SQL Server's rowversion (reported by old snapshots as "timestamp")
+		// is an opaque 8-byte binary counter.
+		typ = "bytea"
 	case "datetimeoffset", "timestamptz", "timestamp with time zone":
 		typ = "timestamp with time zone"
 	case "date":
@@ -765,7 +762,14 @@ func isBareSQLWord(expr string) bool {
 		}
 		return false
 	}
-	return true
+	// SQL keywords that must stay unquoted: DEFAULT (NULL) means SQL NULL,
+	// not the string 'NULL'.
+	switch strings.ToLower(expr) {
+	case "null", "true", "false", "current_timestamp":
+		return false
+	default:
+		return true
+	}
 }
 
 func rewriteSQLServerStringConcat(expr string) string {
