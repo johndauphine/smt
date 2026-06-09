@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -75,7 +76,7 @@ type AIConfig struct {
 // Provider represents an AI provider configuration
 type Provider struct {
 	// Type optionally aliases this entry to a known provider type ("anthropic",
-	// "openai", "gemini", "ollama", "lmstudio"). When set, the YAML key is
+	// "openai", "google", "ollama", "lmstudio"). When set, the YAML key is
 	// just a label and dispatch uses Type. Lets you have multiple entries that
 	// share a backend — e.g. "anthropic-haiku" and "anthropic-sonnet" both
 	// with provider: anthropic but different model fields. Empty (the common
@@ -104,9 +105,19 @@ type Provider struct {
 // without forcing the YAML key to match a known provider name.
 func (p *Provider) EffectiveType(providerName string) string {
 	if p.Type != "" {
-		return p.Type
+		return NormalizeProviderName(p.Type)
 	}
-	return providerName
+	return NormalizeProviderName(providerName)
+}
+
+// NormalizeProviderName returns the canonical provider name used for dispatch.
+// "gemini" remains accepted as a legacy alias for Google's Gemini API.
+func NormalizeProviderName(name string) string {
+	normalized := strings.ToLower(name)
+	if normalized == "gemini" {
+		return "google"
+	}
+	return normalized
 }
 
 // EncryptionConfig holds encryption-related secrets
@@ -139,7 +150,7 @@ var KnownProviders = map[string]struct {
 }{
 	"anthropic": {ProviderTypeCloud, "https://api.anthropic.com"},
 	"openai":    {ProviderTypeCloud, "https://api.openai.com"},
-	"gemini":    {ProviderTypeCloud, "https://generativelanguage.googleapis.com"},
+	"google":    {ProviderTypeCloud, "https://generativelanguage.googleapis.com"},
 	"ollama":    {ProviderTypeLocal, "http://localhost:11434"},
 	"lmstudio":  {ProviderTypeLocal, "http://localhost:1234"},
 }
@@ -154,7 +165,8 @@ var KnownProviders = map[string]struct {
 var DefaultModels = map[string]string{
 	"anthropic": "claude-sonnet-4-6",
 	"openai":    "gpt-4o",
-	"gemini":    "gemini-2.0-flash",
+	"google":    "gemini-2.0-flash",
+	"gemini":    "gemini-2.0-flash", // Legacy alias for existing secrets files.
 	"ollama":    "llama3",
 	"lmstudio":  "local-model",
 }
@@ -382,8 +394,8 @@ func (c *Config) Validate() error {
 	// AI settings are optional - only validate if configured
 	if c.AI.DefaultProvider != "" {
 		// Check that default provider exists
-		provider, ok := c.AI.Providers[c.AI.DefaultProvider]
-		if !ok {
+		provider, err := c.GetProvider(c.AI.DefaultProvider)
+		if err != nil {
 			return fmt.Errorf("default provider %q not found in providers", c.AI.DefaultProvider)
 		}
 
@@ -397,7 +409,8 @@ func (c *Config) Validate() error {
 }
 
 func validateProvider(name string, p *Provider) error {
-	known, isKnown := KnownProviders[name]
+	providerType := p.EffectiveType(name)
+	known, isKnown := KnownProviders[providerType]
 
 	if isKnown {
 		if known.Type == ProviderTypeCloud && p.APIKey == "" {
@@ -423,17 +436,30 @@ func (c *Config) GetDefaultProvider() (*Provider, string, error) {
 		return nil, "", fmt.Errorf("no default provider configured")
 	}
 
-	provider, ok := c.AI.Providers[c.AI.DefaultProvider]
-	if !ok {
+	provider, err := c.GetProvider(c.AI.DefaultProvider)
+	if err != nil {
 		return nil, "", fmt.Errorf("default provider %q not found", c.AI.DefaultProvider)
 	}
 
-	return provider, c.AI.DefaultProvider, nil
+	providerName := c.AI.DefaultProvider
+	if strings.EqualFold(providerName, "gemini") {
+		providerName = "google"
+	}
+	return provider, providerName, nil
 }
 
 // GetProvider returns a specific AI provider by name
 func (c *Config) GetProvider(name string) (*Provider, error) {
 	provider, ok := c.AI.Providers[name]
+	if !ok {
+		normalized := NormalizeProviderName(name)
+		if normalized != name {
+			provider, ok = c.AI.Providers[normalized]
+		}
+		if !ok && normalized == "google" {
+			provider, ok = c.AI.Providers["gemini"]
+		}
+	}
 	if !ok {
 		return nil, fmt.Errorf("provider %q not found", name)
 	}
@@ -472,6 +498,7 @@ func (p *Provider) GetEffectiveBaseURL(providerName string) string {
 	if p.BaseURL != "" {
 		return p.BaseURL
 	}
+	providerName = NormalizeProviderName(providerName)
 	if known, ok := KnownProviders[providerName]; ok {
 		return known.DefaultURL
 	}
@@ -483,6 +510,7 @@ func (p *Provider) GetEffectiveModel(providerName string) string {
 	if p.Model != "" {
 		return p.Model
 	}
+	providerName = NormalizeProviderName(providerName)
 	if defaultModel, ok := DefaultModels[providerName]; ok {
 		return defaultModel
 	}
@@ -534,6 +562,7 @@ func (p *Provider) GetEffectiveModelTemperature() float64 {
 
 // IsLocalProvider returns true if the provider is a local provider (no API key needed)
 func IsLocalProvider(name string) bool {
+	name = NormalizeProviderName(name)
 	if known, ok := KnownProviders[name]; ok {
 		return known.Type == ProviderTypeLocal
 	}
@@ -585,8 +614,8 @@ ai:
       # model_temperature: 1  # required when model is an OpenAI reasoning family
       #                       # (o-series, gpt-5.x) — they reject the default 0
 
-    gemini:
-      api_key: ""  # Get from https://makersuite.google.com/
+    google:
+      api_key: ""  # Get from https://aistudio.google.com/app/apikey
       model: "gemini-2.0-flash"  # optional
       # model_temperature: 0  # optional sampling temperature (default 0 = deterministic)
 
@@ -617,30 +646,12 @@ notifications:
 
 # Global migration defaults (can be overridden per-migration)
 migration_defaults:
-  # Performance settings (auto-tuned if not set)
-  # workers: 4                    # Parallel workers (default: based on CPU cores)
-  # max_memory_mb: 0              # Max memory in MB (default: 70% of available)
-  # read_ahead_buffers: 8         # Chunks to buffer ahead
-  # write_ahead_writers: 2        # Parallel writers per job
-  # parallel_readers: 2           # Parallel readers per job
-
   # Schema creation defaults
   create_indexes: true            # Create non-PK indexes
   create_foreign_keys: true       # Create FK constraints
   create_check_constraints: false # Create CHECK constraints
 
-  # Consistency and validation
-  strict_consistency: false       # Use table locks instead of NOLOCK/MVCC
-  sample_validation: false        # Validate sample data after migration
-  sample_size: 100                # Rows to sample for validation
-
-  # Checkpoint and recovery
-  checkpoint_frequency: 10        # Save progress every N chunks
-  max_retries: 3                  # Retry failed tables N times
+  # History
   history_retention_days: 30      # Keep run history for N days
-
-  # AI features (enabled by default when AI provider is configured)
-  ai_adjust: true                 # Enable AI-driven parameter adjustment
-  ai_adjust_interval: "30s"       # How often AI evaluates metrics
 `
 }

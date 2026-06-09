@@ -131,6 +131,60 @@ encryption:
 	}
 }
 
+func TestGoogleDefaultProviderCanUseLegacyGeminiBlock(t *testing.T) {
+	cfg := &Config{
+		AI: AIConfig{
+			DefaultProvider: "google",
+			Providers: map[string]*Provider{
+				"gemini": {
+					APIKey: "test-key",
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	provider, name, err := cfg.GetDefaultProvider()
+	if err != nil {
+		t.Fatalf("GetDefaultProvider() error = %v", err)
+	}
+	if name != "google" {
+		t.Fatalf("provider name = %q, want google", name)
+	}
+	if provider.APIKey != "test-key" {
+		t.Fatalf("API key = %q, want test-key", provider.APIKey)
+	}
+}
+
+func TestLegacyGeminiDefaultProviderCanUseGoogleBlock(t *testing.T) {
+	cfg := &Config{
+		AI: AIConfig{
+			DefaultProvider: "gemini",
+			Providers: map[string]*Provider{
+				"google": {
+					APIKey: "test-key",
+				},
+			},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	provider, name, err := cfg.GetDefaultProvider()
+	if err != nil {
+		t.Fatalf("GetDefaultProvider() error = %v", err)
+	}
+	if name != "google" {
+		t.Fatalf("provider name = %q, want google", name)
+	}
+	if provider.APIKey != "test-key" {
+		t.Fatalf("API key = %q, want test-key", provider.APIKey)
+	}
+}
+
 func TestGetEffectiveModel(t *testing.T) {
 	provider := &Provider{}
 
@@ -196,6 +250,7 @@ func TestIsLocalProvider(t *testing.T) {
 	}{
 		{"anthropic", false},
 		{"openai", false},
+		{"google", false},
 		{"gemini", false},
 		{"ollama", true},
 		{"lmstudio", true},
@@ -244,6 +299,7 @@ func TestGenerateTemplate(t *testing.T) {
 		"default_provider",
 		"anthropic:",
 		"openai:",
+		"google:",
 		"ollama:",
 		"lmstudio:",
 		"master_key",
@@ -309,6 +365,8 @@ func TestEffectiveType(t *testing.T) {
 		{"Type alias overrides YAML key", "anthropic-haiku", Provider{Type: "anthropic"}, "anthropic"},
 		{"empty Type explicitly == unset", "lmstudio", Provider{Type: ""}, "lmstudio"},
 		{"Type can point at any known backend", "my-cheap-gen", Provider{Type: "ollama"}, "ollama"},
+		{"legacy gemini key normalizes to google", "gemini", Provider{}, "google"},
+		{"legacy gemini alias normalizes to google", "google-prod", Provider{Type: "gemini"}, "google"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

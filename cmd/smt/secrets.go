@@ -2,8 +2,7 @@ package main
 
 // `smt init-secrets` writes a template secrets file (~/.secrets/smt-config.yaml)
 // holding the AI provider key, profile encryption master key, and Slack
-// webhook URL. `smt init` is left as a stub for now and will become an
-// interactive config wizard in a later phase.
+// webhook URL.
 
 import (
 	"fmt"
@@ -52,16 +51,4 @@ func runInitSecrets(c *cli.Context) error {
 	fmt.Println()
 	fmt.Println("Keep this file out of version control.")
 	return nil
-}
-
-func initCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "init",
-		Usage: "Create a new configuration file (interactive wizard - placeholder)",
-		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Value: "config.yaml", Usage: "Output file path"},
-			&cli.BoolFlag{Name: "force", Aliases: []string{"f"}, Usage: "Overwrite existing file"},
-		},
-		Action: notImplemented("init"),
-	}
 }

@@ -20,8 +20,6 @@ import (
 	"smt/internal/driver"
 	"smt/internal/logging"
 	"smt/internal/orchestrator"
-	"smt/internal/secrets"
-	"smt/internal/setup"
 	"smt/internal/version"
 )
 
@@ -50,30 +48,7 @@ type AppMode int
 
 const (
 	ModeNormal AppMode = iota
-	ModeWizard
 	ModeMigration
-	ModeSetup
-)
-
-type wizardStep int
-
-const (
-	stepSourceType wizardStep = iota
-	stepSourceHost
-	stepSourcePort
-	stepSourceDB
-	stepSourceUser
-	stepSourcePass
-	stepSourceSSL
-	stepTargetType
-	stepTargetHost
-	stepTargetPort
-	stepTargetDB
-	stepTargetUser
-	stepTargetPass
-	stepTargetSSL
-	stepWorkers
-	stepDone
 )
 
 // Model is the main TUI model - simplified single-viewport architecture
@@ -107,14 +82,6 @@ type Model struct {
 	// Single migration state (one at a time)
 	migrationCancel context.CancelFunc
 	migrationStatus string // "", "running", "completed", "failed", "cancelled"
-
-	// Wizard state
-	wizardStep wizardStep
-	wizardData config.Config
-	wizardFile string
-
-	// Setup wizard state
-	setupState *setup.State
 }
 
 type commandInfo struct {
@@ -123,15 +90,11 @@ type commandInfo struct {
 }
 
 var availableCommands = []commandInfo{
-	{"/run", "Start migration (default: config.yaml)"},
-	{"/resume", "Resume an interrupted migration"},
-	{"/validate", "Validate migration row counts"},
+	{"/create", "Build the target schema from the source"},
+	{"/sync", "Diff source vs snapshot and emit/apply ALTERs"},
+	{"/snapshot", "Capture current source schema for future diffing"},
 	{"/config", "Show configuration details"},
-	{"/analyze", "Analyze source database and suggest config (--apply to save)"},
-	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
-	{"/setup", "Guided setup: secrets, config, connection test, AI analysis"},
-	{"/wizard", "Launch configuration wizard"},
 	{"/logs", "Save session logs to file"},
 	{"/profile", "Manage encrypted profiles (save/list/delete/export)"},
 	{"/verbosity", "Set log level (debug, info, warn, error)"},
@@ -159,18 +122,6 @@ type ProgressMsg string
 type MigrationDoneMsg struct {
 	Status  string // "completed", "failed", "cancelled"
 	Message string
-}
-
-// WizardFinishedMsg indicates the wizard completed
-type WizardFinishedMsg struct {
-	Err     error
-	Message string
-}
-
-// SetupConnTestMsg carries a connection test result with step correlation
-type SetupConnTestMsg struct {
-	Step   setup.Step
-	Result *setup.ConnTestResult
 }
 
 // migrationStartedMsg carries the cancel function
@@ -239,7 +190,7 @@ func (m *Model) appendOutput(text string) {
 // getDisplayContent returns content with progress line appended if present
 func (m *Model) getDisplayContent() string {
 	content := m.content.String()
-	if m.progressLine != "" && m.mode != ModeWizard && m.mode != ModeSetup {
+	if m.progressLine != "" {
 		content += styleSystemOutput.Render("  "+m.progressLine) + "\n"
 	}
 	return content
@@ -317,54 +268,24 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 
 		switch msg.Type {
 		case tea.KeyCtrlC:
-			// Cancel setup wizard
-			if m.mode == ModeSetup {
-				m.mode = ModeNormal
-				m.setupState = nil
-				m.appendOutput(styleSystemOutput.Render("Setup cancelled") + "\n")
-				return m, nil
-			}
-			// Cancel wizard
-			if m.mode == ModeWizard {
-				m.mode = ModeNormal
-				m.appendOutput(styleSystemOutput.Render("Wizard cancelled") + "\n")
-				return m, nil
-			}
 			// Cancel running migration
-			if m.migrationCancel != nil && m.migrationStatus == "running" {
-				m.migrationCancel()
-				m.appendOutput(styleSystemOutput.Render("Cancelling migration... please wait") + "\n")
+			if m.migrationStatus == "running" {
+				if m.migrationCancel != nil {
+					m.migrationCancel()
+					m.appendOutput(styleSystemOutput.Render("Cancelling migration... please wait") + "\n")
+				} else {
+					m.appendOutput(styleSystemOutput.Render("Schema operation is starting; cancel will be available shortly.") + "\n")
+				}
 				return m, nil
 			}
 			// Quit if nothing running
 			return m, tea.Quit
 
 		case tea.KeyEsc:
-			if m.mode == ModeSetup {
-				m.mode = ModeNormal
-				m.setupState = nil
-				m.appendOutput(styleSystemOutput.Render("Setup cancelled") + "\n")
-				return m, nil
-			}
-			if m.mode == ModeWizard {
-				m.mode = ModeNormal
-				m.appendOutput(styleSystemOutput.Render("Wizard cancelled") + "\n")
-				return m, nil
-			}
 			return m, tea.Quit
 
 		case tea.KeyEnter:
 			value := m.textInput.Value()
-			if m.mode == ModeSetup {
-				// Ignore Enter during auto-action steps (connection tests, writes)
-				if m.setupState != nil && m.setupState.Prompt().IsAutoAction {
-					return m, nil
-				}
-				return m, safeCmd(m.handleSetupStep(value))
-			}
-			if m.mode == ModeWizard {
-				return m, safeCmd(m.handleWizardStep(value))
-			}
 			if value != "" {
 				m.appendOutput(styleUserInput.Render("> "+value) + "\n")
 				m.textInput.Reset()
@@ -455,39 +376,6 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 			prefix = styleError.Render("✖ ")
 		}
 		m.appendOutput(prefix + msg.Message + "\n")
-
-	case WizardFinishedMsg:
-		m.mode = ModeNormal
-
-		wrapWidth := m.viewport.Width - 4
-		if wrapWidth < 20 {
-			wrapWidth = 80
-		}
-
-		text := msg.Message
-		if msg.Err != nil {
-			text = wrapLine(msg.Err.Error(), wrapWidth)
-			text = styleError.Render("✖ " + text)
-		} else {
-			text = wrapLine(text, wrapWidth)
-			text = styleSuccess.Render("✔ " + text)
-		}
-
-		m.appendOutput("\n" + text + "\n")
-
-	case SetupConnTestMsg:
-		// Verify step correlation - prevent stale messages from advancing wrong steps
-		if m.setupState == nil || msg.Step != m.setupState.CurrentStep {
-			break // stale message, ignore
-		}
-		if msg.Result.Connected {
-			m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Connected! (%dms)", msg.Result.LatencyMs)) + "\n")
-			m.setupState.Process("")
-		} else {
-			m.appendOutput(styleError.Render(fmt.Sprintf("  Failed: %s (%dms)", msg.Result.Error, msg.Result.LatencyMs)) + "\n")
-			m.setupState.Process(msg.Result.Error)
-		}
-		return m, safeCmd(m.processSetupAutoSteps())
 
 	case BoxedOutputMsg:
 		output := strings.TrimSpace(string(msg))
@@ -639,7 +527,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/setup", "/wizard", "/logs", "/profile", "/verbosity", "/clear", "/quit", "/help"}
+	commands := []string{"/create", "/sync", "/snapshot", "/config", "/history", "/logs", "/profile", "/verbosity", "/about", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -702,12 +590,8 @@ func (m Model) statusBarView() string {
 	// Mode indicator
 	modeText := ""
 	switch m.mode {
-	case ModeWizard:
-		modeText = styleStatusText.Render(" [wizard] ")
 	case ModeMigration:
 		modeText = styleStatusText.Render(" [migrating] ")
-	case ModeSetup:
-		modeText = styleStatusText.Render(" [setup] ")
 	}
 
 	status := ""
@@ -756,8 +640,8 @@ func (m Model) welcomeMessage() string {
 `
 
 	tips := lipgloss.NewStyle().Foreground(colorGray).Render(`
- Tip: /create runs the full schema build. /sync (later phase)
-      will apply ALTERs derived from source schema changes.
+ Tip: /create runs the full schema build. /snapshot captures
+      a source baseline, and /sync emits or applies ALTERs.
       Hold Shift to select text with mouse.`)
 
 	return welcome + body + tips
@@ -788,14 +672,10 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 
 	case "/help":
 		help := `Available Commands:
-  /setup                  Guided setup: secrets, config, test
-  /wizard                 Launch the configuration wizard
   /create [config_file]   Build the target schema from the source
   /create --profile NAME  Build using a saved profile
-  /sync [--apply]         Diff source vs snapshot, emit/apply ALTERs (later phase)
-  /validate               Compare source vs target schema (later phase)
-  /snapshot               Capture current source schema for future diffing (later phase)
-  /analyze                Schema-relevant AI analysis (later phase)
+  /snapshot [@config]     Capture current source schema for future diffing
+  /sync [@config]         Diff source vs snapshot, emit/apply ALTERs
   /config [config_file]   Show configuration details
   /history                Show schema-run history
   /profile save NAME      Save an encrypted profile
@@ -808,8 +688,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /quit                   Exit application
   !<command>              Run a shell command
 
-Note: You can use @/path/to/file for config files. /run is an
-alias for /create kept for muscle-memory parity with DMT.`
+Note: You can use @/path/to/file for config files.`
 		return func() tea.Msg { return BoxedOutputMsg(help) }
 
 	case "/logs":
@@ -847,101 +726,40 @@ alias for /create kept for muscle-memory parity with DMT.`
 
 Features:
 - Pluggable driver model (PostgreSQL, SQL Server, MySQL)
-- AI-assisted type mapping (Anthropic / OpenAI / Gemini / Ollama / LM Studio)
+- AI-assisted review/type mapping (Anthropic / OpenAI / Google / Ollama / LM Studio)
 - Encrypted profile storage
-- Configuration wizard
-- Schema diff + ALTER generation (later phase)
+- Schema diff + ALTER generation
 
 Built with Go and Bubble Tea.`, version.Version, version.Description)
 		return func() tea.Msg { return BoxedOutputMsg(about) }
 
-	case "/setup":
-		m.mode = ModeSetup
-		m.setupState = setup.NewState()
-		m.textInput.Reset()
-		m.textInput.Placeholder = ""
-		m.appendOutput("\n--- SETUP WIZARD ---\n")
-		return m.processSetupAutoSteps()
-
-	case "/wizard":
-		m.mode = ModeWizard
-		m.wizardStep = stepSourceType
-		m.textInput.Reset()
-		m.textInput.Placeholder = ""
-
-		configFile, profileName := parseConfigArgs(parts)
-		m.wizardFile = configFile
-
-		var headerMsg string
-		var loaded bool
-
-		// Try to load from profile first
-		if profileName != "" {
-			if cfg, err := loadProfileConfig(profileName); err == nil {
-				m.wizardData = *cfg
-				m.wizardFile = profileName + ".yaml"
-				headerMsg = fmt.Sprintf("\n--- EDITING PROFILE: %s ---\n", profileName)
-				loaded = true
-			}
-		}
-
-		// Try config file
-		if !loaded {
-			if _, err := os.Stat(m.wizardFile); err == nil {
-				if cfg, err := config.LoadWithOptions(m.wizardFile, config.LoadOptions{SuppressWarnings: true}); err == nil {
-					m.wizardData = *cfg
-					headerMsg = fmt.Sprintf("\n--- EDITING CONFIGURATION: %s ---\n", m.wizardFile)
-					loaded = true
-				}
-			}
-		}
-
-		if !loaded {
-			headerMsg = fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
-		}
-
-		prompt := m.renderWizardPrompt()
-		m.appendOutput(headerMsg + prompt)
-		return nil
-
-	case "/create", "/run":
-		// /create is the canonical SMT name; /run is kept for muscle-memory
-		// parity with DMT. Both build the target schema from the source.
+	case "/create":
 		if m.migrationStatus == "running" {
 			return func() tea.Msg {
 				return OutputMsg("A schema build is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
 			}
 		}
 		configFile, profileName := parseConfigArgs(parts)
+		m.markSchemaOperationStarting()
 		return m.runMigrationCmd(configFile, profileName)
 
 	case "/sync":
-		return func() tea.Msg {
-			return OutputMsg("sync: schema-diff lands in a later phase.\n")
-		}
-
-	case "/snapshot":
-		return func() tea.Msg {
-			return OutputMsg("snapshot: schema snapshotting lands in a later phase.\n")
-		}
-
-	case "/resume":
-		// Block if migration already running
 		if m.migrationStatus == "running" {
 			return func() tea.Msg {
-				return OutputMsg("A migration is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
+				return OutputMsg("A schema operation is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
 			}
 		}
-		configFile, profileName := parseConfigArgs(parts)
-		return m.runResumeCmd(configFile, profileName)
+		m.markSchemaOperationStarting()
+		return m.runSMTCommandCmd("sync", parts)
 
-	case "/validate":
-		configFile, profileName := parseConfigArgs(parts)
-		return m.runValidateCmd(configFile, profileName)
-
-	case "/status":
-		configFile, profileName, detailed := parseStatusArgs(parts)
-		return m.runStatusCmd(configFile, profileName, detailed)
+	case "/snapshot":
+		if m.migrationStatus == "running" {
+			return func() tea.Msg {
+				return OutputMsg("A schema operation is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
+			}
+		}
+		m.markSchemaOperationStarting()
+		return m.runSMTCommandCmd("snapshot", parts)
 
 	case "/history":
 		configFile, profileName, runID := parseHistoryArgs(parts)
@@ -949,10 +767,6 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 
 	case "/profile":
 		return m.handleProfileCommand(parts)
-
-	case "/analyze":
-		configFile, profileName, apply := parseAnalyzeArgs(parts)
-		return m.runAnalyzeCmd(configFile, profileName, apply)
 
 	case "/config":
 		configFile, profileName := parseConfigArgs(parts)
@@ -964,6 +778,13 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 }
 
 // Migration commands
+
+func (m *Model) markSchemaOperationStarting() {
+	m.migrationStatus = "running"
+	m.migrationCancel = nil
+	m.progressLine = ""
+	m.mode = ModeMigration
+}
 
 func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
@@ -1058,29 +879,6 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 	}
 }
 
-// runResumeCmd is a stub. SMT does not support chunk-level resume because
-// it does not transfer rows — a schema run is short and re-runnable. The
-// command stays in the TUI dispatch table for muscle-memory parity with
-// DMT but reports that it is not applicable.
-func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
-	_ = configFile
-	_ = profileName
-	return func() tea.Msg {
-		return OutputMsg("resume: SMT does not transfer rows, so there is nothing to resume — re-run `/create` instead.\n")
-	}
-}
-
-// runValidateCmd is a stub. Schema validation (compare source vs target
-// schema, report drift) lands in Phase 6 alongside the schema-diff /
-// `/sync` command — it shares the diffing engine.
-func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
-	_ = configFile
-	_ = profileName
-	return func() tea.Msg {
-		return OutputMsg("validate: schema validation lands with the schema-diff feature in a later phase.\n")
-	}
-}
-
 func (m Model) runConfigCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
 		origin := "config: " + configFile
@@ -1094,30 +892,6 @@ func (m Model) runConfigCmd(configFile, profileName string) tea.Cmd {
 		}
 
 		return BoxedOutputMsg(cfg.DebugDump())
-	}
-}
-
-// runAnalyzeCmd is a stub. The DMT analyze command tuned data-transfer
-// parameters (workers, chunk_size, etc.) which SMT does not have. Phase 6
-// will repurpose the AI plumbing to suggest schema-relevant things —
-// risky type mappings, tables to exclude, and so on.
-func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd {
-	_ = configFile
-	_ = profileName
-	_ = apply
-	return func() tea.Msg {
-		return OutputMsg("analyze: SMT-specific schema analysis lands in a later phase.\n")
-	}
-}
-
-// runStatusCmd is a stub. SMT runs are short and synchronous — there is
-// no in-flight migration to inspect. Use `/history` to see past runs.
-func (m Model) runStatusCmd(configFile, profileName string, detailed bool) tea.Cmd {
-	_ = configFile
-	_ = profileName
-	_ = detailed
-	return func() tea.Msg {
-		return OutputMsg("status: SMT runs are short and synchronous — use `/history` to see past runs.\n")
 	}
 }
 
@@ -1158,6 +932,78 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 				return
 			}
 			p.Send(BoxedOutputMsg(output))
+		}()
+
+		return nil
+	}
+}
+
+func (m Model) runSMTCommandCmd(commandName string, parts []string) tea.Cmd {
+	args := cliBackedCommandArgs(commandName, parts)
+	return func() tea.Msg {
+		p := GetProgramRef()
+		if p == nil {
+			return MigrationDoneMsg{Status: "failed", Message: "Internal error: no program reference"}
+		}
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Panic: %v", r)})
+				}
+			}()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			p.Send(migrationStartedMsg{cancel: cancel})
+			p.Send(OutputMsg(fmt.Sprintf("Running smt %s\n", strings.Join(args, " "))))
+
+			cmd := exec.CommandContext(ctx, os.Args[0], args...)
+			r, w, pipeErr := os.Pipe()
+			if pipeErr != nil {
+				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error creating pipe: %v", pipeErr)})
+				return
+			}
+			cmd.Stdout = w
+			cmd.Stderr = w
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer r.Close()
+
+				buf := make([]byte, 1024)
+				for {
+					n, err := r.Read(buf)
+					if n > 0 {
+						p.Send(OutputMsg(string(buf[:n])))
+					}
+					if err != nil {
+						break
+					}
+				}
+			}()
+
+			err := cmd.Start()
+			if err != nil {
+				w.Close()
+				<-done
+				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("%s failed to start: %v", commandName, err)})
+				return
+			}
+
+			err = cmd.Wait()
+			w.Close()
+			<-done
+
+			switch {
+			case ctx.Err() == context.Canceled:
+				p.Send(MigrationDoneMsg{Status: "cancelled", Message: fmt.Sprintf("%s cancelled", commandName)})
+			case err != nil:
+				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("%s failed: %v", commandName, err)})
+			default:
+				p.Send(MigrationDoneMsg{Status: "completed", Message: fmt.Sprintf("%s completed successfully", commandName)})
+			}
 		}()
 
 		return nil
@@ -1416,383 +1262,37 @@ func (m Model) profileExportCmd(name, outFile string) tea.Cmd {
 	}
 }
 
-// Wizard handling
-
-func (m *Model) handleWizardStep(input string) tea.Cmd {
-	if input != "" {
-		m.appendOutput(styleUserInput.Render("> "+input) + "\n")
-		m.textInput.Reset()
-	} else {
-		m.appendOutput(styleUserInput.Render("  (default)") + "\n")
-	}
-
-	if cmd := m.processWizardInput(input); cmd != nil {
-		return cmd
-	}
-
-	prompt := m.renderWizardPrompt()
-	m.appendOutput(prompt)
-	return nil
-}
-
-func (m *Model) processWizardInput(input string) tea.Cmd {
-	switch m.wizardStep {
-	case stepSourceType:
-		if input != "" {
-			m.wizardData.Source.Type = input
-		}
-		m.wizardStep = stepSourceHost
-	case stepSourceHost:
-		if input != "" {
-			m.wizardData.Source.Host = input
-		}
-		m.wizardStep = stepSourcePort
-	case stepSourcePort:
-		if input != "" {
-			fmt.Sscanf(input, "%d", &m.wizardData.Source.Port)
-		}
-		m.wizardStep = stepSourceDB
-	case stepSourceDB:
-		if input != "" {
-			m.wizardData.Source.Database = input
-		}
-		m.wizardStep = stepSourceUser
-	case stepSourceUser:
-		if input != "" {
-			m.wizardData.Source.User = input
-		}
-		m.wizardStep = stepSourcePass
-	case stepSourcePass:
-		if input != "" {
-			m.wizardData.Source.Password = input
-		}
-		m.wizardStep = stepSourceSSL
-		m.textInput.EchoMode = textinput.EchoNormal
-	case stepSourceSSL:
-		if input != "" {
-			if m.wizardData.Source.Type == "postgres" {
-				m.wizardData.Source.SSLMode = input
-			} else {
-				if strings.ToLower(input) == "y" || strings.ToLower(input) == "yes" || strings.ToLower(input) == "true" {
-					m.wizardData.Source.TrustServerCert = true
-				} else {
-					m.wizardData.Source.TrustServerCert = false
-				}
-			}
-		}
-		m.wizardStep = stepTargetType
-	case stepTargetType:
-		if input != "" {
-			m.wizardData.Target.Type = input
-		}
-		m.wizardStep = stepTargetHost
-	case stepTargetHost:
-		if input != "" {
-			m.wizardData.Target.Host = input
-		}
-		m.wizardStep = stepTargetPort
-	case stepTargetPort:
-		if input != "" {
-			fmt.Sscanf(input, "%d", &m.wizardData.Target.Port)
-		}
-		m.wizardStep = stepTargetDB
-	case stepTargetDB:
-		if input != "" {
-			m.wizardData.Target.Database = input
-		}
-		m.wizardStep = stepTargetUser
-	case stepTargetUser:
-		if input != "" {
-			m.wizardData.Target.User = input
-		}
-		m.wizardStep = stepTargetPass
-	case stepTargetPass:
-		if input != "" {
-			m.wizardData.Target.Password = input
-		}
-		m.wizardStep = stepTargetSSL
-		m.textInput.EchoMode = textinput.EchoNormal
-	case stepTargetSSL:
-		if input != "" {
-			if m.wizardData.Target.Type == "postgres" {
-				m.wizardData.Target.SSLMode = input
-			} else {
-				if strings.ToLower(input) == "y" || strings.ToLower(input) == "yes" || strings.ToLower(input) == "true" {
-					m.wizardData.Target.TrustServerCert = true
-				} else {
-					m.wizardData.Target.TrustServerCert = false
-				}
-			}
-		}
-		m.wizardStep = stepWorkers
-	case stepWorkers:
-		if input != "" {
-			fmt.Sscanf(input, "%d", &m.wizardData.Migration.Workers)
-		}
-		return m.finishWizard()
-	}
-	return nil
-}
-
-func (m *Model) renderWizardPrompt() string {
-	var prompt string
-	switch m.wizardStep {
-	case stepSourceType:
-		def := "mssql"
-		if m.wizardData.Source.Type != "" {
-			def = m.wizardData.Source.Type
-		}
-		prompt = fmt.Sprintf("Source Type (mssql/postgres) [%s]: ", def)
-	case stepSourceHost:
-		prompt = fmt.Sprintf("Source Host [%s]: ", m.wizardData.Source.Host)
-	case stepSourcePort:
-		def := 1433
-		if m.wizardData.Source.Port != 0 {
-			def = m.wizardData.Source.Port
-		}
-		prompt = fmt.Sprintf("Source Port [%d]: ", def)
-	case stepSourceDB:
-		prompt = fmt.Sprintf("Source Database [%s]: ", m.wizardData.Source.Database)
-	case stepSourceUser:
-		prompt = fmt.Sprintf("Source User [%s]: ", m.wizardData.Source.User)
-	case stepSourcePass:
-		prompt = "Source Password [******]: "
-		m.textInput.EchoMode = textinput.EchoPassword
-	case stepSourceSSL:
-		if m.wizardData.Source.Type == "postgres" {
-			def := "require"
-			if m.wizardData.Source.SSLMode != "" {
-				def = m.wizardData.Source.SSLMode
-			}
-			prompt = fmt.Sprintf("Source SSL Mode [%s]: ", def)
-		} else {
-			def := "n"
-			if m.wizardData.Source.TrustServerCert {
-				def = "y"
-			}
-			prompt = fmt.Sprintf("Trust Source Server Certificate? (y/n) [%s]: ", def)
-		}
-	case stepTargetType:
-		def := "postgres"
-		if m.wizardData.Target.Type != "" {
-			def = m.wizardData.Target.Type
-		}
-		prompt = fmt.Sprintf("Target Type (postgres/mssql) [%s]: ", def)
-	case stepTargetHost:
-		prompt = fmt.Sprintf("Target Host [%s]: ", m.wizardData.Target.Host)
-	case stepTargetPort:
-		def := 5432
-		if m.wizardData.Target.Port != 0 {
-			def = m.wizardData.Target.Port
-		}
-		prompt = fmt.Sprintf("Target Port [%d]: ", def)
-	case stepTargetDB:
-		prompt = fmt.Sprintf("Target Database [%s]: ", m.wizardData.Target.Database)
-	case stepTargetUser:
-		prompt = fmt.Sprintf("Target User [%s]: ", m.wizardData.Target.User)
-	case stepTargetPass:
-		prompt = "Target Password [******]: "
-		m.textInput.EchoMode = textinput.EchoPassword
-	case stepTargetSSL:
-		if m.wizardData.Target.Type == "postgres" {
-			def := "require"
-			if m.wizardData.Target.SSLMode != "" {
-				def = m.wizardData.Target.SSLMode
-			}
-			prompt = fmt.Sprintf("Target SSL Mode [%s]: ", def)
-		} else {
-			def := "n"
-			if m.wizardData.Target.TrustServerCert {
-				def = "y"
-			}
-			prompt = fmt.Sprintf("Trust Target Server Certificate? (y/n) [%s]: ", def)
-		}
-	case stepWorkers:
-		def := 8
-		if m.wizardData.Migration.Workers != 0 {
-			def = m.wizardData.Migration.Workers
-		}
-		prompt = fmt.Sprintf("Parallel Workers [%d]: ", def)
-	}
-	return prompt
-}
-
-func (m *Model) finishWizard() tea.Cmd {
-	return func() tea.Msg {
-		if m.wizardData.Source.Type == "" {
-			m.wizardData.Source.Type = "mssql"
-		}
-		if m.wizardData.Target.Type == "" {
-			m.wizardData.Target.Type = "postgres"
-		}
-		if m.wizardData.Migration.Workers == 0 {
-			m.wizardData.Migration.Workers = 8
-		}
-
-		data, err := yaml.Marshal(m.wizardData)
-		if err != nil {
-			return WizardFinishedMsg{Err: fmt.Errorf("generating config: %w", err)}
-		}
-
-		filename := m.wizardFile
-		if filename == "" {
-			filename = "config.yaml"
-		}
-
-		if err := os.WriteFile(filename, data, 0600); err != nil {
-			return WizardFinishedMsg{Err: fmt.Errorf("saving %s: %w", filename, err)}
-		}
-
-		return WizardFinishedMsg{Message: fmt.Sprintf("Configuration saved to %s!\nYou can now run the migration with /run @%s", filename, filename)}
-	}
-}
-
-// Setup wizard handling
-
-func (m *Model) handleSetupStep(input string) tea.Cmd {
-	info := m.setupState.Prompt()
-
-	// Display input (masked or normal)
-	if input != "" {
-		if info.IsMasked {
-			m.appendOutput(styleUserInput.Render("  ******") + "\n")
-		} else {
-			m.appendOutput(styleUserInput.Render("> "+input) + "\n")
-		}
-		m.textInput.Reset()
-	} else {
-		m.appendOutput(styleUserInput.Render("  (default)") + "\n")
-	}
-
-	// Reset echo mode
-	m.textInput.EchoMode = textinput.EchoNormal
-
-	if errMsg := m.setupState.Process(input); errMsg != "" {
-		m.appendOutput(styleError.Render("  "+errMsg) + "\n")
-		// Re-render prompt
-		m.renderSetupPrompt()
-		return nil
-	}
-
-	// Process any following auto steps
-	return m.processSetupAutoSteps()
-}
-
-func (m *Model) processSetupAutoSteps() tea.Cmd {
-	for {
-		if m.setupState.CurrentStep == setup.StepDone {
-			msg := fmt.Sprintf("Setup complete! Configuration saved to %s\nYou can now run the migration with /run @%s", m.setupState.ConfigPath, m.setupState.ConfigPath)
-			wizardDone := func() tea.Msg {
-				return WizardFinishedMsg{Message: msg}
-			}
-			if m.setupState.RunAnalysis {
-				configPath := m.setupState.ConfigPath
-				return tea.Batch(wizardDone, m.runAnalyzeCmd(configPath, "", false))
-			}
-			return wizardDone
-		}
-
-		info := m.setupState.Prompt()
-
-		if !info.IsAutoAction {
-			// Show section header and prompt
-			m.renderSetupPrompt()
-			return nil
-		}
-
-		// Handle auto steps
-		switch m.setupState.CurrentStep {
-		case setup.StepCheckSecrets:
-			if info.SectionHeader != "" {
-				m.appendOutput(fmt.Sprintf("\n=== %s ===\n", info.SectionHeader))
-			}
-			result := setup.CheckExistingSecrets()
-			if result == "has_ai" {
-				m.appendOutput(styleSuccess.Render("  AI provider already configured, skipping AI setup") + "\n")
-			}
-			m.setupState.Process(result)
-
-		case setup.StepWriteSecrets:
-			if err := m.setupState.WriteSecretsFile(); err != nil {
-				errMsg := m.setupState.Process(err.Error())
-				m.appendOutput(styleError.Render(fmt.Sprintf("  %s", errMsg)) + "\n")
-				m.renderSetupPrompt()
-				return nil
-			}
-			m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Secrets saved to %s", secrets.GetSecretsPath())) + "\n")
-			m.setupState.Process("")
-
-		case setup.StepSourceConnTest, setup.StepTargetConnTest:
-			if info.SectionHeader != "" {
-				m.appendOutput(fmt.Sprintf("\n=== %s ===\n", info.SectionHeader))
-			}
-			m.appendOutput(styleSystemOutput.Render("  "+info.Text) + "\n")
-			// Launch async connection test
-			return m.runSetupConnTest(m.setupState.CurrentStep)
-
-		case setup.StepWriteConfig:
-			if err := m.setupState.WriteConfigFile(); err != nil {
-				errMsg := m.setupState.Process(err.Error())
-				m.appendOutput(styleError.Render(fmt.Sprintf("  %s", errMsg)) + "\n")
-				m.renderSetupPrompt()
-				return nil
-			}
-			m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Configuration saved to %s", m.setupState.ConfigPath)) + "\n")
-			m.setupState.Process("")
-
-		default:
-			// Unknown auto step, skip it
-			m.setupState.Process("")
-		}
-	}
-}
-
-func (m *Model) renderSetupPrompt() {
-	info := m.setupState.Prompt()
-
-	if info.SectionHeader != "" {
-		m.appendOutput(fmt.Sprintf("\n=== %s ===\n", info.SectionHeader))
-	}
-
-	prompt := info.Text
-	if info.Default != "" {
-		prompt += fmt.Sprintf(" [%s]", info.Default)
-	}
-	prompt += ": "
-	m.appendOutput(prompt)
-
-	if info.IsMasked {
-		m.textInput.EchoMode = textinput.EchoPassword
-	} else {
-		m.textInput.EchoMode = textinput.EchoNormal
-	}
-}
-
-func (m *Model) runSetupConnTest(step setup.Step) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
-		var result *setup.ConnTestResult
-		if step == setup.StepSourceConnTest {
-			result = setup.TestConnection(ctx,
-				m.setupState.Config.Source.Type, m.setupState.Config.Source.Host,
-				m.setupState.Config.Source.Port, m.setupState.Config.Source.Database,
-				m.setupState.Config.Source.User, m.setupState.Config.Source.Password,
-				m.setupState.Config.Source.DSNOptions())
-		} else {
-			result = setup.TestConnection(ctx,
-				m.setupState.Config.Target.Type, m.setupState.Config.Target.Host,
-				m.setupState.Config.Target.Port, m.setupState.Config.Target.Database,
-				m.setupState.Config.Target.User, m.setupState.Config.Target.Password,
-				m.setupState.Config.Target.DSNOptions())
-		}
-
-		return SetupConnTestMsg{Step: step, Result: result}
-	}
-}
-
 // Helper functions
+
+func cliBackedCommandArgs(commandName string, parts []string) []string {
+	configFile := ""
+	profileName := ""
+	commandArgs := make([]string, 0, len(parts))
+
+	for i := 1; i < len(parts); i++ {
+		arg := parts[i]
+		switch {
+		case strings.HasPrefix(arg, "@"):
+			configFile = arg[1:]
+		case arg == "--profile" && i+1 < len(parts):
+			profileName = parts[i+1]
+			i++
+		default:
+			commandArgs = append(commandArgs, arg)
+		}
+	}
+
+	args := make([]string, 0, 1+len(commandArgs)+4)
+	if configFile != "" {
+		args = append(args, "--config", configFile)
+	}
+	if profileName != "" {
+		args = append(args, "--profile", profileName)
+	}
+	args = append(args, commandName)
+	args = append(args, commandArgs...)
+	return args
+}
 
 func parseConfigArgs(parts []string) (string, string) {
 	configFile := "config.yaml"
@@ -1843,60 +1343,6 @@ func parseHistoryArgs(parts []string) (string, string, string) {
 	}
 
 	return configFile, profileName, runID
-}
-
-func parseStatusArgs(parts []string) (string, string, bool) {
-	configFile := "config.yaml"
-	profileName := ""
-	detailed := false
-
-	for i := 1; i < len(parts); i++ {
-		arg := parts[i]
-		switch arg {
-		case "--detailed", "-d":
-			detailed = true
-		case "--profile":
-			if i+1 < len(parts) {
-				profileName = parts[i+1]
-				i++
-			}
-		default:
-			if strings.HasPrefix(arg, "@") {
-				configFile = arg[1:]
-			} else {
-				configFile = arg
-			}
-		}
-	}
-
-	return configFile, profileName, detailed
-}
-
-func parseAnalyzeArgs(parts []string) (string, string, bool) {
-	configFile := "config.yaml"
-	profileName := ""
-	apply := false
-
-	for i := 1; i < len(parts); i++ {
-		arg := parts[i]
-		switch arg {
-		case "--apply", "-a":
-			apply = true
-		case "--profile":
-			if i+1 < len(parts) {
-				profileName = parts[i+1]
-				i++
-			}
-		default:
-			if strings.HasPrefix(arg, "@") {
-				configFile = arg[1:]
-			} else {
-				configFile = arg
-			}
-		}
-	}
-
-	return configFile, profileName, apply
 }
 
 func parseProfileSaveArgs(parts []string) (string, string) {
