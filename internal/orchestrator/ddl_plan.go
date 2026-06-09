@@ -21,8 +21,9 @@ import (
 // GenerateDDL renders the full create-schema plan without opening or applying
 // to a target database. The target block is treated as a dialect descriptor:
 // target.type and target.schema influence the SQL, while host/database/user are
-// only needed by apply paths.
-func (o *Orchestrator) GenerateDDL(ctx context.Context) (schemadiff.Plan, string, error) {
+// only needed by apply paths. If outputPath is non-empty, it is written before
+// the run is marked successful.
+func (o *Orchestrator) GenerateDDL(ctx context.Context, outputPath string) (schemadiff.Plan, string, error) {
 	runID := o.opts.RunID
 	if runID == "" {
 		runID = uuid.NewString()
@@ -42,9 +43,18 @@ func (o *Orchestrator) GenerateDDL(ctx context.Context) (schemadiff.Plan, string
 		return schemadiff.Plan{}, runID, err
 	}
 
-	if err := o.writeSQLArtifact(runID, "schema.sql", plan.SQL()); err != nil {
+	sql := plan.SQL()
+	if err := o.writeSQLArtifact(runID, "schema.sql", sql); err != nil {
 		_ = o.state.CompleteRun(runID, "failed", err.Error())
+		_ = o.notifier.MigrationFailed(runID, err, time.Since(start))
 		return schemadiff.Plan{}, runID, fmt.Errorf("writing DDL artifact: %w", err)
+	}
+	if strings.TrimSpace(outputPath) != "" {
+		if err := os.WriteFile(outputPath, []byte(sql), 0600); err != nil {
+			_ = o.state.CompleteRun(runID, "failed", err.Error())
+			_ = o.notifier.MigrationFailed(runID, err, time.Since(start))
+			return schemadiff.Plan{}, runID, fmt.Errorf("writing output file: %w", err)
+		}
 	}
 
 	dur := time.Since(start)

@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/urfave/cli/v2"
 
+	"smt/internal/config"
+	"smt/internal/driver"
 	"smt/internal/orchestrator"
 )
 
@@ -44,6 +47,9 @@ func runCreate(c *cli.Context) error {
 	}
 
 	if !c.Bool("apply") {
+		if err := validateCreateSupport(cfg, false); err != nil {
+			return err
+		}
 		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
 			StateFile:  c.String("state-file"),
 			SourceOnly: true,
@@ -57,12 +63,9 @@ func runCreate(c *cli.Context) error {
 		ctx, cancel := withSignalCancel(context.Background(), c.Duration("shutdown-timeout"))
 		defer cancel()
 
-		plan, runID, err := orch.GenerateDDL(ctx)
-		if err != nil {
-			return err
-		}
 		out := c.String("out")
-		if err := os.WriteFile(out, []byte(plan.SQL()), 0600); err != nil {
+		plan, runID, err := orch.GenerateDDL(ctx, out)
+		if err != nil {
 			return err
 		}
 		fmt.Printf("%d statement(s) written to %s for review.\n", len(plan.Statements), out)
@@ -71,6 +74,9 @@ func runCreate(c *cli.Context) error {
 		return nil
 	}
 
+	if err := validateCreateSupport(cfg, true); err != nil {
+		return err
+	}
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
 		StateFile: c.String("state-file"),
 	})
@@ -84,6 +90,31 @@ func runCreate(c *cli.Context) error {
 	defer cancel()
 
 	return orch.Run(ctx)
+}
+
+func validateCreateSupport(cfg *config.Config, apply bool) error {
+	targetType := canonicalCreateTargetType(cfg.Target.Type)
+	if !apply {
+		if cfg.SchemaGeneration.Mode == driver.SchemaGenerationAI {
+			return fmt.Errorf("smt create without --apply writes deterministic DDL only; schema_generation.mode: ai is only supported by --apply")
+		}
+		if targetType != "postgres" {
+			return fmt.Errorf("smt create without --apply currently supports deterministic DDL for postgres targets only; %s target renderer is tracked in issue #75", targetType)
+		}
+		return nil
+	}
+
+	if cfg.SchemaGeneration.Mode != driver.SchemaGenerationAI && targetType != "postgres" {
+		return fmt.Errorf("smt create --apply with deterministic DDL currently supports postgres targets only; %s target renderer is tracked in issue #75; set schema_generation.mode: ai only if you need the legacy apply path before deterministic coverage lands", targetType)
+	}
+	return nil
+}
+
+func canonicalCreateTargetType(dbType string) string {
+	if d, err := driver.Get(dbType); err == nil {
+		return d.Name()
+	}
+	return strings.ToLower(strings.TrimSpace(dbType))
 }
 
 // healthCheckCommand defines `smt health-check`: open both connections,
