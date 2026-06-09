@@ -1242,7 +1242,8 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 		normalized := driver.NormalizeIdentifier(canonicalTarget(target), col.Name)
 		// Cheap pre-check: the patterns below can only match if the column
 		// name appears in the expression at all.
-		if !containsFold(out, col.Name) && !containsFold(out, normalized) {
+		lowerOut := strings.ToLower(out)
+		if !strings.Contains(lowerOut, strings.ToLower(col.Name)) && !strings.Contains(lowerOut, strings.ToLower(normalized)) {
 			continue
 		}
 		identifiers := []struct {
@@ -1253,18 +1254,21 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 			{`\b` + regexp.QuoteMeta(normalized) + `\b`, normalized},
 			{regexp.QuoteMeta(quote(normalized)), quote(normalized)},
 		}
+		// Compiled per use, not cached: these patterns derive from schema
+		// column names, so caching them would grow without bound across
+		// schemas in long-lived processes. The pre-check above keeps this
+		// path rare.
 		for _, ident := range identifiers {
-			out = cachedRegexp(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, true))
-			out = cachedRegexp(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, false))
+			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, true))
+			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, false))
 		}
 	}
 	return out
 }
 
-func containsFold(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
-}
-
+// cachedRegexp caches compiled patterns. Only call it with patterns drawn
+// from a bounded set (e.g. the static function-name rewrites) — schema-derived
+// patterns would grow the cache without bound.
 func cachedRegexp(pattern string) *regexp.Regexp {
 	cached, ok := ciPatternCache.Load(pattern)
 	if !ok {

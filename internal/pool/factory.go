@@ -42,6 +42,7 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 //   - cfg: Target database configuration (includes chunk_size for batch operations)
 //   - maxConns: Maximum number of connections in the pool
 //   - sourceType: Source database type for cross-engine type handling
+//   - unknownTypePolicy: deterministic handling of unsupported source types (fail/warn/text_fallback)
 //   - typeMapper: optional AI reviewer fallback
 //   - verifierTypeMapper: optional explicit AI reviewer
 func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, unknownTypePolicy string, typeMapper driver.TypeMapper, verifierTypeMapper driver.TypeMapper) (TargetPool, error) {
