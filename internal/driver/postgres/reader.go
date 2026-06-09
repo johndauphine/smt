@@ -259,6 +259,7 @@ func (r *Reader) loadColumnsSQL(ctx context.Context) string {
 			COALESCE(character_maximum_length, 0),
 			COALESCE(numeric_precision, 0),
 			COALESCE(numeric_scale, 0),
+			COALESCE(datetime_precision, -1),
 			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
 			CASE WHEN is_identity = 'YES' OR column_default LIKE 'nextval%' THEN true ELSE false END,
 			ordinal_position,
@@ -276,6 +277,7 @@ func (r *Reader) loadColumnsSQL(ctx context.Context) string {
 			COALESCE(character_maximum_length, 0),
 			COALESCE(numeric_precision, 0),
 			COALESCE(numeric_scale, 0),
+			COALESCE(datetime_precision, -1),
 			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
 			CASE WHEN is_identity = 'YES' OR column_default LIKE 'nextval%' THEN true ELSE false END,
 			ordinal_position,
@@ -293,6 +295,7 @@ func (r *Reader) loadColumnsSQL(ctx context.Context) string {
 			COALESCE(character_maximum_length, 0),
 			COALESCE(numeric_precision, 0),
 			COALESCE(numeric_scale, 0),
+			COALESCE(datetime_precision, -1),
 			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
 			CASE WHEN column_default LIKE 'nextval%' THEN true ELSE false END,
 			ordinal_position,
@@ -339,10 +342,15 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 
 	for rows.Next() {
 		var c driver.Column
+		var dtPrecision int
 		if err := rows.Scan(&c.Name, &c.DataType, &c.MaxLength, &c.Precision, &c.Scale,
-			&c.IsNullable, &c.IsIdentity, &c.OrdinalPos,
+			&dtPrecision, &c.IsNullable, &c.IsIdentity, &c.OrdinalPos,
 			&c.DefaultExpression, &c.IsComputed, &c.ComputedExpression); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
+		}
+		if dtPrecision >= 0 {
+			p := dtPrecision
+			c.DatetimePrecision = &p
 		}
 		// PG generated columns are always STORED; reflect that.
 		if c.IsComputed {

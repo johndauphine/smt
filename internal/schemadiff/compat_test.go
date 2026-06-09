@@ -225,3 +225,38 @@ func TestOrderTablesForDrop_SelfReferenceIsNotACycle(t *testing.T) {
 		t.Fatalf("self-reference treated as cycle: %+v", actions)
 	}
 }
+
+func intp(v int) *int { return &v }
+
+// #88/#78 — pre-v3 snapshots lack DatetimePrecision; backfill prevents
+// spurious diffs, while v3 snapshots still detect real fsp changes.
+func TestCompute_DatetimePrecisionVersioning(t *testing.T) {
+	oldSnap := Snapshot{
+		Version: 2,
+		Tables: []driver.Table{{
+			Name:    "events",
+			Columns: []driver.Column{{Name: "at", DataType: "datetime"}},
+		}},
+	}
+	curr := Snapshot{
+		Version: CurrentSnapshotVersion,
+		Tables: []driver.Table{{
+			Name:    "events",
+			Columns: []driver.Column{{Name: "at", DataType: "datetime", DatetimePrecision: intp(3)}},
+		}},
+	}
+	if d := Compute(oldSnap, curr); !d.IsEmpty() {
+		t.Fatalf("v2 snapshot produced spurious fsp diff: %+v", d.ChangedTables)
+	}
+
+	prev := Snapshot{
+		Version: CurrentSnapshotVersion,
+		Tables: []driver.Table{{
+			Name:    "events",
+			Columns: []driver.Column{{Name: "at", DataType: "datetime", DatetimePrecision: intp(0)}},
+		}},
+	}
+	if d := Compute(prev, curr); len(d.ChangedTables) != 1 {
+		t.Fatalf("real fsp change not detected: %+v", d)
+	}
+}

@@ -329,6 +329,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			COALESCE(CHARACTER_MAXIMUM_LENGTH, 0),
 			COALESCE(NUMERIC_PRECISION, 0),
 			COALESCE(NUMERIC_SCALE, 0),
+			COALESCE(DATETIME_PRECISION, -1),
 			CASE WHEN IS_NULLABLE = 'YES' THEN true ELSE false END,
 			CASE WHEN EXTRA LIKE '%auto_increment%' THEN true ELSE false END,
 			ORDINAL_POSITION,
@@ -347,10 +348,15 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var c driver.Column
 		var columnType, extra, generationExpr string
+		var dtPrecision int
 		if err := rows.Scan(&c.Name, &c.DataType, &columnType, &c.MaxLength, &c.Precision, &c.Scale,
-			&c.IsNullable, &c.IsIdentity, &c.OrdinalPos,
+			&dtPrecision, &c.IsNullable, &c.IsIdentity, &c.OrdinalPos,
 			&c.DefaultExpression, &extra, &generationExpr); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
+		}
+		if dtPrecision >= 0 {
+			p := dtPrecision
+			c.DatetimePrecision = &p
 		}
 		if strings.EqualFold(c.DataType, "enum") || strings.EqualFold(c.DataType, "set") {
 			values, err := parseEnumSetValues(columnType)
