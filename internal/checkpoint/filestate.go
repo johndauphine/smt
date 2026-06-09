@@ -86,8 +86,10 @@ func (fs *FileState) save() error {
 	return nil
 }
 
-// CreateRun initializes a new migration run.
-func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error {
+// CreateRun initializes a new migration run. The file backend does not
+// surface run history, so kind is accepted for interface parity only.
+func (fs *FileState) CreateRun(id, kind, sourceSchema, targetSchema string, config any, profileName, configPath string) error {
+	_ = kind
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 

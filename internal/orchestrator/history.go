@@ -23,11 +23,11 @@ func (o *Orchestrator) ShowHistory() error {
 		return nil
 	}
 
-	fmt.Printf("%-36s %-10s %-19s %-19s %s\n", "RUN ID", "STATUS", "STARTED", "ENDED", "PHASE")
-	fmt.Println(strings.Repeat("-", 105))
+	fmt.Printf("%-36s %-9s %-10s %-19s %-19s %s\n", "RUN ID", "KIND", "STATUS", "STARTED", "ENDED", "PHASE")
+	fmt.Println(strings.Repeat("-", 115))
 	for _, r := range runs {
-		fmt.Printf("%-36s %-10s %-19s %-19s %s\n",
-			r.ID, r.Status, fmtTime(&r.StartedAt), fmtTime(r.CompletedAt), r.Phase)
+		fmt.Printf("%-36s %-9s %-10s %-19s %-19s %s\n",
+			r.ID, runKindLabel(r.Kind), r.Status, fmtTime(&r.StartedAt), fmtTime(r.CompletedAt), r.Phase)
 	}
 	return nil
 }
@@ -43,6 +43,7 @@ func (o *Orchestrator) ShowRunDetails(runID string) error {
 		return nil
 	}
 	fmt.Printf("Run:        %s\n", r.ID)
+	fmt.Printf("Kind:       %s\n", runKindLabel(r.Kind))
 	fmt.Printf("Status:     %s\n", r.Status)
 	fmt.Printf("Phase:      %s\n", r.Phase)
 	fmt.Printf("Source:     %s\n", r.SourceSchema)
@@ -65,6 +66,13 @@ func (o *Orchestrator) ShowRunDetails(runID string) error {
 		fmt.Printf("  %-30s %s\n", t.TaskKey, t.Status)
 	}
 	return nil
+}
+
+func runKindLabel(kind string) string {
+	if kind == "" {
+		return checkpoint.RunKindApply
+	}
+	return kind
 }
 
 func fmtTime(t *time.Time) string {

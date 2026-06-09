@@ -22,7 +22,7 @@ func TestCleanupOldRuns(t *testing.T) {
 	running := "running"
 
 	for _, runID := range []string{oldSuccess, oldFailed, recentSuccess, running} {
-		if err := state.CreateRun(runID, "dbo", "public", map[string]string{"run": runID}, "", ""); err != nil {
+		if err := state.CreateRun(runID, RunKindApply, "dbo", "public", map[string]string{"run": runID}, "", ""); err != nil {
 			t.Fatalf("CreateRun(%s) error: %v", runID, err)
 		}
 	}
@@ -313,7 +313,7 @@ func TestAIAdjustmentsLimitZeroReturnsAll(t *testing.T) {
 	defer state.Close()
 
 	// Create a run to attach adjustments to
-	if err := state.CreateRun("test-run", "dbo", "public", "", "", ""); err != nil {
+	if err := state.CreateRun("test-run", RunKindApply, "dbo", "public", "", "", ""); err != nil {
 		t.Fatalf("CreateRun error: %v", err)
 	}
 
@@ -429,7 +429,7 @@ func TestUpdateRunConfig(t *testing.T) {
 
 	const runID = "run-update-config"
 	original := map[string]any{"workers": 12, "chunk_size": 113510}
-	if err := state.CreateRun(runID, "dbo", "public", original, "", ""); err != nil {
+	if err := state.CreateRun(runID, RunKindApply, "dbo", "public", original, "", ""); err != nil {
 		t.Fatalf("CreateRun error: %v", err)
 	}
 
@@ -466,7 +466,7 @@ func TestCountPartitionTasks(t *testing.T) {
 	defer state.Close()
 
 	runID := "test-run"
-	if err := state.CreateRun(runID, "public", "public", nil, "", ""); err != nil {
+	if err := state.CreateRun(runID, RunKindApply, "public", "public", nil, "", ""); err != nil {
 		t.Fatalf("CreateRun() error: %v", err)
 	}
 
