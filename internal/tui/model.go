@@ -1268,15 +1268,28 @@ func cliBackedCommandArgs(commandName string, parts []string) []string {
 	configFile := ""
 	profileName := ""
 	commandArgs := make([]string, 0, len(parts))
+	expectingCommandValue := false
 
 	for i := 1; i < len(parts); i++ {
 		arg := parts[i]
+		if expectingCommandValue {
+			commandArgs = append(commandArgs, arg)
+			expectingCommandValue = false
+			continue
+		}
 		switch {
 		case strings.HasPrefix(arg, "@"):
 			configFile = arg[1:]
 		case arg == "--profile" && i+1 < len(parts):
 			profileName = parts[i+1]
 			i++
+		case cliBackedCommandValueFlag(arg):
+			commandArgs = append(commandArgs, arg)
+			expectingCommandValue = !strings.Contains(arg, "=")
+		case strings.HasPrefix(arg, "-"):
+			commandArgs = append(commandArgs, arg)
+		case configFile == "":
+			configFile = arg
 		default:
 			commandArgs = append(commandArgs, arg)
 		}
@@ -1292,6 +1305,19 @@ func cliBackedCommandArgs(commandName string, parts []string) []string {
 	args = append(args, commandName)
 	args = append(args, commandArgs...)
 	return args
+}
+
+func cliBackedCommandValueFlag(arg string) bool {
+	flagName := arg
+	if idx := strings.Index(flagName, "="); idx >= 0 {
+		flagName = flagName[:idx]
+	}
+	switch flagName {
+	case "--out", "-o", "--source-schema", "--target-schema":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseConfigArgs(parts []string) (string, string) {
