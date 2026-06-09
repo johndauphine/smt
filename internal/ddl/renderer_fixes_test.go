@@ -228,3 +228,24 @@ func TestComputedColumn_MySQLStringConcatStillRewritten(t *testing.T) {
 		t.Fatalf("string concat not rewritten: %q", got)
 	}
 }
+
+// #100 — pg's timestamptz udt_name is TZ-aware and must land as
+// DATETIMEOFFSET on mssql targets, not naive DATETIME2.
+func TestColumnType_TimestamptzKeepsTZClassOnMSSQL(t *testing.T) {
+	r, _ := NewRenderer("mssql", "dbo", "fail")
+	p := 6
+	got, err := r.ColumnType(driver.Column{Name: "created_at", DataType: "timestamptz", DatetimePrecision: &p})
+	if err != nil {
+		t.Fatalf("ColumnType: %v", err)
+	}
+	if got != "DATETIMEOFFSET(6)" {
+		t.Fatalf("timestamptz = %q, want DATETIMEOFFSET(6)", got)
+	}
+	naive, err := r.ColumnType(driver.Column{Name: "created_at", DataType: "timestamp without time zone"})
+	if err != nil {
+		t.Fatalf("ColumnType: %v", err)
+	}
+	if naive != "DATETIME2" {
+		t.Fatalf("naive timestamp = %q, want DATETIME2", naive)
+	}
+}

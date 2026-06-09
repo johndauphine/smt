@@ -586,9 +586,9 @@ func (r Renderer) mssqlColumnType(col driver.Column, dt string) (string, error) 
 		return sizedType("NVARCHAR", setStringLength(col), "255"), nil
 	case "rowversion":
 		return "ROWVERSION", nil
-	case "datetime", "datetime2", "smalldatetime", "timestamp", "timestamp without time zone", "timestamptz":
+	case "datetime", "datetime2", "smalldatetime", "timestamp", "timestamp without time zone":
 		return fspType("DATETIME2", col, 7), nil
-	case "datetimeoffset", "timestamp with time zone":
+	case "datetimeoffset", "timestamptz", "timestamp with time zone":
 		return fspType("DATETIMEOFFSET", col, 7), nil
 	case "date":
 		return "DATE", nil
