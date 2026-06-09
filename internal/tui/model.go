@@ -959,11 +959,42 @@ func (m Model) runSMTCommandCmd(commandName string, parts []string) tea.Cmd {
 			p.Send(OutputMsg(fmt.Sprintf("Running smt %s\n", strings.Join(args, " "))))
 
 			cmd := exec.CommandContext(ctx, os.Args[0], args...)
-			output, err := cmd.CombinedOutput()
-			text := string(output)
-			if strings.TrimSpace(text) != "" {
-				p.Send(BoxedOutputMsg(text))
+			r, w, pipeErr := os.Pipe()
+			if pipeErr != nil {
+				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error creating pipe: %v", pipeErr)})
+				return
 			}
+			cmd.Stdout = w
+			cmd.Stderr = w
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer r.Close()
+
+				buf := make([]byte, 1024)
+				for {
+					n, err := r.Read(buf)
+					if n > 0 {
+						p.Send(OutputMsg(string(buf[:n])))
+					}
+					if err != nil {
+						break
+					}
+				}
+			}()
+
+			err := cmd.Start()
+			if err != nil {
+				w.Close()
+				<-done
+				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("%s failed to start: %v", commandName, err)})
+				return
+			}
+
+			err = cmd.Wait()
+			w.Close()
+			<-done
 
 			switch {
 			case ctx.Err() == context.Canceled:
