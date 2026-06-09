@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"smt/internal/checkpoint"
 	"smt/internal/ddl"
 	"smt/internal/driver"
 	"smt/internal/logging"
@@ -29,37 +30,35 @@ func (o *Orchestrator) GenerateDDL(ctx context.Context, outputPath string) (sche
 		runID = uuid.NewString()
 	}
 
-	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
+	if err := o.state.CreateRun(runID, checkpoint.RunKindGenerate, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return schemadiff.Plan{}, "", fmt.Errorf("recording run start: %w", err)
 	}
 
+	// Generate-only runs intentionally skip Slack notifications: nothing was
+	// executed against a target, and a "Migration started/completed" ping for
+	// every preview misleads operators (#90).
 	start := time.Now()
-	_ = o.notifier.MigrationStarted(runID, o.config.Source.Type, o.config.Target.Type, 0)
 
 	plan, err := o.renderDDLPlan(ctx, runID)
 	if err != nil {
 		_ = o.state.CompleteRun(runID, "failed", err.Error())
-		_ = o.notifier.MigrationFailed(runID, err, time.Since(start))
 		return schemadiff.Plan{}, runID, err
 	}
 
 	sql := plan.SQL()
 	if err := o.writeSQLArtifact(runID, "schema.sql", sql); err != nil {
 		_ = o.state.CompleteRun(runID, "failed", err.Error())
-		_ = o.notifier.MigrationFailed(runID, err, time.Since(start))
 		return schemadiff.Plan{}, runID, fmt.Errorf("writing DDL artifact: %w", err)
 	}
 	if strings.TrimSpace(outputPath) != "" {
 		if err := os.WriteFile(outputPath, []byte(sql), 0600); err != nil {
 			_ = o.state.CompleteRun(runID, "failed", err.Error())
-			_ = o.notifier.MigrationFailed(runID, err, time.Since(start))
 			return schemadiff.Plan{}, runID, fmt.Errorf("writing output file: %w", err)
 		}
 	}
 
 	dur := time.Since(start)
 	_ = o.state.CompleteRun(runID, "success", "")
-	_ = o.notifier.MigrationCompleted(runID, start, dur, len(o.tables), 0, 0)
 	logging.Info("DDL generation complete in %s (%d tables)", dur.Round(time.Millisecond), len(o.tables))
 	return plan, runID, nil
 }

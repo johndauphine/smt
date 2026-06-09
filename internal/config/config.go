@@ -962,6 +962,12 @@ func (c *Config) validate() error {
 	if !isValidDriverType(c.Target.Type) {
 		return fmt.Errorf("target.type '%s' is not a valid driver type (supported: %v)", c.Target.Type, availableDriverTypes())
 	}
+	// A target with exactly one of host/database set is a typo, not a
+	// deliberate DDL-only config. Fail at load instead of silently running
+	// source-only and reporting the system healthy (#91).
+	if (strings.TrimSpace(c.Target.Host) != "") != (strings.TrimSpace(c.Target.Database) != "") {
+		return fmt.Errorf("target.host and target.database must both be set (or both omitted for DDL-only mode)")
+	}
 
 	// Same-engine migration validation: prevent migration to the exact same database
 	// Compare canonical driver names to handle aliases (e.g., "mssql" == "sqlserver")

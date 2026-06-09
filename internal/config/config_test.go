@@ -1469,3 +1469,44 @@ func TestBooleanGlobalDefaultsDocumentedLimitation(t *testing.T) {
 	// Document this is a known limitation, not a bug
 	t.Log("Known limitation: cannot override global 'true' to 'false' per-migration")
 }
+
+// #91 — a target with exactly one of host/database set is a typo, not a
+// DDL-only config; it must fail at load instead of silently running
+// source-only.
+func TestValidateRejectsPartialTargetConnection(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Source: SourceConfig{
+				Type:     "mssql",
+				Host:     "localhost",
+				Database: "source",
+			},
+			Target: TargetConfig{
+				Type:   "postgres",
+				Schema: "public",
+			},
+			Migration: MigrationConfig{
+				TargetMode: "drop_recreate",
+			},
+		}
+	}
+
+	hostOnly := base()
+	hostOnly.Target.Host = "pg.example.com"
+	if err := hostOnly.validate(); err == nil {
+		t.Fatal("validate() accepted target.host without target.database")
+	}
+
+	dbOnly := base()
+	dbOnly.Target.Database = "targetdb"
+	if err := dbOnly.validate(); err == nil {
+		t.Fatal("validate() accepted target.database without target.host")
+	}
+
+	both := base()
+	both.Target.Host = "pg.example.com"
+	both.Target.Database = "targetdb"
+	if err := both.validate(); err != nil {
+		t.Fatalf("validate() rejected complete target connection: %v", err)
+	}
+}

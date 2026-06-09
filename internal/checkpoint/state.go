@@ -38,6 +38,7 @@ type Task struct {
 // Run represents a migration run
 type Run struct {
 	ID           string
+	Kind         string // "apply" (executed DDL on a target) or "generate" (preview only)
 	StartedAt    time.Time
 	CompletedAt  *time.Time
 	Status       string
@@ -124,6 +125,7 @@ func (s *State) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS runs (
 		id TEXT PRIMARY KEY,
+		kind TEXT NOT NULL DEFAULT 'apply',
 		started_at TEXT NOT NULL,
 		completed_at TEXT,
 		status TEXT NOT NULL DEFAULT 'running',
@@ -268,6 +270,7 @@ func (s *State) ensureRunColumns() error {
 	needsError := true
 	needsPhase := true
 	needsConfigHash := true
+	needsKind := true
 	for _, col := range columns {
 		switch col {
 		case "profile_name":
@@ -280,6 +283,8 @@ func (s *State) ensureRunColumns() error {
 			needsPhase = false
 		case "config_hash":
 			needsConfigHash = false
+		case "kind":
+			needsKind = false
 		}
 	}
 
@@ -305,6 +310,11 @@ func (s *State) ensureRunColumns() error {
 	}
 	if needsConfigHash {
 		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_hash TEXT`); err != nil {
+			return err
+		}
+	}
+	if needsKind {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'apply'`); err != nil {
 			return err
 		}
 	}
@@ -481,17 +491,20 @@ func (s *State) Close() error {
 }
 
 // CreateRun creates a new migration run
-func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error {
+func (s *State) CreateRun(id, kind, sourceSchema, targetSchema string, config any, profileName, configPath string) error {
 	configJSON, _ := json.Marshal(config)
 
 	// Compute config hash for change detection on resume (matches filestate behavior)
 	hash := sha256.Sum256(configJSON)
 	configHash := hex.EncodeToString(hash[:8])
 
+	if kind == "" {
+		kind = RunKindApply
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO runs (id, started_at, status, source_schema, target_schema, config, profile_name, config_path, config_hash)
-		VALUES (?, datetime('now'), 'running', ?, ?, ?, ?, ?, ?)
-	`, id, sourceSchema, targetSchema, string(configJSON), profileName, configPath, configHash)
+		INSERT INTO runs (id, kind, started_at, status, source_schema, target_schema, config, profile_name, config_path, config_hash)
+		VALUES (?, ?, datetime('now'), 'running', ?, ?, ?, ?, ?, ?)
+	`, id, kind, sourceSchema, targetSchema, string(configJSON), profileName, configPath, configHash)
 	return err
 }
 
@@ -821,7 +834,7 @@ func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, e
 // GetAllRuns returns all runs for history
 func (s *State) GetAllRuns() ([]Run, error) {
 	rows, err := s.db.Query(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
+		SELECT id, COALESCE(kind, 'apply'), started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
 		FROM runs ORDER BY started_at DESC LIMIT 20
 	`)
 	if err != nil {
@@ -836,7 +849,7 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		var completedAtStr sql.NullString
 		var configStr sql.NullString
 		var profileName, configPath, errorMsg sql.NullString
-		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
+		if err := rows.Scan(&r.ID, &r.Kind, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
@@ -956,9 +969,9 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 
 	var profileName, configPath, errorMsg sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
+		SELECT id, COALESCE(kind, 'apply'), started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
 		FROM runs WHERE id = ?
-	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg)
+	`, runID).Scan(&r.ID, &r.Kind, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg)
 
 	if err == sql.ErrNoRows {
 		return nil, nil

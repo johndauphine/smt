@@ -18,7 +18,7 @@ func TestFileState_CreateAndResumeRun(t *testing.T) {
 	}
 
 	// Create a run
-	err = fs.CreateRun("test123", "dbo", "public", map[string]string{"key": "value"}, "myprofile", "")
+	err = fs.CreateRun("test123", RunKindApply, "dbo", "public", map[string]string{"key": "value"}, "myprofile", "")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestFileState_ClearTransferProgress(t *testing.T) {
 	}
 
 	// Create a run and task
-	err = fs.CreateRun("test456", "dbo", "public", nil, "", "")
+	err = fs.CreateRun("test456", RunKindApply, "dbo", "public", nil, "", "")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestFileState_ConfigHash(t *testing.T) {
 		"source": map[string]string{"host": "localhost"},
 		"target": map[string]string{"host": "postgres"},
 	}
-	err = fs.CreateRun("hash123", "dbo", "public", config, "", "/path/to/config.yaml")
+	err = fs.CreateRun("hash123", RunKindApply, "dbo", "public", config, "", "/path/to/config.yaml")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestFileState_ConfigHash(t *testing.T) {
 
 	// Verify hash is deterministic (same config = same hash)
 	fs2, _ := NewFileState(filepath.Join(tmpDir, "state2.yaml"))
-	fs2.CreateRun("hash456", "dbo", "public", config, "", "")
+	fs2.CreateRun("hash456", RunKindApply, "dbo", "public", config, "", "")
 	run2, _ := fs2.GetLastIncompleteRun()
 	if run.ConfigHash != run2.ConfigHash {
 		t.Errorf("config hashes differ for same config: %s != %s", run.ConfigHash, run2.ConfigHash)
@@ -222,7 +222,7 @@ func TestFileState_ConfigHash(t *testing.T) {
 		"target": map[string]string{"host": "postgres"},
 	}
 	fs3, _ := NewFileState(filepath.Join(tmpDir, "state3.yaml"))
-	fs3.CreateRun("hash789", "dbo", "public", config2, "", "")
+	fs3.CreateRun("hash789", RunKindApply, "dbo", "public", config2, "", "")
 	run3, _ := fs3.GetLastIncompleteRun()
 	if run.ConfigHash == run3.ConfigHash {
 		t.Errorf("config hashes should differ for different configs: %s == %s", run.ConfigHash, run3.ConfigHash)

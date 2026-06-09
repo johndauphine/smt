@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
+	"smt/internal/checkpoint"
 	"smt/internal/driver"
 	"smt/internal/logging"
 	"smt/internal/source"
@@ -67,7 +68,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		runID = uuid.NewString()
 	}
 
-	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
+	if err := o.state.CreateRun(runID, checkpoint.RunKindApply, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return fmt.Errorf("recording run start: %w", err)
 	}
 
@@ -233,10 +234,11 @@ func (o *Orchestrator) CreateForeignKeys(ctx context.Context, runID string) erro
 // other constraint phases.
 func (o *Orchestrator) CreateCheckConstraints(ctx context.Context, runID string) error {
 	_ = o.state.UpdatePhase(runID, string(TaskCreateChecks))
-	logging.Info("[%s] loading and creating check constraints (concurrency=%d)", TaskCreateChecks, o.aiConcurrency())
+	concurrency := o.checkConcurrency()
+	logging.Info("[%s] loading and creating check constraints (concurrency=%d)", TaskCreateChecks, concurrency)
 	aiReviewEnabled := o.config.AIReview.Enabled != nil && *o.config.AIReview.Enabled
 	opts := driver.FinalizeOptions{AIReviewEnabled: aiReviewEnabled, AIReviewMode: o.config.AIReview.Mode, ArtifactDir: o.ddlArtifactDir(runID)}
-	return runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
+	return runParallel(ctx, o.tables, concurrency, func(ctx context.Context, i int, t source.Table) error {
 		if err := o.source.LoadCheckConstraints(ctx, &t); err != nil {
 			return fmt.Errorf("loading checks for %s: %w", t.Name, err)
 		}
@@ -250,6 +252,17 @@ func (o *Orchestrator) CreateCheckConstraints(ctx context.Context, runID string)
 		}
 		return nil
 	})
+}
+
+// checkConcurrency returns the concurrency for the CHECK-constraint phase.
+// MySQL targets are serialized: InnoDB takes metadata locks on the FK graph
+// when adding a CHECK, and concurrent ADD CONSTRAINT on related tables
+// deadlocks with Error 1213 (#25, #81).
+func (o *Orchestrator) checkConcurrency() int {
+	if driver.Canonicalize(o.config.Target.Type) == "mysql" {
+		return 1
+	}
+	return o.aiConcurrency()
 }
 
 // aiConcurrency returns the configured per-phase concurrency limit, or

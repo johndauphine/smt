@@ -5,11 +5,18 @@ import (
 	"time"
 )
 
+// Run kinds distinguish runs that executed DDL against a target from
+// generate-only previews in history and notifications (#90).
+const (
+	RunKindApply    = "apply"
+	RunKindGenerate = "generate"
+)
+
 // StateBackend defines the interface for state persistence.
 // Implementations include SQLite (full featured) and file-based (minimal, for Airflow).
 type StateBackend interface {
 	// Run management
-	CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error
+	CreateRun(id, kind, sourceSchema, targetSchema string, config any, profileName, configPath string) error
 	UpdateRunConfig(id string, config any) error // Persist post-AI-tuning config snapshot
 	CompleteRun(id string, status string, errorMsg string) error
 	GetLastIncompleteRun() (*Run, error)
