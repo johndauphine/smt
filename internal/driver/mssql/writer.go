@@ -12,7 +12,6 @@ import (
 
 	mssql "github.com/microsoft/go-mssqldb"
 	"smt/internal/dbconfig"
-	"smt/internal/ddl"
 	"smt/internal/driver"
 	"smt/internal/logging"
 	"smt/internal/stats"
@@ -20,25 +19,15 @@ import (
 
 // Writer implements driver.Writer for SQL Server.
 type Writer struct {
-	db                 *sql.DB
-	config             *dbconfig.TargetConfig
-	maxConns           int
-	defaultBatchSize   int
-	compatLevel        int
-	sourceType         string
-	dialect            *Dialect
-	unknownTypePolicy  string
-	typeMapper         driver.TypeMapper
-	tableMapper        driver.TableDDLReviewer        // Optional AI review fallback
-	finalizationMapper driver.FinalizationDDLReviewer // Optional AI review fallback
-	dbContext          *driver.DatabaseContext        // Cached database context for AI review
-
-	// Optional override mappers used for AI review when migration.ai_verifier_model
-	// or ai_review.model is set. Nil falls back to tableMapper /
-	// finalizationMapper. Use tableVerifier()/finalizationVerifier() at the
-	// callsites. See driver.WriterOptions.VerifierTypeMapper.
-	verifierTableMapper        driver.TableDDLReviewer
-	verifierFinalizationMapper driver.FinalizationDDLReviewer
+	db                *sql.DB
+	config            *dbconfig.TargetConfig
+	maxConns          int
+	defaultBatchSize  int
+	compatLevel       int
+	sourceType        string
+	dialect           *Dialect
+	unknownTypePolicy string
+	dbContext         *driver.DatabaseContext // Cached database context for AI review
 }
 
 // NewWriter creates a new SQL Server writer.
@@ -81,66 +70,21 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		unknownTypePolicy = "fail"
 	}
 
-	var tableMapper driver.TableDDLReviewer
-	var finalizationMapper driver.FinalizationDDLReviewer
-	if opts.TypeMapper != nil {
-		tableMapper, _ = opts.TypeMapper.(driver.TableDDLReviewer)
-		finalizationMapper, _ = opts.TypeMapper.(driver.FinalizationDDLReviewer)
-
-		if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-			logging.Debug("AI review mapper available (provider: %s, model: %s)",
-				aiMapper.ProviderName(), aiMapper.Model())
-			if aiMapper.CacheSize() > 0 {
-				logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
-			}
-		}
-	}
-
-	verifierTableMapper, verifierFinalizationMapper := driver.ResolveVerifierMappers(opts)
-	if verifierTableMapper != nil {
-		// INFO not Debug — see postgres writer for rationale.
-		if aiMapper, ok := opts.VerifierTypeMapper.(*driver.AITypeMapper); ok {
-			logging.Info("AI Verifier provider enabled (provider: %s, model: %s)",
-				aiMapper.ProviderName(), aiMapper.Model())
-		}
-	}
-
 	w := &Writer{
-		db:                         db,
-		config:                     cfg,
-		maxConns:                   maxConns,
-		defaultBatchSize:           opts.BatchSize,
-		compatLevel:                compatLevel,
-		sourceType:                 opts.SourceType,
-		dialect:                    dialect,
-		unknownTypePolicy:          unknownTypePolicy,
-		typeMapper:                 opts.TypeMapper,
-		tableMapper:                tableMapper,
-		finalizationMapper:         finalizationMapper,
-		verifierTableMapper:        verifierTableMapper,
-		verifierFinalizationMapper: verifierFinalizationMapper,
+		db:                db,
+		config:            cfg,
+		maxConns:          maxConns,
+		defaultBatchSize:  opts.BatchSize,
+		compatLevel:       compatLevel,
+		sourceType:        opts.SourceType,
+		dialect:           dialect,
+		unknownTypePolicy: unknownTypePolicy,
 	}
 
 	// Gather database context for AI
 	w.dbContext = w.gatherDatabaseContext()
 
 	return w, nil
-}
-
-// tableVerifier returns the reviewer to use for VerifyTableDDL.
-func (w *Writer) tableVerifier() driver.TableDDLReviewer {
-	if w.verifierTableMapper != nil {
-		return w.verifierTableMapper
-	}
-	return w.tableMapper
-}
-
-// finalizationVerifier mirrors tableVerifier for finalization DDL.
-func (w *Writer) finalizationVerifier() driver.FinalizationDDLReviewer {
-	if w.verifierFinalizationMapper != nil {
-		return w.verifierFinalizationMapper
-	}
-	return w.finalizationMapper
 }
 
 // gatherDatabaseContext collects SQL Server database metadata for AI context.
@@ -295,6 +239,12 @@ func (w *Writer) DBType() string {
 	return "mssql"
 }
 
+// DatabaseContext returns the cached target database metadata gathered at
+// connect time, for optional AI review context.
+func (w *Writer) DatabaseContext() *driver.DatabaseContext {
+	return w.dbContext
+}
+
 // PoolStats returns connection pool statistics.
 func (w *Writer) PoolStats() stats.PoolStats {
 	dbStats := w.db.Stats()
@@ -306,93 +256,6 @@ func (w *Writer) PoolStats() stats.PoolStats {
 		WaitCount:   dbStats.WaitCount,
 		WaitTimeMs:  dbStats.WaitDuration.Milliseconds(),
 	}
-}
-
-// CreateSchema creates the target schema if it doesn't exist.
-func (w *Writer) CreateSchema(ctx context.Context, schema string) error {
-	var exists int
-	err := w.db.QueryRowContext(ctx,
-		"SELECT 1 FROM sys.schemas WHERE name = @schema",
-		sql.Named("schema", schema)).Scan(&exists)
-	if err == sql.ErrNoRows {
-		_, err = w.db.ExecContext(ctx, fmt.Sprintf("CREATE SCHEMA %s", w.dialect.QuoteIdentifier(schema)))
-		return err
-	}
-	return err
-}
-
-// CreateTable creates a table from source metadata.
-func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema string) error {
-	return w.CreateTableWithOptions(ctx, t, targetSchema, driver.TableOptions{})
-}
-
-// CreateTableWithOptions creates a table with deterministic DDL.
-func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	// Skip if the target table already exists. Idempotent re-runs land here
-	// instead of failing on "There is already an object named ...". See
-	// postgres equivalent.
-	if exists, err := w.TableExists(ctx, targetSchema, t.Name); err != nil {
-		return fmt.Errorf("checking table existence for %s: %w", t.FullName(), err)
-	} else if exists {
-		logging.Info("  ✓ table %s already exists, skipping", t.FullName())
-		return nil
-	}
-
-	renderer, err := ddl.NewRenderer("mssql", targetSchema, w.unknownTypePolicy)
-	if err != nil {
-		return err
-	}
-	sql, columnTypes, err := renderer.CreateTableDDL(t)
-	if err != nil {
-		return err
-	}
-	logging.Debug("deterministic DDL for %s:\n%s", t.FullName(), sql)
-	for colName, colType := range columnTypes {
-		logging.Debug("  Column %s -> %s", colName, colType)
-	}
-
-	if err := w.reviewDeterministicTableDDL(ctx, t, targetSchema, sql, opts); err != nil {
-		return err
-	}
-	if err := driver.WriteDDLArtifact(opts.ArtifactDir, opts.ArtifactName, sql); err != nil {
-		return err
-	}
-	if _, err := w.db.ExecContext(ctx, sql); err != nil {
-		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, sql)
-	}
-	return nil
-}
-
-func (w *Writer) reviewDeterministicTableDDL(ctx context.Context, t *driver.Table, targetSchema, sql string, opts driver.TableOptions) error {
-	if !opts.AIReviewEnabled {
-		return nil
-	}
-	reviewer := w.tableVerifier()
-	if reviewer == nil {
-		return fmt.Errorf("AI review enabled but no table reviewer is configured")
-	}
-	verdict, err := reviewer.VerifyTableDDL(ctx, driver.VerifyTableDDLRequest{
-		SourceDBType:  w.sourceType,
-		TargetDBType:  "mssql",
-		SourceTable:   t,
-		TargetSchema:  targetSchema,
-		SourceContext: opts.SourceContext,
-		TargetContext: w.dbContext,
-		ProposedDDL:   sql,
-	})
-	if err != nil {
-		return fmt.Errorf("AI review failed for table %s: %w", t.FullName(), err)
-	}
-	if verdict.OK {
-		logging.Debug("AI review OK: table %s", t.FullName())
-		return nil
-	}
-	msg := strings.Join(verdict.Issues, "\n  ")
-	if aiReviewFails(opts.AIReviewMode) {
-		return fmt.Errorf("AI review flagged %d issue(s) on table %s:\n  %s", len(verdict.Issues), t.FullName(), msg)
-	}
-	logging.Warn("AI review flagged %d issue(s) on table %s:\n  %s", len(verdict.Issues), t.FullName(), msg)
-	return nil
 }
 
 // DropTable drops a table.
@@ -423,25 +286,6 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 // SetTableLogged is a no-op for SQL Server.
 func (w *Writer) SetTableLogged(ctx context.Context, schema, table string) error {
 	return nil
-}
-
-// CreatePrimaryKey is a no-op because PK is created with the table.
-func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
-	return nil
-}
-
-// HasPrimaryKey checks if a table has a primary key constraint.
-func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
-	var exists int
-	err := w.db.QueryRowContext(ctx, `
-		SELECT CASE WHEN EXISTS (
-			SELECT 1 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
-			WHERE CONSTRAINT_TYPE = 'PRIMARY KEY'
-			AND TABLE_SCHEMA = @schema
-			AND TABLE_NAME = @table
-		) THEN 1 ELSE 0 END
-	`, sql.Named("schema", schema), sql.Named("table", table)).Scan(&exists)
-	return exists == 1, err
 }
 
 // IndexExists reports whether an index with the given name exists on the
@@ -638,155 +482,6 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 
 	_, err = w.db.ExecContext(ctx, fmt.Sprintf("DBCC CHECKIDENT ('%s', RESEED, %d)", w.dialect.QualifyTable(schema, t.Name), maxVal))
 	return err
-}
-
-// CreateIndex creates an index on the target table using deterministic DDL.
-func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	return w.CreateIndexWithOptions(ctx, t, idx, targetSchema, driver.FinalizeOptions{})
-}
-
-// CreateIndexWithOptions creates an index using deterministic DDL.
-func (w *Writer) CreateIndexWithOptions(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string, opts driver.FinalizeOptions) error {
-	if exists, err := w.IndexExists(ctx, targetSchema, t.Name, idx.Name); err != nil {
-		return fmt.Errorf("checking index existence for %s.%s: %w", t.Name, idx.Name, err)
-	} else if exists {
-		logging.Info("  ✓ index %s.%s already exists, skipping", t.Name, idx.Name)
-		return nil
-	}
-
-	renderer, err := ddl.NewRenderer("mssql", targetSchema, w.unknownTypePolicy)
-	if err != nil {
-		return err
-	}
-	sql, err := renderer.CreateIndexDDL(t, idx)
-	if err != nil {
-		return err
-	}
-	if err := w.reviewDeterministicFinalizationDDL(ctx, driver.DDLTypeIndex, t, idx, nil, nil, targetSchema, sql, opts); err != nil {
-		return err
-	}
-	if err := driver.WriteDDLArtifact(opts.ArtifactDir, opts.ArtifactName, sql); err != nil {
-		return err
-	}
-	if _, err := w.db.ExecContext(ctx, sql); err != nil {
-		return fmt.Errorf("creating index %s.%s: %w\nDDL: %s", t.Name, idx.Name, err, sql)
-	}
-	return nil
-}
-
-// CreateForeignKey creates a foreign key constraint using deterministic DDL.
-func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	return w.CreateForeignKeyWithOptions(ctx, t, fk, targetSchema, driver.FinalizeOptions{})
-}
-
-// CreateForeignKeyWithOptions creates a foreign key using deterministic DDL.
-func (w *Writer) CreateForeignKeyWithOptions(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string, opts driver.FinalizeOptions) error {
-	if exists, err := w.ForeignKeyExists(ctx, targetSchema, t.Name, fk.Name); err != nil {
-		return fmt.Errorf("checking FK existence for %s.%s: %w", t.Name, fk.Name, err)
-	} else if exists {
-		logging.Info("  ✓ FK %s.%s already exists, skipping", t.Name, fk.Name)
-		return nil
-	}
-
-	// Override RefSchema with the target schema. The source FK metadata
-	// carries the source's schema name (e.g. "public" from PG), and the
-	// AI honors that field when emitting the REFERENCES clause —
-	// producing FKs that reference a schema that does not exist on the
-	// target. Same root cause as #4 / PR #5, applied to the create path.
-	fkForTarget := *fk
-	fkForTarget.RefSchema = targetSchema
-
-	renderer, err := ddl.NewRenderer("mssql", targetSchema, w.unknownTypePolicy)
-	if err != nil {
-		return err
-	}
-	sql, err := renderer.CreateForeignKeyDDL(t, &fkForTarget)
-	if err != nil {
-		return err
-	}
-	if err := w.reviewDeterministicFinalizationDDL(ctx, driver.DDLTypeForeignKey, t, nil, &fkForTarget, nil, targetSchema, sql, opts); err != nil {
-		return err
-	}
-	if err := driver.WriteDDLArtifact(opts.ArtifactDir, opts.ArtifactName, sql); err != nil {
-		return err
-	}
-	if _, err := w.db.ExecContext(ctx, sql); err != nil {
-		return fmt.Errorf("creating FK %s.%s: %w\nDDL: %s", t.Name, fk.Name, err, sql)
-	}
-	return nil
-}
-
-// CreateCheckConstraint creates a check constraint using deterministic DDL.
-func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	return w.CreateCheckConstraintWithOptions(ctx, t, chk, targetSchema, driver.FinalizeOptions{})
-}
-
-// CreateCheckConstraintWithOptions creates a CHECK constraint using deterministic DDL.
-func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string, opts driver.FinalizeOptions) error {
-	if exists, err := w.CheckConstraintExists(ctx, targetSchema, t.Name, chk.Name); err != nil {
-		return fmt.Errorf("checking CHECK existence for %s.%s: %w", t.Name, chk.Name, err)
-	} else if exists {
-		logging.Info("  ✓ CHECK %s.%s already exists, skipping", t.Name, chk.Name)
-		return nil
-	}
-
-	renderer, err := ddl.NewRenderer("mssql", targetSchema, w.unknownTypePolicy)
-	if err != nil {
-		return err
-	}
-	sql, err := renderer.CreateCheckConstraintDDL(t, chk)
-	if err != nil {
-		return err
-	}
-	if err := w.reviewDeterministicFinalizationDDL(ctx, driver.DDLTypeCheckConstraint, t, nil, nil, chk, targetSchema, sql, opts); err != nil {
-		return err
-	}
-	if err := driver.WriteDDLArtifact(opts.ArtifactDir, opts.ArtifactName, sql); err != nil {
-		return err
-	}
-	if _, err := w.db.ExecContext(ctx, sql); err != nil {
-		return fmt.Errorf("creating CHECK %s.%s: %w\nDDL: %s", t.Name, chk.Name, err, sql)
-	}
-	return nil
-}
-
-func (w *Writer) reviewDeterministicFinalizationDDL(ctx context.Context, ddlType driver.DDLType, t *driver.Table, idx *driver.Index, fk *driver.ForeignKey, chk *driver.CheckConstraint, targetSchema, sql string, opts driver.FinalizeOptions) error {
-	if !opts.AIReviewEnabled {
-		return nil
-	}
-	reviewer := w.finalizationVerifier()
-	if reviewer == nil {
-		return fmt.Errorf("AI review enabled but no finalization reviewer is configured")
-	}
-	verdict, err := reviewer.VerifyFinalizationDDL(ctx, driver.VerifyFinalizationDDLRequest{
-		Type:            ddlType,
-		SourceDBType:    w.sourceType,
-		TargetDBType:    "mssql",
-		Table:           t,
-		TargetSchema:    targetSchema,
-		TargetContext:   w.dbContext,
-		Index:           idx,
-		ForeignKey:      fk,
-		CheckConstraint: chk,
-		ProposedDDL:     sql,
-	})
-	if err != nil {
-		return fmt.Errorf("AI review failed for %s %s.%s: %w", ddlType, t.Schema, t.Name, err)
-	}
-	if verdict.OK {
-		logging.Debug("AI review OK: %s %s.%s", ddlType, t.Schema, t.Name)
-		return nil
-	}
-	msg := strings.Join(verdict.Issues, "\n  ")
-	if aiReviewFails(opts.AIReviewMode) {
-		return fmt.Errorf("AI review flagged %d issue(s) on %s %s.%s:\n  %s", len(verdict.Issues), ddlType, t.Schema, t.Name, msg)
-	}
-	logging.Warn("AI review flagged %d issue(s) on %s %s.%s:\n  %s", len(verdict.Issues), ddlType, t.Schema, t.Name, msg)
-	return nil
-}
-
-func aiReviewFails(mode string) bool {
-	return strings.EqualFold(strings.TrimSpace(mode), "fail")
 }
 
 // WriteBatch writes a batch of rows using TDS bulk copy.

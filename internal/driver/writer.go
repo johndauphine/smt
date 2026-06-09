@@ -15,39 +15,31 @@ type Writer interface {
 	Ping(ctx context.Context) error
 	DB() *sql.DB // Access to underlying database connection for tuning analysis
 
-	// Schema operations
-	CreateSchema(ctx context.Context, schema string) error
-	CreateTable(ctx context.Context, t *Table, targetSchema string) error
-	CreateTableWithOptions(ctx context.Context, t *Table, targetSchema string, opts TableOptions) error
+	// DatabaseContext returns cached metadata about the target database
+	// (version, charset, collation) for optional AI review context.
+	DatabaseContext() *DatabaseContext
+
+	// Schema operations. DDL creation goes through the orchestrator's plan
+	// executor (render once, ExecRaw per statement); writers only expose the
+	// catalog existence checks the executor gates on (#87).
 	DropTable(ctx context.Context, schema, table string) error
 	TruncateTable(ctx context.Context, schema, table string) error
 	TableExists(ctx context.Context, schema, table string) (bool, error)
 	SetTableLogged(ctx context.Context, schema, table string) error
 
-	// Constraint operations
-	CreatePrimaryKey(ctx context.Context, t *Table, targetSchema string) error
-	CreateIndex(ctx context.Context, t *Table, idx *Index, targetSchema string) error
-	CreateIndexWithOptions(ctx context.Context, t *Table, idx *Index, targetSchema string, opts FinalizeOptions) error
-	CreateForeignKey(ctx context.Context, t *Table, fk *ForeignKey, targetSchema string) error
-	CreateForeignKeyWithOptions(ctx context.Context, t *Table, fk *ForeignKey, targetSchema string, opts FinalizeOptions) error
-	CreateCheckConstraint(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string) error
-	CreateCheckConstraintWithOptions(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string, opts FinalizeOptions) error
-	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
-
 	// IndexExists reports whether an index with the given name exists on the
-	// target table. Used by CreateIndexWithOptions to short-circuit re-runs
-	// without invoking the AI or executing DDL that would fail with "already
-	// exists". Catalog query, no AI involved.
+	// target table. Used by the plan executor to short-circuit re-runs
+	// without executing DDL that would fail with "already exists".
 	IndexExists(ctx context.Context, schema, table, indexName string) (bool, error)
 
 	// ForeignKeyExists reports whether a foreign key with the given name
-	// exists on the target table. Used by CreateForeignKeyWithOptions for
-	// idempotent re-runs.
+	// exists on the target table. Used by the plan executor for idempotent
+	// re-runs.
 	ForeignKeyExists(ctx context.Context, schema, table, fkName string) (bool, error)
 
 	// CheckConstraintExists reports whether a CHECK constraint with the given
-	// name exists on the target table. Used by CreateCheckConstraintWithOptions
-	// for idempotent re-runs.
+	// name exists on the target table. Used by the plan executor for
+	// idempotent re-runs.
 	CheckConstraintExists(ctx context.Context, schema, table, checkName string) (bool, error)
 
 	// DDL introspection
@@ -79,54 +71,6 @@ type Writer interface {
 	MaxConns() int
 	DBType() string
 	PoolStats() stats.PoolStats
-}
-
-// TableOptions contains options for table creation.
-type TableOptions struct {
-	// Unlogged creates an unlogged table (PostgreSQL only, for performance).
-	Unlogged bool
-
-	// SourceContext contains metadata about the source database.
-	// This is passed to optional AI review for additional context.
-	SourceContext *DatabaseContext
-
-	// AIReviewEnabled enables optional review of deterministic DDL before it
-	// is applied. Reviewer findings are not fed back into a DDL generator;
-	// deterministic DDL is either allowed with warnings or blocked based on
-	// AIReviewMode.
-	AIReviewEnabled bool
-
-	// AIReviewMode controls what happens when AIReviewEnabled is true and the
-	// reviewer reports issues. "fail" blocks before apply; any other value
-	// logs warnings and continues.
-	AIReviewMode string
-
-	// ArtifactDir, when set, receives the rendered DDL before it is applied.
-	ArtifactDir string
-
-	// ArtifactName overrides the default artifact filename for this DDL.
-	ArtifactName string
-
-	// Note: Indexes and CHECK constraints are always created separately in Finalize,
-	// not included in the initial CREATE TABLE DDL.
-}
-
-// FinalizeOptions configures CreateIndex / CreateForeignKey /
-// CreateCheckConstraint behavior. Shared across the three finalize calls
-// because today they only differ in the metadata they need.
-type FinalizeOptions struct {
-	// AIReviewEnabled enables optional review of deterministic finalization DDL
-	// before it is applied.
-	AIReviewEnabled bool
-
-	// AIReviewMode controls whether reviewer issues warn or fail.
-	AIReviewMode string
-
-	// ArtifactDir, when set, receives the rendered DDL before it is applied.
-	ArtifactDir string
-
-	// ArtifactName overrides the default artifact filename for this DDL.
-	ArtifactName string
 }
 
 // WriteBatchOptions configures a bulk write operation.

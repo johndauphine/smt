@@ -89,33 +89,4 @@ type WriterOptions struct {
 	// UnknownTypePolicy controls deterministic handling of unsupported source
 	// types. Supported values are "fail", "warn", and "text_fallback".
 	UnknownTypePolicy string
-
-	// TypeMapper is optional and is used only as an AI review fallback when
-	// deterministic DDL review is enabled without a separate verifier mapper.
-	TypeMapper TypeMapper
-
-	// VerifierTypeMapper, when non-nil, is used for optional AI review
-	// (VerifyTableDDL / VerifyFinalizationDDL) instead of TypeMapper.
-	//
-	// The mapper is stored on the writer as reviewer interfaces. Has no
-	// effect unless TableOptions.AIReviewEnabled or
-	// FinalizeOptions.AIReviewEnabled is set.
-	VerifierTypeMapper TypeMapper
-}
-
-// ResolveVerifierMappers extracts the TableDDLReviewer and FinalizationDDLReviewer
-// from WriterOptions.VerifierTypeMapper. Called by each driver's NewWriter to
-// populate its verifier fields. Both return values are nil when the option is
-// nil; callsites may fall back to their default reviewer in that case.
-//
-// Type assertions are non-fatal: a reviewer that doesn't implement one of the
-// interfaces just leaves that field nil. In practice AITypeMapper implements
-// both, so a fully configured reviewer is always complete.
-func ResolveVerifierMappers(opts WriterOptions) (TableDDLReviewer, FinalizationDDLReviewer) {
-	if opts.VerifierTypeMapper == nil {
-		return nil, nil
-	}
-	tm, _ := opts.VerifierTypeMapper.(TableDDLReviewer)
-	fm, _ := opts.VerifierTypeMapper.(FinalizationDDLReviewer)
-	return tm, fm
 }

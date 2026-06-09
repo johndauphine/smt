@@ -43,9 +43,7 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 //   - maxConns: Maximum number of connections in the pool
 //   - sourceType: Source database type for cross-engine type handling
 //   - unknownTypePolicy: deterministic handling of unsupported source types (fail/warn/text_fallback)
-//   - typeMapper: optional AI reviewer fallback
-//   - verifierTypeMapper: optional explicit AI reviewer
-func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, unknownTypePolicy string, typeMapper driver.TypeMapper, verifierTypeMapper driver.TypeMapper) (TargetPool, error) {
+func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, unknownTypePolicy string) (TargetPool, error) {
 	// Normalize empty type to default
 	dbType := cfg.Type
 	if dbType == "" {
@@ -61,11 +59,9 @@ func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, un
 	// Create the writer using the driver's factory method
 	// This is truly pluggable - no switch statement needed
 	opts := driver.WriterOptions{
-		BatchSize:          cfg.ChunkSize,
-		SourceType:         sourceType,
-		UnknownTypePolicy:  unknownTypePolicy,
-		TypeMapper:         typeMapper,
-		VerifierTypeMapper: verifierTypeMapper,
+		BatchSize:         cfg.ChunkSize,
+		SourceType:        sourceType,
+		UnknownTypePolicy: unknownTypePolicy,
 	}
 	return d.NewWriter((*dbconfig.TargetConfig)(cfg), maxConns, opts)
 }

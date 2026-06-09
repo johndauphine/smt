@@ -51,7 +51,7 @@ To add a new database engine: drop a package under `internal/driver/foo/` implem
 `internal/orchestrator/` is intentionally small — schema runs are short and synchronous, no parallelism:
 
 - `orchestrator.go` — struct + lifecycle + accessors (`New`, `NewWithOptions`, `Close`, `Source`, `Target`, `State`)
-- `phases.go` — one named method per phase (`ExtractSchema`, `CreateTargetSchema`, `CreateTables`, `CreateIndexes`, `CreateForeignKeys`, `CreateCheckConstraints`) plus `Run` which calls them in order
+- `phases.go` — `Run` renders the full DDL plan (the same `renderDDLPlan` path `smt create` preview uses, in `ddl_plan.go`) and then `executePlan` runs each statement through `Writer.ExecRaw`, skipping objects that already exist on the target (idempotent re-runs). One render pipeline means schema.sql is exactly what apply executes (#87). Execution is sequential; rendering is concurrent (`runParallel`)
 - `healthcheck.go` — connection ping + table count
 - `history.go` — `ShowHistory` / `ShowRunDetails` rendering of past runs from the state DB
 
@@ -129,7 +129,6 @@ Some files preserve DMT's original code shape unchanged (verbatim copy with modu
 
 Active work is tracked in GitHub issues. Run `gh issue list --state open` and read the bodies — each carries Symptom + Root cause + Proposed fix:
 
-- **#25** — MySQL InnoDB CHECK-constraint creation deadlocks (Error 1213) at `ai_concurrency: 16`. InnoDB takes metadata locks on parent + child tables when adding a CHECK; SMT fans out across goroutines and the lock graph deadlocks on related tables. Mssql/pg targets tolerate it. Cleanest fix: cap CHECK-phase concurrency at 1 for MySQL targets in `Orchestrator.CreateCheckConstraints`. Surfaced only after #17 was fixed (no PG-source CHECKs to create before that).
 - **#28** — Documentation-only: gpt-oss-20b → MSSQL whack-a-mole. Pre-#27 prompt rules and post-#27 prompt rules give the same 5/9 net score on the matrix but redistribute which pairs fail (rule-following inconsistency, not missing rules). Standing rule "no per-model AI workarounds" applies — the issue exists to document the model-selection guidance, not as a fix target. Note: the validate-and-retry work landed since (#29 family) helps materially on local models, partially answering this issue's "out of scope" suggestion.
 
 Older non-issue follow-ups:
@@ -181,13 +180,14 @@ Criterion 6 is currently a binary "has-default Y/N" check, not full expression e
 When editing prompts, re-run the CRM fixture end-to-end with the column-diff harness; do not trust count-only checks.
 
 Caveats:
-- **`pg → mysql` at high `ai_concurrency`** can hit MySQL InnoDB CHECK deadlocks (#25). Workaround: drop `ai_concurrency` to 1 for MySQL targets, or run only the affected phase serially. Other 8 pairs are unaffected.
 - **Local models** (gpt-oss-20b, qwen3-coder-30b) score around 3-5/9 with model-specific failure patterns; see #28 for the documented analysis. The validate-and-retry feature (`migration.ai_max_retries`, default 3) materially helps local-model reliability — gpt-oss-20b mssql→mssql went 6/14 → 14/22/31 at temperature=0 with retries fixing parser-rejected DDL on the second attempt.
 - **Local models + `ai_verify: true`** — works cleanly at 20B+ parameters (gpt-oss-20b, qwen3-coder-30b, gemma-4-26b-a4b-it-mlx all verified). Sub-20B local (gemma-4-e4b-it-mlx) hits same-model correlated-bias false positives that net-regress the schema; either upgrade the local or use cross-model verify via `ai_verifier_model` (Phase 2 — see below).
 
 Default model is `claude-sonnet-4-6`. Haiku was tried and reverted historically because of `pg → mssql` PERSISTED computed-column issues; with #13 plumbed (full SourceContext in the prompt) Haiku now lands mssql↔pg correctly, useful for cost-sensitive workloads — though mssql↔mysql with Haiku is still flaky.
 
 ### Resolved (kept here as decision log)
+
+- **#25 (PRs #96, #99)** — MySQL InnoDB CHECK-constraint deadlocks (Error 1213) under concurrent creation. First mitigated by serializing the CHECK phase for MySQL targets, then mooted entirely when #99 made all DDL execution sequential (rendering stays concurrent).
 
 - `create` and `sync` now agree on identifier naming. Both go through `driver.NormalizeIdentifier(targetType, name)` — a single source of truth that matches PostgreSQL's case-folding (lowercases + slugs non-alphanumeric) and passes MSSQL/MySQL through. The deterministic DDL renderer also uses this path for create and sync statements.
 - **#13 (PR #24)** — SourceContext now populated. `Reader.DatabaseContext()` returns a sync.Once-cached `*DatabaseContext`; `Orchestrator.CreateTables` passes it via `TableOptions.SourceContext`. The `=== SOURCE DATABASE ===` prompt block is now symmetric to TARGET (version, charset, collation, identifier case, varchar semantics, version-gated features). The "No source context available" string is gone.
@@ -197,7 +197,7 @@ Default model is `claude-sonnet-4-6`. Haiku was tried and reverted historically 
 - **#26** — MySQL `ENUM` / `SET` values are captured deterministically. `loadColumns` reads `COLUMN_TYPE`, parses the literal list into `driver.Column.EnumValues`, and the deterministic renderer preserves native `ENUM(...)` / `SET(...)` on MySQL targets.
 - **#29 family (PRs #30, #31, #33)** — superseded by deterministic DDL generation. The old AI-DDL validate-and-retry path and retry-classification marker were removed when executable DDL stopped being model-generated.
 - **#27** — MySQL function-call default parens (`DEFAULT (UUID())`, `DEFAULT (JSON_OBJECT())`) and MSSQL PERSISTED-implicit-nullability were explicit prompt rules; deterministic DDL now handles these as renderer rules.
-- **#48** — `migration.ai_verifier_model` plumbed end-to-end for optional DDL review. The orchestrator constructs a second `AITypeMapper` for the named provider when the field is set, passes it through `pool.NewTargetPool` → `WriterOptions.VerifierTypeMapper`, and each driver writer stores `verifierTableMapper` / `verifierFinalizationMapper` resolved by `driver.ResolveVerifierMappers`. Verify-hook callsites use the per-writer `tableVerifier()` / `finalizationVerifier()` helpers which return the verifier mapper when set, else fall back to the primary mapper. Empty config string is the default. Same PR added `secrets.Provider.Type` (`provider:` YAML field) so multiple entries can share one backend.
+- **#48** — `migration.ai_verifier_model` / `ai_review.model` select the AI review provider. Originally plumbed through `pool.NewTargetPool` → `WriterOptions.VerifierTypeMapper` into per-writer reviewer fields; since the preview/apply unification (#87) the reviewer is resolved once in `orchestrator.newCreateDDLRenderer` (`ddl_plan.go`) — writers execute pre-rendered statements and hold no AI mappers. Same PR added `secrets.Provider.Type` (`provider:` YAML field) so multiple entries can share one backend.
 
 ## Common gotchas
 
