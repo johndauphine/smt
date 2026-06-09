@@ -340,7 +340,7 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 // into the prompt up to opts.MaxRetries times. See #29 / postgres equivalent.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
 	if w.tableMapper == nil {
-		return fmt.Errorf("AI table mapper not available for table creation")
+		return fmt.Errorf("mysql target table creation requires schema_generation.mode: ai (legacy) until a deterministic MySQL renderer is implemented; use target.type: postgres for deterministic DDL-only generation")
 	}
 
 	// Skip if the target table already exists. Idempotent re-runs land here

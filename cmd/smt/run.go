@@ -166,7 +166,7 @@ func printHealth(r *orchestrator.HealthCheckResult) {
 		fmt.Printf("  Tables: %d\n", r.SourceTableCount)
 	}
 	if !r.TargetConfigured {
-		fmt.Printf("Target (%s): NOT CONFIGURED\n", r.TargetDBType)
+		fmt.Printf("Target (%s): CONNECTION NOT CONFIGURED\n", r.TargetDBType)
 		fmt.Printf("\nOverall: %s\n", healthWord(r.Healthy))
 		return
 	}
