@@ -366,7 +366,9 @@ func (r Renderer) DropCheckDDL(tableName, chkName string) string {
 }
 
 func (r Renderer) DropTableDDL(tableName string) string {
-	return fmt.Sprintf("DROP TABLE %s", r.qualify(r.normalize(tableName)))
+	// IF EXISTS is supported by all three targets (MSSQL since 2016, and SMT
+	// requires compatibility level 140+).
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", r.qualify(r.normalize(tableName)))
 }
 
 func (r Renderer) AddColumnDDL(tableName string, col driver.Column, tableColumns []driver.Column) (string, error) {

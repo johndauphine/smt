@@ -57,7 +57,20 @@ func (r deterministicRenderer) render(diff Diff) (Plan, error) {
 		}
 	}
 
-	for _, t := range diff.RemovedTables {
+	ordered, cyclic := orderTablesForDrop(diff.RemovedTables)
+	for _, t := range cyclic {
+		// FK cycle among the removed tables: no drop order works, so drop
+		// the foreign keys between them first.
+		for _, fk := range t.ForeignKeys {
+			plan.Statements = append(plan.Statements, Statement{
+				Table:       t.Name,
+				Description: fmt.Sprintf("drop foreign key %s (breaks drop-order cycle)", fk.Name),
+				SQL:         r.renderer.DropForeignKeyDDL(t.Name, fk.Name),
+				Risk:        RiskSafe,
+			})
+		}
+	}
+	for _, t := range ordered {
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       t.Name,
 			Description: fmt.Sprintf("drop table %s", t.Name),
@@ -68,6 +81,50 @@ func (r deterministicRenderer) render(diff Diff) (Plan, error) {
 	}
 
 	return plan, nil
+}
+
+// orderTablesForDrop sorts removed tables children-first so a DROP TABLE
+// never fails on a still-referencing child (#84). Only FKs between removed
+// tables matter — a surviving referencing table would make the drop invalid
+// in any order. Tables stuck in an FK cycle are returned separately (and
+// appended at the end of the drop order) so the caller can break the cycle
+// by dropping their FKs first.
+func orderTablesForDrop(tables []driver.Table) (ordered, cyclic []driver.Table) {
+	remaining := make(map[string]driver.Table, len(tables))
+	for _, t := range tables {
+		remaining[t.Name] = t
+	}
+
+	for len(remaining) > 0 {
+		// referenced[p] is true while a remaining table still points at p.
+		referenced := make(map[string]bool, len(remaining))
+		for _, t := range remaining {
+			for _, fk := range t.ForeignKeys {
+				if fk.RefTable == t.Name {
+					continue // self-reference doesn't block the drop
+				}
+				if _, ok := remaining[fk.RefTable]; ok {
+					referenced[fk.RefTable] = true
+				}
+			}
+		}
+		progressed := false
+		for _, name := range sortedKeys(remaining) {
+			if !referenced[name] {
+				ordered = append(ordered, remaining[name])
+				delete(remaining, name)
+				progressed = true
+			}
+		}
+		if !progressed {
+			for _, name := range sortedKeys(remaining) {
+				cyclic = append(cyclic, remaining[name])
+			}
+			ordered = append(ordered, cyclic...)
+			return ordered, cyclic
+		}
+	}
+	return ordered, nil
 }
 
 func (r deterministicRenderer) renderAddedTableDefinition(plan *Plan, t driver.Table) error {

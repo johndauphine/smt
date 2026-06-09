@@ -111,8 +111,8 @@ func TestCompute_ChangedMySQLColumnFlags(t *testing.T) {
 	oldCol := driver.Column{Name: "UpdatedAt", DataType: "datetime", DefaultExpression: "CURRENT_TIMESTAMP"}
 	newCol := oldCol
 	newCol.OnUpdateExpression = "CURRENT_TIMESTAMP"
-	prev := Snapshot{Tables: []driver.Table{table("Events", oldCol)}}
-	curr := Snapshot{Tables: []driver.Table{table("Events", newCol)}}
+	prev := Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("Events", oldCol)}}
+	curr := Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("Events", newCol)}}
 
 	d := Compute(prev, curr)
 	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].ChangedColumns) != 1 {
@@ -122,7 +122,7 @@ func TestCompute_ChangedMySQLColumnFlags(t *testing.T) {
 	oldID := driver.Column{Name: "ID", DataType: "int"}
 	newID := oldID
 	newID.IsUnsigned = true
-	d = Compute(Snapshot{Tables: []driver.Table{table("Events", oldID)}}, Snapshot{Tables: []driver.Table{table("Events", newID)}})
+	d = Compute(Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("Events", oldID)}}, Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("Events", newID)}})
 	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].ChangedColumns) != 1 {
 		t.Fatalf("expected unsigned change to be detected, got %+v", d)
 	}
