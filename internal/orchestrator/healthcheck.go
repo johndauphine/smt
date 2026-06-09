@@ -12,6 +12,7 @@ type HealthCheckResult struct {
 	SourceDBType     string `json:"source_db_type"`
 	TargetDBType     string `json:"target_db_type"`
 	SourceConnected  bool   `json:"source_connected"`
+	TargetConfigured bool   `json:"target_configured"`
 	TargetConnected  bool   `json:"target_connected"`
 	SourceLatencyMs  int64  `json:"source_latency_ms"`
 	TargetLatencyMs  int64  `json:"target_latency_ms"`
@@ -28,18 +29,25 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 	const checkTimeout = 30 * time.Second
 
 	result := &HealthCheckResult{
-		Timestamp:    time.Now().Format(time.RFC3339),
-		SourceDBType: o.source.DBType(),
-		TargetDBType: o.target.DBType(),
+		Timestamp:        time.Now().Format(time.RFC3339),
+		SourceDBType:     o.source.DBType(),
+		TargetDBType:     o.config.Target.Type,
+		TargetConfigured: o.target != nil,
+	}
+	if o.target != nil {
+		result.TargetDBType = o.target.DBType()
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go o.pingSource(ctx, checkTimeout, result, &wg)
-	go o.pingTarget(ctx, checkTimeout, result, &wg)
+	if o.target != nil {
+		wg.Add(1)
+		go o.pingTarget(ctx, checkTimeout, result, &wg)
+	}
 	wg.Wait()
 
-	result.Healthy = result.SourceConnected && result.TargetConnected
+	result.Healthy = result.SourceConnected && (!result.TargetConfigured || result.TargetConnected)
 	return result, nil
 }
 

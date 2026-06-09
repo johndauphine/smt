@@ -14,13 +14,16 @@ import (
 )
 
 // createCommand defines `smt create`: extract the source schema and apply
-// it to the target as CREATE TABLE / index / FK / check DDL. The work is
-// driven by Orchestrator.Run which calls each phase in order.
+// it to the target as CREATE TABLE / index / FK / check DDL when --apply is
+// set. By default it writes target-dialect SQL for review without requiring
+// a target connection.
 func createCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "create",
-		Usage: "Extract source schema and create matching DDL on the target",
+		Usage: "Extract source schema and generate matching target DDL",
 		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "apply", Usage: "Execute generated DDL against the target (default: emit SQL for review)"},
+			&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Value: "schema.sql", Usage: "Output file when not applying"},
 			&cli.StringFlag{Name: "source-schema", Usage: "Override source schema from config"},
 			&cli.StringFlag{Name: "target-schema", Usage: "Override target schema from config"},
 		},
@@ -38,6 +41,34 @@ func runCreate(c *cli.Context) error {
 	}
 	if c.IsSet("target-schema") {
 		cfg.Target.Schema = c.String("target-schema")
+	}
+
+	if !c.Bool("apply") {
+		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
+			StateFile:  c.String("state-file"),
+			SourceOnly: true,
+		})
+		if err != nil {
+			return err
+		}
+		defer orch.Close()
+		orch.SetRunContext(profileName, configPath)
+
+		ctx, cancel := withSignalCancel(context.Background(), c.Duration("shutdown-timeout"))
+		defer cancel()
+
+		plan, runID, err := orch.GenerateDDL(ctx)
+		if err != nil {
+			return err
+		}
+		out := c.String("out")
+		if err := os.WriteFile(out, []byte(plan.SQL()), 0600); err != nil {
+			return err
+		}
+		fmt.Printf("%d statement(s) written to %s for review.\n", len(plan.Statements), out)
+		fmt.Printf("Run artifact: %s/runs/%s/ddl/schema.sql\n", cfg.Migration.DataDir, runID)
+		fmt.Println("Run again with --apply to execute against the target.")
+		return nil
 	}
 
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
@@ -71,7 +102,9 @@ func runHealthCheck(c *cli.Context) error {
 		return err
 	}
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
-		StateFile: c.String("state-file"),
+		StateFile:               c.String("state-file"),
+		SourceOnly:              !cfg.HasTargetConnection(),
+		SkipTargetDDLGeneration: true,
 	})
 	if err != nil {
 		return err
@@ -100,6 +133,11 @@ func printHealth(r *orchestrator.HealthCheckResult) {
 	}
 	if r.SourceConnected && r.SourceTableCount > 0 {
 		fmt.Printf("  Tables: %d\n", r.SourceTableCount)
+	}
+	if !r.TargetConfigured {
+		fmt.Printf("Target (%s): NOT CONFIGURED\n", r.TargetDBType)
+		fmt.Printf("\nOverall: %s\n", healthWord(r.Healthy))
+		return
 	}
 	fmt.Printf("Target (%s): %s (%dms)\n", r.TargetDBType, statusWord(r.TargetConnected), r.TargetLatencyMs)
 	if r.TargetError != "" {

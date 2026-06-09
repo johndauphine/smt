@@ -1,8 +1,8 @@
 # smt — Schema Migration Tool configuration
 #
-# SMT extracts the source schema and creates matching DDL on the target.
-# Unlike DMT, it does not transfer rows. Schema DDL is deterministic by
-# default; AI review is optional.
+# SMT extracts the source schema and writes matching target-dialect DDL.
+# Unlike DMT, it does not transfer rows. Applying DDL to a target database
+# is explicit via `smt create --apply` or `smt sync --apply`.
 
 source:
   type: mssql                           # mssql | postgres | mysql
@@ -15,15 +15,17 @@ source:
 
 target:
   type: postgres                        # mssql | postgres | mysql
-  host: localhost
-  port: 5432
-  database: stackoverflow
-  user: postgres
-  password: ${PG_PASSWORD}
   schema: public
+  # Connection fields are only required when using --apply or health-checking
+  # the target. Leave them out for DDL-only generation.
+  # host: localhost
+  # port: 5432
+  # database: stackoverflow
+  # user: postgres
+  # password: ${PG_PASSWORD}
 
 schema_generation:
-  mode: deterministic                  # deterministic | ai
+  mode: deterministic                  # deterministic | ai (legacy)
   unknown_type_policy: fail            # fail | warn | text_fallback
 
 ai_review:

@@ -90,7 +90,7 @@ type commandInfo struct {
 }
 
 var availableCommands = []commandInfo{
-	{"/create", "Build the target schema from the source"},
+	{"/create", "Generate target DDL from the source"},
 	{"/sync", "Diff source vs snapshot and emit/apply ALTERs"},
 	{"/snapshot", "Capture current source schema for future diffing"},
 	{"/config", "Show configuration details"},
@@ -634,14 +634,14 @@ func (m Model) welcomeMessage() string {
 
 	body := `
  Welcome to smt. This tool extracts a source schema and
- creates the matching DDL on a target database.
+ generates matching target DDL for review.
 
  Type /help to see available commands.
 `
 
 	tips := lipgloss.NewStyle().Foreground(colorGray).Render(`
- Tip: /create runs the full schema build. /snapshot captures
-      a source baseline, and /sync emits or applies ALTERs.
+ Tip: /create writes schema DDL. /create --apply executes it.
+      /snapshot captures a source baseline, and /sync emits or applies ALTERs.
       Hold Shift to select text with mouse.`)
 
 	return welcome + body + tips
@@ -672,8 +672,9 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 
 	case "/help":
 		help := `Available Commands:
-  /create [config_file]   Build the target schema from the source
-  /create --profile NAME  Build using a saved profile
+  /create [@config]       Generate target DDL from the source
+  /create --apply         Execute generated DDL against the target
+  /create --profile NAME  Generate using a saved profile
   /snapshot [@config]     Capture current source schema for future diffing
   /sync [@config]         Diff source vs snapshot, emit/apply ALTERs
   /config [config_file]   Show configuration details
@@ -739,9 +740,8 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 				return OutputMsg("A schema build is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
 			}
 		}
-		configFile, profileName := parseConfigArgs(parts)
 		m.markSchemaOperationStarting()
-		return m.runMigrationCmd(configFile, profileName)
+		return m.runSMTCommandCmd("create", parts)
 
 	case "/sync":
 		if m.migrationStatus == "running" {
@@ -914,7 +914,7 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return
 			}
-			orch, err := orchestrator.New(cfg)
+			orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{SourceOnly: true})
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return

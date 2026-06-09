@@ -987,20 +987,15 @@ func (c *Config) validate() error {
 		return fmt.Errorf("source.type '%s' is not a valid driver type (supported: %v)", c.Source.Type, availableDriverTypes())
 	}
 
-	// Validate target
-	if c.Target.Host == "" {
-		return fmt.Errorf("target.host is required")
-	}
-	if c.Target.Database == "" {
-		return fmt.Errorf("target.database is required")
-	}
+	// Validate target descriptor. A live target connection is only required
+	// by apply paths; DDL planning only needs the target dialect and schema.
 	if !isValidDriverType(c.Target.Type) {
 		return fmt.Errorf("target.type '%s' is not a valid driver type (supported: %v)", c.Target.Type, availableDriverTypes())
 	}
 
 	// Same-engine migration validation: prevent migration to the exact same database
 	// Compare canonical driver names to handle aliases (e.g., "mssql" == "sqlserver")
-	if canonicalDriverName(c.Source.Type) == canonicalDriverName(c.Target.Type) {
+	if c.HasTargetConnection() && canonicalDriverName(c.Source.Type) == canonicalDriverName(c.Target.Type) {
 		// Use case-insensitive comparison for hostnames (RFC 1035)
 		sameHost := strings.EqualFold(c.Source.Host, c.Target.Host)
 		samePort := c.Source.Port == c.Target.Port
@@ -1036,6 +1031,35 @@ func (c *Config) validate() error {
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/smt-config.yaml
 
+	return nil
+}
+
+// HasTargetConnection reports whether the config includes the minimum fields
+// needed to open a target connection. DDL-only commands intentionally do not
+// require this; apply paths should call RequireTargetConnection before opening
+// a target writer so the error is explicit.
+func (c *Config) HasTargetConnection() bool {
+	return strings.TrimSpace(c.Target.Host) != "" && strings.TrimSpace(c.Target.Database) != ""
+}
+
+// RequireTargetConnection validates the target connection fields needed by
+// commands that execute SQL against the target.
+func (c *Config) RequireTargetConnection() error {
+	if strings.TrimSpace(c.Target.Host) == "" {
+		return fmt.Errorf("target.host is required when applying DDL")
+	}
+	if strings.TrimSpace(c.Target.Database) == "" {
+		return fmt.Errorf("target.database is required when applying DDL")
+	}
+	if c.HasTargetConnection() && canonicalDriverName(c.Source.Type) == canonicalDriverName(c.Target.Type) {
+		sameHost := strings.EqualFold(c.Source.Host, c.Target.Host)
+		samePort := c.Source.Port == c.Target.Port
+		sameDB := c.Source.Database == c.Target.Database
+		if sameHost && samePort && sameDB {
+			return fmt.Errorf("source and target cannot be the same database (%s:%d/%s)",
+				c.Source.Host, c.Source.Port, c.Source.Database)
+		}
+	}
 	return nil
 }
 

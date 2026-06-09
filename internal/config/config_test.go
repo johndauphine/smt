@@ -1188,6 +1188,85 @@ func TestConfigValidationWithAliases(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsTargetDescriptorWithoutConnection(t *testing.T) {
+	cfg := &Config{
+		Source: SourceConfig{
+			Type:     "mssql",
+			Host:     "localhost",
+			Database: "source",
+		},
+		Target: TargetConfig{
+			Type:   "postgres",
+			Schema: "public",
+		},
+		Migration: MigrationConfig{
+			TargetMode: "drop_recreate",
+		},
+	}
+
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("validate() unexpected error: %v", err)
+	}
+	if cfg.HasTargetConnection() {
+		t.Fatal("HasTargetConnection() = true, want false")
+	}
+}
+
+func TestLoadAllowsSourceOnlyConfig(t *testing.T) {
+	configYAML := `
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: source
+  user: user
+  password: pass
+`
+
+	cfg, err := LoadBytes([]byte(configYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes() unexpected error: %v", err)
+	}
+	if cfg.Target.Type != "postgres" {
+		t.Fatalf("Target.Type = %q, want postgres default", cfg.Target.Type)
+	}
+	if cfg.Target.Schema != "public" {
+		t.Fatalf("Target.Schema = %q, want public default", cfg.Target.Schema)
+	}
+	if cfg.HasTargetConnection() {
+		t.Fatal("HasTargetConnection() = true, want false")
+	}
+}
+
+func TestRequireTargetConnection(t *testing.T) {
+	cfg := &Config{
+		Source: SourceConfig{
+			Type:     "postgres",
+			Host:     "localhost",
+			Port:     5432,
+			Database: "source",
+		},
+		Target: TargetConfig{
+			Type: "postgres",
+		},
+	}
+
+	if err := cfg.RequireTargetConnection(); err == nil || !strings.Contains(err.Error(), "target.host is required") {
+		t.Fatalf("RequireTargetConnection() = %v, want target.host error", err)
+	}
+
+	cfg.Target.Host = "localhost"
+	if err := cfg.RequireTargetConnection(); err == nil || !strings.Contains(err.Error(), "target.database is required") {
+		t.Fatalf("RequireTargetConnection() = %v, want target.database error", err)
+	}
+
+	cfg.Target.Port = 5432
+	cfg.Target.Database = "source"
+	if err := cfg.RequireTargetConnection(); err == nil || !strings.Contains(err.Error(), "source and target cannot be the same database") {
+		t.Fatalf("RequireTargetConnection() = %v, want same database error", err)
+	}
+}
+
 func TestSanitizedRedactsPasswords(t *testing.T) {
 	cfg := &Config{
 		Source: SourceConfig{

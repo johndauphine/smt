@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 
 	"smt/internal/config"
@@ -41,6 +42,52 @@ func TestAIMaxRetries(t *testing.T) {
 					in = *tt.configIn
 				}
 				t.Errorf("aiMaxRetries() with config=%v = %d, want %d", in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderCreateSchemaDDL(t *testing.T) {
+	tests := []struct {
+		name       string
+		targetType string
+		schema     string
+		want       string
+	}{
+		{
+			name:       "postgres",
+			targetType: "postgres",
+			schema:     "analytics",
+			want:       `CREATE SCHEMA IF NOT EXISTS "analytics"`,
+		},
+		{
+			name:       "mssql",
+			targetType: "mssql",
+			schema:     "analytics",
+			want:       `IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'analytics') EXEC(N'CREATE SCHEMA [analytics]')`,
+		},
+		{
+			name:       "mysql",
+			targetType: "mysql",
+			schema:     "analytics",
+			want:       "CREATE DATABASE IF NOT EXISTS `analytics`",
+		},
+		{
+			name:       "empty schema",
+			targetType: "postgres",
+			schema:     "",
+			want:       "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := renderCreateSchemaDDL(tt.targetType, tt.schema)
+			if err != nil {
+				t.Fatalf("renderCreateSchemaDDL() error: %v", err)
+			}
+			if strings.TrimSpace(got) != tt.want {
+				t.Fatalf("renderCreateSchemaDDL() = %q, want %q", got, tt.want)
 			}
 		})
 	}

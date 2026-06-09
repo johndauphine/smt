@@ -76,33 +76,32 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	}
 	logging.Debug("Connected to %s target: %s:%d/%s (%s)", dbType, cfg.Host, cfg.Port, cfg.Database, version)
 
-	// Validate type mapper is provided
-	if opts.TypeMapper == nil {
-		db.Close()
-		return nil, fmt.Errorf("TypeMapper is required")
-	}
-
-	// Require TableTypeMapper for table-level AI DDL generation
-	tableMapper, ok := opts.TypeMapper.(driver.TableTypeMapper)
-	if !ok {
-		db.Close()
-		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper interface for table-level DDL generation")
-	}
-
-	// Log AI mapper initialization
-	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-		logging.Debug("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
-			aiMapper.ProviderName(), aiMapper.Model())
-		if aiMapper.CacheSize() > 0 {
-			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
+	var tableMapper driver.TableTypeMapper
+	var finalizationMapper driver.FinalizationDDLMapper
+	var dropDDLMapper driver.TableDropDDLMapper
+	if opts.TypeMapper != nil {
+		var ok bool
+		tableMapper, ok = opts.TypeMapper.(driver.TableTypeMapper)
+		if !ok {
+			db.Close()
+			return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper interface for table-level DDL generation")
 		}
+
+		// Log AI mapper initialization
+		if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
+			logging.Debug("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
+				aiMapper.ProviderName(), aiMapper.Model())
+			if aiMapper.CacheSize() > 0 {
+				logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
+			}
+		}
+
+		// Check if type mapper also implements finalization DDL mapper
+		finalizationMapper, _ = opts.TypeMapper.(driver.FinalizationDDLMapper)
+
+		// Check if type mapper implements drop DDL mapper
+		dropDDLMapper, _ = opts.TypeMapper.(driver.TableDropDDLMapper)
 	}
-
-	// Check if type mapper also implements finalization DDL mapper
-	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
-
-	// Check if type mapper implements drop DDL mapper
-	dropDDLMapper, _ := opts.TypeMapper.(driver.TableDropDDLMapper)
 
 	verifierTableMapper, verifierFinalizationMapper := driver.ResolveVerifierMappers(opts)
 	if verifierTableMapper != nil {
@@ -340,6 +339,10 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 // On retryable errors, regenerates with the prior failed DDL + error fed back
 // into the prompt up to opts.MaxRetries times. See #29 / postgres equivalent.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
+	if w.tableMapper == nil {
+		return fmt.Errorf("AI table mapper not available for table creation")
+	}
+
 	// Skip if the target table already exists. Idempotent re-runs land here
 	// instead of failing on "Table ... already exists". See postgres equivalent.
 	if exists, err := w.TableExists(ctx, targetSchema, t.Name); err != nil {

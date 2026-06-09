@@ -37,3 +37,12 @@ func TestHandleCommand_BlocksSecondSchemaOperationWhileStarting(t *testing.T) {
 		t.Fatalf("output = %q, want already running message", output)
 	}
 }
+
+func TestCreateCommandUsesCLIBackedPath(t *testing.T) {
+	args := cliBackedCommandArgs("create", []string{"/create", "--apply", "@config.yaml", "--out", "schema.sql"})
+	got := strings.Join(args, " ")
+	want := "--config config.yaml create --apply --out schema.sql"
+	if got != want {
+		t.Fatalf("cliBackedCommandArgs() = %q, want %q", got, want)
+	}
+}

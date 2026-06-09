@@ -36,6 +36,11 @@ type Options struct {
 
 	// SourceOnly skips the target connection (used by inspection commands).
 	SourceOnly bool
+
+	// SkipTargetDDLGeneration tells construction that the target writer will
+	// only be used for ping/raw SQL, not CREATE/INDEX/FK/CHECK generation.
+	// Health checks and sync --apply can skip loading an AI generator.
+	SkipTargetDDLGeneration bool
 }
 
 // Orchestrator opens source/target connections via the driver registry and
@@ -62,6 +67,12 @@ func New(cfg *config.Config) (*Orchestrator, error) {
 func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	o := &Orchestrator{config: cfg, opts: opts}
 
+	if !opts.SourceOnly {
+		if err := cfg.RequireTargetConnection(); err != nil {
+			return nil, err
+		}
+	}
+
 	src, err := pool.NewSourcePool(&cfg.Source, cfg.Migration.MaxSourceConnections)
 	if err != nil {
 		return nil, fmt.Errorf("opening source: %w", err)
@@ -70,8 +81,9 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 
 	if !opts.SourceOnly {
 		reviewEnabled := cfg.AIReview.Enabled != nil && *cfg.AIReview.Enabled
-		needsDefaultAI := cfg.SchemaGeneration.Mode == driver.SchemaGenerationAI ||
-			(reviewEnabled && cfg.AIReview.Model == "")
+		needsTargetDDLGeneration := !opts.SkipTargetDDLGeneration
+		needsDefaultAI := needsTargetDDLGeneration &&
+			(cfg.SchemaGeneration.Mode == driver.SchemaGenerationAI || (reviewEnabled && cfg.AIReview.Model == ""))
 
 		var mapper driver.TypeMapper
 		if needsDefaultAI {
@@ -86,7 +98,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		// generation does not require this mapper unless ai_review.enabled is
 		// true, and reviewer feedback is not fed back into a generator.
 		var verifierMapper driver.TypeMapper
-		if name := cfg.AIReview.Model; reviewEnabled && name != "" {
+		if name := cfg.AIReview.Model; needsTargetDDLGeneration && reviewEnabled && name != "" {
 			vm, err := driver.NewAITypeMapperByName(name)
 			if err != nil {
 				src.Close()
@@ -95,7 +107,12 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 			verifierMapper = vm
 		}
 
-		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, cfg.SchemaGeneration.Mode, cfg.SchemaGeneration.UnknownTypePolicy, mapper, verifierMapper)
+		schemaGenerationMode := cfg.SchemaGeneration.Mode
+		if !needsTargetDDLGeneration {
+			schemaGenerationMode = driver.SchemaGenerationDeterministic
+		}
+
+		tgt, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, cfg.Source.Type, schemaGenerationMode, cfg.SchemaGeneration.UnknownTypePolicy, mapper, verifierMapper)
 		if err != nil {
 			src.Close()
 			return nil, fmt.Errorf("opening target: %w", err)
