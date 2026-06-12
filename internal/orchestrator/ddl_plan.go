@@ -138,6 +138,7 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 	if err != nil {
 		return createDDLRenderer{}, err
 	}
+	ddlRenderer = ddlRenderer.WithSource(sourceType)
 
 	reviewEnabled := aiReviewEnabled(o.config)
 

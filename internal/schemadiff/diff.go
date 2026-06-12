@@ -346,6 +346,9 @@ func backfillPreVersionFields(prev, curr Snapshot) Snapshot {
 			if prev.Version < 3 {
 				cols[ci].DatetimePrecision = cc.DatetimePrecision
 			}
+			if prev.Version < 4 {
+				cols[ci].DisplayWidth = cc.DisplayWidth
+			}
 		}
 		tables[ti].Columns = cols
 	}
@@ -423,6 +426,7 @@ func columnsEqual(a, b driver.Column) bool {
 		a.IsNullable == b.IsNullable &&
 		a.SRID == b.SRID &&
 		a.IsUnsigned == b.IsUnsigned &&
+		a.DisplayWidth == b.DisplayWidth &&
 		stringSlicesEqual(a.EnumValues, b.EnumValues) &&
 		strings.TrimSpace(a.DefaultExpression) == strings.TrimSpace(b.DefaultExpression) &&
 		strings.TrimSpace(a.OnUpdateExpression) == strings.TrimSpace(b.OnUpdateExpression) &&

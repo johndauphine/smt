@@ -15,11 +15,27 @@ func RenderDeterministic(diff Diff, targetSchema, targetDialect string) (Plan, e
 }
 
 func RenderDeterministicWithUnknownTypePolicy(diff Diff, targetSchema, targetDialect, unknownTypePolicy string) (Plan, error) {
+	return RenderDeterministicWithOptions(diff, RenderOptions{
+		TargetSchema:      targetSchema,
+		TargetDialect:     targetDialect,
+		UnknownTypePolicy: unknownTypePolicy,
+	})
+}
+
+// RenderOptions parameterizes deterministic plan rendering.
+type RenderOptions struct {
+	TargetSchema      string
+	TargetDialect     string
+	SourceDialect     string // enables same-dialect type passthrough in the renderer; empty = cross-dialect mappings only
+	UnknownTypePolicy string
+}
+
+func RenderDeterministicWithOptions(diff Diff, opts RenderOptions) (Plan, error) {
 	if diff.IsEmpty() {
 		return Plan{}, nil
 	}
 
-	renderer, err := newDeterministicRenderer(targetDialect, targetSchema, unknownTypePolicy)
+	renderer, err := newDeterministicRenderer(opts)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -31,11 +47,12 @@ type deterministicRenderer struct {
 	renderer ddl.Renderer
 }
 
-func newDeterministicRenderer(targetDialect, targetSchema, unknownTypePolicy string) (deterministicRenderer, error) {
-	r, err := ddl.NewRenderer(targetDialect, targetSchema, unknownTypePolicy)
+func newDeterministicRenderer(opts RenderOptions) (deterministicRenderer, error) {
+	r, err := ddl.NewRenderer(opts.TargetDialect, opts.TargetSchema, opts.UnknownTypePolicy)
 	if err != nil {
 		return deterministicRenderer{}, err
 	}
+	r = r.WithSource(opts.SourceDialect)
 	return deterministicRenderer{target: r.Target(), renderer: r}, nil
 }
 

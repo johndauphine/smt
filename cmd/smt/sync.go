@@ -180,7 +180,12 @@ func runSync(c *cli.Context) error {
 	fmt.Printf("Diff: %s\n", diff.Summary())
 
 	logging.Info("rendering diff deterministically as %s SQL...", cfg.Target.Type)
-	plan, err := schemadiff.RenderDeterministicWithUnknownTypePolicy(diff, cfg.Target.Schema, cfg.Target.Type, cfg.SchemaGeneration.UnknownTypePolicy)
+	plan, err := schemadiff.RenderDeterministicWithOptions(diff, schemadiff.RenderOptions{
+		TargetSchema:      cfg.Target.Schema,
+		TargetDialect:     cfg.Target.Type,
+		SourceDialect:     cfg.Source.Type,
+		UnknownTypePolicy: cfg.SchemaGeneration.UnknownTypePolicy,
+	})
 	if err != nil {
 		return err
 	}

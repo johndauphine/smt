@@ -15,6 +15,7 @@ type Renderer struct {
 	target            string
 	schema            string
 	unknownTypePolicy string
+	source            string // canonical source dialect; empty = unknown (cross-dialect mappings only)
 }
 
 func NewRenderer(target, schema, unknownTypePolicy string) (Renderer, error) {
@@ -34,6 +35,16 @@ func NewRenderer(target, schema, unknownTypePolicy string) (Renderer, error) {
 }
 
 func (r Renderer) Target() string { return r.target }
+
+// WithSource returns a copy of the renderer that knows the source dialect.
+// Same-dialect runs use it to pass types through verbatim where the generic
+// cross-dialect mapping would lose semantics (e.g. MySQL TIMESTAMP's UTC
+// normalization, tinyint(1)'s boolean convention). An unrecognized or empty
+// source leaves cross-dialect behavior unchanged.
+func (r Renderer) WithSource(source string) Renderer {
+	r.source = canonicalTarget(source)
+	return r
+}
 
 func (r Renderer) CreateSchemaDDL() (string, error) {
 	schema := strings.TrimSpace(r.schema)
@@ -616,6 +627,9 @@ func (r Renderer) mssqlColumnType(col driver.Column, dt string) (string, error) 
 func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) {
 	switch dt {
 	case "tinyint":
+		if r.source == "mysql" && col.DisplayWidth == 1 {
+			return mysqlUnsignedType("TINYINT(1)", col), nil
+		}
 		return mysqlUnsignedType("TINYINT", col), nil
 	case "smallint", "int2":
 		return mysqlUnsignedType("SMALLINT", col), nil
@@ -640,7 +654,16 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 		return "JSON", nil
 	case "rowversion":
 		return "BINARY(8)", nil
-	case "datetime", "datetime2", "smalldatetime", "timestamp", "timestamp without time zone", "timestamptz", "datetimeoffset", "timestamp with time zone":
+	case "timestamp":
+		// MySQL TIMESTAMP is UTC-normalized with session-tz conversion; a
+		// same-dialect run must keep it. For foreign sources "timestamp" is
+		// pg's naive datetime, where TIMESTAMP's 1970–2038 range and UTC
+		// normalization make DATETIME the right target.
+		if r.source == "mysql" {
+			return mysqlFspType("TIMESTAMP", col, 6), nil
+		}
+		return mysqlFspType("DATETIME", col, 6), nil
+	case "datetime", "datetime2", "smalldatetime", "timestamp without time zone", "timestamptz", "datetimeoffset", "timestamp with time zone":
 		return mysqlFspType("DATETIME", col, 6), nil
 	case "date":
 		return "DATE", nil
