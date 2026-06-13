@@ -680,3 +680,16 @@ func hasCriterion(ds []ColumnDelta, crit string) bool {
 	}
 	return false
 }
+
+// ENUM→TEXT keeps its length signal on a MySQL target (the enum constraint
+// was lost) but is exempt cross-dialect (faithful enum→pg text mapping).
+func TestCompareColumns_EnumToTextMySQLTargetFlags(t *testing.T) {
+	src := []Column{{Name: "s", DataType: "enum", MaxLength: 8}}
+	tgtText := []Column{{Name: "s", DataType: "text", MaxLength: 0}}
+	if !hasCriterion(CompareColumns(src, tgtText, "mysql", "mysql"), "max_length") {
+		t.Error("enum→text on a mysql target should flag (enum constraint lost)")
+	}
+	if hasCriterion(CompareColumns(src, tgtText, "mysql", "postgres"), "max_length") {
+		t.Error("enum→text cross-dialect (pg) should not flag")
+	}
+}

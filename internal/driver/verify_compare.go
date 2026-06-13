@@ -133,12 +133,14 @@ func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 		return nil
 	}
 	// A MySQL ENUM/SET maps to an unbounded target type (pg text) on a
-	// non-MySQL target; the enum's reported max_length is the longest member,
-	// not a user bound, so length must not flag there. Scoped to an unbounded
-	// target so a same-dialect ENUM→ENUM still compares length (and an
-	// ENUM→TEXT change on a MySQL target keeps its length signal). The enum
-	// VALUE list itself is a #62 follow-up, not compared here.
-	if isEnumSetType(src.DataType) && lobDataTypes[strings.ToLower(strings.TrimSpace(tgt.DataType))] {
+	// NON-MySQL target; the enum's reported max_length is the longest member,
+	// not a user bound, so length must not flag there. Gated on a non-MySQL
+	// target so a same-dialect ENUM→ENUM still compares length AND an
+	// ENUM→TEXT change on a MySQL target keeps its length signal (the only
+	// delta that reveals the enum constraint was lost). The enum VALUE list
+	// itself is a #62 follow-up, not compared here.
+	if isEnumSetType(src.DataType) && !isMySQLDialect(tgtDialect) &&
+		lobDataTypes[strings.ToLower(strings.TrimSpace(tgt.DataType))] {
 		return nil
 	}
 	// MySQL's LOB tiers ARE user-meaningful capacity choices when both
@@ -232,6 +234,16 @@ func effectiveMaxLength(c Column) int {
 		return 0
 	}
 	return normMaxLength(c.MaxLength)
+}
+
+// isMySQLDialect reports whether the dialect is MySQL/MariaDB.
+func isMySQLDialect(dialect string) bool {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "mysql", "mariadb":
+		return true
+	default:
+		return false
+	}
 }
 
 // isEnumSetType reports whether the type is a MySQL ENUM or SET.

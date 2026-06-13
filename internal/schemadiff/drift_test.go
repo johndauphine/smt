@@ -471,3 +471,21 @@ func TestRetargetSchema(t *testing.T) {
 		t.Errorf("empty target schema should pass through, got %q", got[0].Schema)
 	}
 }
+
+// MySQL INT UNSIGNED → INT (same-dialect) must drift on the structured
+// unsigned flag; cross-dialect (mysql→pg) must NOT, since unsigned is
+// absorbed into a wider target type.
+func TestComputeDrift_MySQLUnsigned(t *testing.T) {
+	src := []driver.Table{{Name: "T", Columns: []driver.Column{{Name: "n", DataType: "int", IsUnsigned: true}}}}
+	tgtSigned := []driver.Table{{Name: "t", Columns: []driver.Column{{Name: "n", DataType: "int", IsUnsigned: false}}}}
+
+	d := ComputeDrift(src, tgtSigned, "mysql", "mysql", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 || !strings.Contains(strings.Join(d.ChangedTables[0].ColumnDeltas, " "), "unsigned") {
+		t.Errorf("mysql int unsigned → int should drift, got %+v", d.ChangedTables)
+	}
+	// Cross-dialect: pg bigint target carries no unsigned flag — must not drift.
+	tgtPG := []driver.Table{{Name: "t", Columns: []driver.Column{{Name: "n", DataType: "bigint", IsUnsigned: false}}}}
+	if d := ComputeDrift(src, tgtPG, "mysql", "postgres", DefaultDriftOptions()); !d.IsEmpty() {
+		t.Errorf("mysql int unsigned → pg bigint must not drift, got %+v", d.ChangedTables)
+	}
+}

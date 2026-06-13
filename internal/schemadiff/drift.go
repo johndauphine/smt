@@ -283,6 +283,16 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 			td.ColumnDeltas = append(td.ColumnDeltas,
 				name+" type class: source="+sf+" target="+tf)
 		}
+		// MySQL UNSIGNED is a structured flag (Column.IsUnsigned) the readers
+		// populate and the renderer preserves. INT UNSIGNED → INT halves the
+		// positive range, so a same-dialect change must drift. Only compared
+		// MySQL→MySQL: cross-dialect, unsigned is absorbed into a wider target
+		// type (mysql int unsigned → pg bigint), where the target legitimately
+		// carries no unsigned flag and a comparison would false-flag.
+		if isMySQLDialect(sourceDialect) && isMySQLDialect(targetDialect) && sc.IsUnsigned != tc.IsUnsigned {
+			td.ColumnDeltas = append(td.ColumnDeltas,
+				name+" unsigned: source="+boolStr(sc.IsUnsigned)+" target="+boolStr(tc.IsUnsigned))
+		}
 		// Generated/computed status and storage class are cross-dialect
 		// structural facts CompareColumns doesn't cover: a column that's
 		// generated in the source must stay generated on the target, and a
@@ -391,6 +401,15 @@ func indexKeys(idxs []driver.Index) []string {
 func targetSupportsVirtualComputed(dialect string) bool {
 	switch strings.ToLower(strings.TrimSpace(dialect)) {
 	case "mysql", "mariadb", "mssql", "sqlserver":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMySQLDialect(dialect string) bool {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "mysql", "mariadb":
 		return true
 	default:
 		return false
