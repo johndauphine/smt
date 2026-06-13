@@ -1,7 +1,6 @@
 package checkpoint
 
 import (
-	"encoding/json"
 	"time"
 )
 
@@ -48,16 +47,6 @@ type StateBackend interface {
 
 	// Lifecycle
 	Close() error
-
-	// AI adjustment history (optional - file backend returns empty/no-op)
-	SaveAIAdjustment(runID string, record AIAdjustmentRecord) error
-	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
-	GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error)
-
-	// AI tuning history for analyze command (optional - file backend returns empty/no-op)
-	SaveAITuning(record AITuningRecord) error
-	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
-	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
 }
 
 // HistoryBackend extends StateBackend with profile management.
@@ -74,78 +63,3 @@ type HistoryBackend interface {
 
 // Ensure State implements HistoryBackend
 var _ HistoryBackend = (*State)(nil)
-
-// AITuningRecord represents a historical AI tuning recommendation from analyze command.
-// This stores the context and recommendations for learning from past analyses.
-type AITuningRecord struct {
-	ID              int64     `json:"id"`
-	Timestamp       time.Time `json:"timestamp"`
-	SourceDBType    string    `json:"source_db_type"`
-	TargetDBType    string    `json:"target_db_type"`
-	TotalTables     int       `json:"total_tables"`
-	TotalRows       int64     `json:"total_rows"`
-	AvgRowSizeBytes int64     `json:"avg_row_size_bytes"`
-	CPUCores        int       `json:"cpu_cores"`
-	MemoryGB        int       `json:"memory_gb"`
-
-	// Recommended parameters
-	Workers             int   `json:"workers"`
-	ChunkSize           int   `json:"chunk_size"`
-	ReadAheadBuffers    int   `json:"read_ahead_buffers"`
-	WriteAheadWriters   int   `json:"write_ahead_writers"`
-	ParallelReaders     int   `json:"parallel_readers"`
-	MaxPartitions       int   `json:"max_partitions"`
-	LargeTableThreshold int64 `json:"large_table_threshold"`
-	MaxSourceConns      int   `json:"max_source_connections"`
-	MaxTargetConns      int   `json:"max_target_connections"`
-	EstimatedMemoryMB   int64 `json:"estimated_memory_mb"`
-
-	// AI metadata
-	AIReasoning string `json:"ai_reasoning"`
-	WasAIUsed   bool   `json:"was_ai_used"` // Whether AI was used or formula fallback
-
-	// Post-migration results (updated after run completes)
-	FinalThroughput   float64 `json:"final_throughput,omitempty"`       // rows/sec from completed migration
-	FinalDurationSecs float64 `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
-	ChunkRetryCount   int     `json:"chunk_retry_count,omitempty"`      // chunk retries observed during the run (0 = clean)
-}
-
-// AIAdjustmentRecord represents a historical AI adjustment decision.
-type AIAdjustmentRecord struct {
-	ID               int64          `json:"id"`
-	RunID            string         `json:"run_id"`
-	AdjustmentNumber int            `json:"adjustment_number"`
-	Timestamp        time.Time      `json:"timestamp"`
-	Action           string         `json:"action"`
-	Adjustments      map[string]int `json:"adjustments"`
-	ThroughputBefore float64        `json:"throughput_before"`
-	ThroughputAfter  float64        `json:"throughput_after"`
-	EffectPercent    float64        `json:"effect_percent"`
-	CPUBefore        float64        `json:"cpu_before"`
-	CPUAfter         float64        `json:"cpu_after"`
-	MemoryBefore     float64        `json:"memory_before"`
-	MemoryAfter      float64        `json:"memory_after"`
-	Reasoning        string         `json:"reasoning"`
-	Confidence       string         `json:"confidence"`
-}
-
-// AdjustmentsJSON returns the adjustments as a JSON string for storage.
-func (r AIAdjustmentRecord) AdjustmentsJSON() string {
-	if r.Adjustments == nil {
-		return "{}"
-	}
-	b, err := json.Marshal(r.Adjustments)
-	if err != nil {
-		return "{}"
-	}
-	return string(b)
-}
-
-// ParseAdjustments parses a JSON string into the adjustments map.
-func ParseAdjustments(s string) map[string]int {
-	var m map[string]int
-	if err := json.Unmarshal([]byte(s), &m); err != nil {
-		return make(map[string]int)
-	}
-	return m
-}

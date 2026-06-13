@@ -151,7 +151,6 @@ type Config struct {
 	SchemaGeneration SchemaGenerationConfig `yaml:"schema_generation,omitempty"`
 	AIReview         AIReviewConfig         `yaml:"ai_review,omitempty"`
 	Profile          ProfileConfig          `yaml:"profile,omitempty"`
-	AI               *AIConfig              `yaml:"ai,omitempty"`
 	Slack            *SlackConfig           `yaml:"slack,omitempty"`
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
@@ -178,36 +177,6 @@ type SlackConfig struct {
 type ProfileConfig struct {
 	Name        string `yaml:"name,omitempty"`
 	Description string `yaml:"description,omitempty"`
-}
-
-// AIConfig holds AI provider configuration.
-type AIConfig struct {
-	// APIKey is the API key for the AI provider.
-	// Supports the same secret patterns as passwords:
-	//   ${file:/path/to/key} - read from file (recommended for production)
-	//   ${env:VAR_NAME} - read from environment variable
-	//   ${VAR_NAME} - legacy env var syntax
-	//   literal value - not recommended, use file or env instead
-	APIKey string `yaml:"api_key"`
-
-	// Provider specifies which AI provider to use.
-	// Valid values: "anthropic", "openai", "google", "ollama", "lmstudio"
-	// Legacy "gemini" is accepted and normalized to "google".
-	// Defaults to "anthropic" if not specified.
-	Provider string `yaml:"provider"`
-
-	// Model specifies which model to use (optional).
-	// Defaults to smart models for accurate inference:
-	//   Anthropic: claude-haiku-4-5-20251001
-	//   OpenAI: gpt-4o
-	//   Google: gemini-2.0-flash
-	Model string `yaml:"model"`
-
-	// TimeoutSeconds is the API request timeout (default: 30).
-	TimeoutSeconds int `yaml:"timeout_seconds"`
-
-	// TypeMapping configures AI-assisted type mapping for unknown types.
-	TypeMapping *AITypeMappingConfig `yaml:"type_mapping"`
 }
 
 // SchemaGenerationConfig controls deterministic target schema DDL.
@@ -240,17 +209,6 @@ type AIReviewConfig struct {
 	// AllowPatchSuggestions allows a reviewer to include human-readable patch
 	// suggestions. SMT must not apply those suggestions automatically.
 	AllowPatchSuggestions bool `yaml:"allow_patch_suggestions"`
-}
-
-// AITypeMappingConfig contains settings specific to AI type mapping.
-type AITypeMappingConfig struct {
-	// Enabled turns AI type mapping on/off.
-	// Auto-enabled when api_key is configured (unless explicitly set to false).
-	Enabled *bool `yaml:"enabled"`
-
-	// CacheFile is the path to the JSON cache file for type mappings.
-	// Defaults to ~/.smt/type-cache.json
-	CacheFile string `yaml:"cache_file"`
 }
 
 // MigrationConfig holds migration behavior settings
@@ -299,9 +257,6 @@ type MigrationConfig struct {
 
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
-	// AI-driven real-time parameter adjustment
-	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
-	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -809,67 +764,6 @@ func (c *Config) applyDefaults() error {
 	}
 	if c.Migration.HistoryRetentionDays == 0 {
 		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
-	}
-
-	// AI features: load from secrets if not configured in config file
-	// This allows AI to be configured globally in secrets without needing ai: section in each config
-	if c.AI == nil {
-		// No AI section in config - check if secrets has AI configuration
-		secretsCfg, err := secrets.Load()
-		if err == nil && secretsCfg.AI.DefaultProvider != "" {
-			provider, provErr := secretsCfg.GetProvider(secretsCfg.AI.DefaultProvider)
-			if provErr == nil && provider.APIKey != "" {
-				c.AI = &AIConfig{
-					Provider: secretsCfg.AI.DefaultProvider,
-					APIKey:   provider.APIKey,
-					Model:    provider.Model,
-				}
-			}
-		}
-	} else if c.AI.Provider != "" && c.AI.APIKey == "" {
-		// AI section exists with provider but no API key - load key from secrets
-		secretsCfg, err := secrets.Load()
-		if err != nil {
-			// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
-			if _, ok := err.(*secrets.SecretsNotFoundError); !ok {
-				logging.Warn("failed to load secrets configuration for AI provider: %v", err)
-			}
-		} else {
-			// Get the provider's API key from secrets
-			provider, err := secretsCfg.GetProvider(c.AI.Provider)
-			if err == nil && provider.APIKey != "" {
-				c.AI.APIKey = provider.APIKey
-			}
-		}
-	}
-
-	// AI features: apply defaults when api_key is configured
-	if c.AI != nil && c.AI.APIKey != "" {
-		// Default provider to anthropic if not specified
-		if c.AI.Provider == "" {
-			c.AI.Provider = "anthropic"
-		}
-		// Normalize provider to lowercase for case-insensitive matching
-		if c.AI.Provider != "" {
-			c.AI.Provider = driver.NormalizeAIProvider(c.AI.Provider)
-		}
-
-		// Type mapping: auto-enable if not explicitly disabled
-		if c.AI.TypeMapping == nil {
-			c.AI.TypeMapping = &AITypeMappingConfig{}
-		}
-		if c.AI.TypeMapping.Enabled == nil {
-			enabled := true
-			c.AI.TypeMapping.Enabled = &enabled
-		}
-
-		// AI adjust: auto-enable when AI is configured
-		if !c.Migration.AIAdjust {
-			c.Migration.AIAdjust = true
-		}
-		if c.Migration.AIAdjustInterval == "" {
-			c.Migration.AIAdjustInterval = "30s"
-		}
 	}
 
 	// Slack notification: auto-enable when webhook URL is configured
@@ -1499,17 +1393,6 @@ func (c *Config) DebugDump() string {
 				b.WriteString("  Error Diagnosis: enabled\n")
 			} else {
 				b.WriteString("  Error Diagnosis: disabled\n")
-			}
-			// AI adjust settings from migration_defaults
-			defaults := secretsCfg.GetMigrationDefaults()
-			if defaults.AIAdjust != nil && *defaults.AIAdjust {
-				interval := defaults.AIAdjustInterval
-				if interval == "" {
-					interval = "30s"
-				}
-				b.WriteString(fmt.Sprintf("  AI Adjust: enabled (interval: %s)\n", interval))
-			} else {
-				b.WriteString("  AI Adjust: disabled\n")
 			}
 		} else {
 			b.WriteString("  Disabled (no provider configured in ~/.secrets/smt-config.yaml)\n")
