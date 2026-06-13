@@ -598,3 +598,20 @@ func TestDefaultExpressionClass_UTCNowEquivalence(t *testing.T) {
 		}
 	}
 }
+
+// Only the UTC AT TIME ZONE form collapses to current_dt; a non-UTC zone
+// changes the value and must stay a distinct class so it doesn't match a
+// plain UTC now-default.
+func TestDefaultExpressionClass_NonUTCZonePreserved(t *testing.T) {
+	utc := defaultExpressionClass("CURRENT_TIMESTAMP AT TIME ZONE 'UTC'")
+	chicago := defaultExpressionClass("CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago'")
+	if utc != "current_dt" {
+		t.Errorf("UTC form should be current_dt, got %q", utc)
+	}
+	if chicago == "current_dt" {
+		t.Error("non-UTC zone must not collapse to current_dt")
+	}
+	if utc == chicago {
+		t.Error("UTC and non-UTC AT TIME ZONE defaults must classify differently")
+	}
+}

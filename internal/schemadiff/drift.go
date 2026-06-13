@@ -228,15 +228,23 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 	// cross-dialect equivalences the comparator already understands
 	// (bit→boolean, uniqueidentifier→char(36), json→jsonb) don't false-flag.
 	//
-	// Known limitations, all rooted in the lack of cross-dialect expression /
-	// concrete-type normalization (#62): a SAME-family type change the
+	// The flag fires only when BOTH sides resolve to a known class and the
+	// classes differ. A ONE-SIDED class (e.g. source numeric `int` vs a target
+	// the classifier doesn't cover, like `uuid` or pg `bit`/`bit varying`) is
+	// deliberately NOT flagged: the unrecognized side is exactly where legit
+	// cross-dialect equivalences live (uniqueidentifier→char(36), uuid→char(36)
+	// that CompareColumns handles specially), so flagging "known vs unknown"
+	// would false-positive on those. Catching those one-sided cases correctly
+	// needs the canonical concrete-type model (#62).
+	//
+	// Other known limitations, same #62 root: a SAME-family type change the
 	// comparator treats as equivalent (integer→bigint, varchar(20)→char(20))
 	// is not flagged, and per-column EXPRESSION/value details whose text
 	// differs across dialects — a changed computed expression body, MySQL
 	// ENUM/SET value lists, ON UPDATE expressions, spatial SRID — are not
 	// compared either. Drift catches presence/structure (computed Y/N + storage
 	// class, type family, length/precision/nullability/identity/TZ/default)
-	// today; expression-level equivalence is follow-up work.
+	// today; expression-level and concrete-type equivalence is follow-up work.
 	haveByName := make(map[string]driver.Column, len(have.Columns))
 	for _, c := range have.Columns {
 		haveByName[strings.ToLower(c.Name)] = c

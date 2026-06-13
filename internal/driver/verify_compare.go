@@ -507,14 +507,17 @@ func defaultExpressionClass(expr string) string {
 	if strings.HasPrefix(norm, "n'") && strings.HasSuffix(norm, "'") {
 		norm = norm[1:]
 	}
-	// Strip a trailing "at time zone '<tz>'" wrapper. PG renders MSSQL
+	// Strip a trailing "at time zone 'utc'" wrapper only. PG renders MSSQL
 	// GETUTCDATE() / SYSUTCDATETIME() as `CURRENT_TIMESTAMP AT TIME ZONE
-	// 'UTC'`, which is still a current-datetime default — the TZ conversion
-	// is a class detail checked separately via cmpTZClass on data_type.
-	// Without this, a freshly-created target round-trips its own default and
-	// the comparator would flag it as drift (current_dt vs other:...).
+	// 'UTC'`, which is still a current-datetime (UTC) default — the TZ
+	// conversion is a class detail checked separately via cmpTZClass on
+	// data_type. A NON-UTC zone (e.g. 'America/Chicago') changes the inserted
+	// value, so it must stay part of the class and not collapse to a bare
+	// current_timestamp.
 	if i := strings.Index(norm, " at time zone "); i >= 0 {
-		norm = strings.TrimSpace(norm[:i])
+		if zone := strings.TrimSpace(norm[i+len(" at time zone "):]); zone == "'utc'" {
+			norm = strings.TrimSpace(norm[:i])
+		}
 	}
 
 	// "Now-style" function families. Split into three classes by what the
