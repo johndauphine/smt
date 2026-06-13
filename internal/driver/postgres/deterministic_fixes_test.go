@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"strings"
 	"testing"
 
 	"smt/internal/driver"
@@ -76,6 +77,32 @@ func TestColumnType_MySQLBlobTiers(t *testing.T) {
 		}
 		if typ != "bytea" {
 			t.Errorf("RenderColumnTypeWithPolicy(%s) = %q, want bytea", dt, typ)
+		}
+	}
+}
+
+// #71 golden tests caught this: pg_get_expr returns bare expressions for
+// single-node predicates (`is_active`), and synthetic sync diffs can carry
+// unparenthesized definitions — CHECK requires the outer parens. Sources
+// that already parenthesize must not get doubled.
+func TestCreateCheckConstraint_EnsuresOuterParens(t *testing.T) {
+	tbl := &driver.Table{Name: "users", Columns: []driver.Column{{Name: "is_active", DataType: "bool"}}}
+	cases := []struct {
+		def  string
+		want string
+	}{
+		{"is_active", `CHECK (is_active)`},
+		{"amount > 0", `CHECK (amount > 0)`},
+		{"(amount > 0)", `CHECK (amount > 0)`},
+		{"(a > 0) AND (b > 0)", `CHECK ((a > 0) AND (b > 0))`},
+	}
+	for _, tc := range cases {
+		ddl, err := RenderCreateCheckConstraintDDL(tbl, &driver.CheckConstraint{Name: "ck_x", Definition: tc.def}, "public")
+		if err != nil {
+			t.Fatalf("render(%q): %v", tc.def, err)
+		}
+		if !strings.Contains(ddl, tc.want) {
+			t.Errorf("render(%q) = %q, want substring %q", tc.def, ddl, tc.want)
 		}
 	}
 }
