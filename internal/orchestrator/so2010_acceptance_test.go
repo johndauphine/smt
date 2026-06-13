@@ -197,6 +197,35 @@ func verifySO2010(t *testing.T, src, tgt []driver.Table, schema string) verifyRe
 			rep.Failures = append(rep.Failures,
 				fmt.Sprintf("%s primary key: source=%v target=%v", s.Name, s.PrimaryKey, tt.PrimaryKey))
 		}
+
+		// Every source secondary index must have a target index covering the
+		// same column set. Compared by column set, not name, since the
+		// renderer normalizes index names per dialect. LoadIndexes excludes
+		// PK-backed indexes on both readers, so this is the secondary set.
+		tgtIdx := map[string]bool{}
+		for _, idx := range tt.Indexes {
+			tgtIdx[colSetKey(idx.Columns)] = true
+		}
+		for _, idx := range s.Indexes {
+			if !tgtIdx[colSetKey(idx.Columns)] {
+				rep.Failures = append(rep.Failures,
+					fmt.Sprintf("%s index on (%s) missing on target", s.Name, strings.Join(lowerSorted(idx.Columns), ",")))
+			}
+		}
+
+		// Every source FK must have a target FK with the same local column
+		// set and (normalized) referenced table.
+		tgtFK := map[string]bool{}
+		for _, fk := range tt.ForeignKeys {
+			tgtFK[fkKey(fk)] = true
+		}
+		for _, fk := range s.ForeignKeys {
+			if !tgtFK[fkKey(fk)] {
+				rep.Failures = append(rep.Failures,
+					fmt.Sprintf("%s FK on (%s)->%s missing on target", s.Name, strings.Join(lowerSorted(fk.Columns), ","), strings.ToLower(fk.RefTable)))
+			}
+		}
+
 		totalPK += len(tt.PrimaryKey)
 		totalFK += len(tt.ForeignKeys)
 		rep.Tables = append(rep.Tables, tr)
@@ -287,6 +316,17 @@ func sameColsCI(a, b []string) bool {
 		return false
 	}
 	return strings.Join(lowerSorted(a), ",") == strings.Join(lowerSorted(b), ",")
+}
+
+// colSetKey is an order-insensitive, case-insensitive key for a column set.
+func colSetKey(cols []string) string {
+	return strings.Join(lowerSorted(cols), ",")
+}
+
+// fkKey identifies a foreign key by its local column set and referenced
+// table — dialect-independent, ignoring the (normalized) constraint name.
+func fkKey(fk driver.ForeignKey) string {
+	return colSetKey(fk.Columns) + "->" + strings.ToLower(fk.RefTable)
 }
 
 func lowerSorted(in []string) []string {
