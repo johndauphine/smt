@@ -70,7 +70,7 @@ func TestReview_VerdictHandlingPerMode(t *testing.T) {
 		wantErr bool
 	}{
 		{"pass blocks nothing", &driver.VerifyResult{OK: true}, "fail", false},
-		{"nil verdict treated as pass", nil, "fail", false},
+		{"nil verdict fails closed even in warn mode", nil, "warn", true},
 		{"warn continues on issues", &driver.VerifyResult{OK: false, Issues: []string{"x"}}, "warn", false},
 		{"fail blocks on issues", &driver.VerifyResult{OK: false, Issues: []string{"x"}}, "fail", true},
 		{"warn continues even with issues + empty mode defaults to warn", &driver.VerifyResult{OK: false, Issues: []string{"x"}}, "", false},
@@ -146,8 +146,8 @@ func TestHandleReviewVerdict(t *testing.T) {
 	if err := handleReviewVerdict("fail", "t", &driver.VerifyResult{OK: true}); err != nil {
 		t.Errorf("OK verdict must not error: %v", err)
 	}
-	if err := handleReviewVerdict("fail", "t", nil); err != nil {
-		t.Errorf("nil verdict must not error: %v", err)
+	if err := handleReviewVerdict("warn", "t", nil); err == nil {
+		t.Error("nil verdict must fail closed (even in warn mode), not pass")
 	}
 	if err := handleReviewVerdict("warn", "t", &driver.VerifyResult{OK: false, Issues: []string{"a"}}); err != nil {
 		t.Errorf("warn mode must not error on issues: %v", err)
