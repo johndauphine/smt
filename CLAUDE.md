@@ -101,7 +101,7 @@ CLI flow:
 ### Config + secrets split
 
 - `~/.smt/state.db` — run history, encrypted profiles, schema snapshots
-- `~/.smt/type-cache.json` — AI type-mapping cache
+- `~/.smt/type-cache.json` — legacy AI type-mapping cache for the optional `MapType` API; **not** consulted by the deterministic executable-DDL path
 - `~/.secrets/smt-config.yaml` — AI keys, encryption master key, Slack webhook (mode 0600, env var `SMT_SECRETS_FILE` overrides)
 - `config.yaml` — per-migration settings (source/target connection, schema names, include/exclude tables, create_indexes/FKs/checks flags). See `config.yaml.example`.
 
@@ -127,17 +127,19 @@ Some files preserve DMT's original code shape unchanged (verbatim copy with modu
 
 ## Open follow-ups
 
-Active work is tracked in GitHub issues. Run `gh issue list --state open` and read the bodies — each carries Symptom + Root cause + Proposed fix:
+Active work is tracked in GitHub issues. Run `gh issue list --state open` and read the bodies — each carries Symptom + Root cause + Proposed fix. The remaining open work clusters under three epics:
 
-- **#28** — Documentation-only: gpt-oss-20b → MSSQL whack-a-mole. Pre-#27 prompt rules and post-#27 prompt rules give the same 5/9 net score on the matrix but redistribute which pairs fail (rule-following inconsistency, not missing rules). Standing rule "no per-model AI workarounds" applies — the issue exists to document the model-selection guidance, not as a fix target. Note: the validate-and-retry work landed since (#29 family) helps materially on local models, partially answering this issue's "out of scope" suggestion.
+- **#57 (deterministic DDL generation)** — core is done (no-AI schema path, deterministic renderer, repeat-stable). Remaining children: **#62** (UVG-style canonical type layer — largely behavioral-equivalent today; a refactor question), **#64** (renderer/mapper version fingerprints on persisted artifacts), **#65** (SO2010 MSSQL→PG no-AI acceptance test).
+- **#58 (optional AI review)** — review is optional, default-off, inspect-only; the verifier-feedback retry loop is gone. Remaining child: **#68** (reviewer contract + provider-failure tests).
+- **#59 (deterministic sync)** — snapshot diff, deterministic ALTERs, dry-run + risk gating, golden tests all landed. Remaining child: **#69** (target-side introspection + three-way source/desired/existing diff — the substantive open feature).
 
 Older non-issue follow-ups:
 
 - `MigrationDefaults` in `internal/secrets/secrets.go` carries unused workers/chunk_size/buffer fields. Safe to drop once we're confident no DMT secrets file in the wild needs them.
 
-### Cross-engine coverage status (as of 2026-05-06)
+### Cross-engine coverage status
 
-The CRM fixture (`testdata/crm/`) supports all three engines as both source and target. The full 9-pair matrix is functional with the project default (Sonnet 4.6).
+The CRM fixture (`testdata/crm/`) supports all three engines as both source and target. The full 9-pair matrix runs through the **deterministic renderer** (`internal/ddl.Renderer` + `internal/driver/postgres/deterministic.go`) — there is no model in the executable-DDL path, so matrix fidelity is a property of the Go renderer, not of a model choice or temperature. Re-run after any renderer change with the column-diff harness in `testdata/crm/verify_columns.sh`; do not trust count-only checks.
 
 #### Pass criteria for matrix runs
 
@@ -151,42 +153,31 @@ Counts (tables / FKs / CHECKs match source) are necessary but **not sufficient**
 6. **Default-expression class preserved.** Source `GETUTCDATE()` → target `CURRENT_TIMESTAMP`; source `NEWID()` → target's UUID generator. Drop / substitute / hardcode is a fail.
 7. **Computed columns preserved** (storage class included: STORED vs VIRTUAL where applicable).
 
-Counts alone hid the regression that surfaced after PR #16 (introspection-facts migration), where local models silently halved `varchar` lengths and the matrix still showed ✓. The harness in `testdata/crm/verify_columns.sh` applies criteria 1–6 column-by-column. Criterion 7 (computed-column presence + storage class) is a TODO — needs cross-dialect expression normalization.
+The harness in `testdata/crm/verify_columns.sh` applies criteria 1–6 column-by-column (criterion 7, computed-column presence + storage class, is a harness TODO — needs cross-dialect expression normalization). Counts alone once hid a regression where `varchar` lengths were silently halved while the matrix still showed ✓ — the column-diff harness exists specifically to catch that class. `testdata/crm/type_smoke` (a 15th standalone table, #46) extends coverage to boundary lengths, legacy LOB types, explicit fsp, time-only, sized binary vs blob tiers, and numeric precision extremes.
 
-#### In-loop verification (opt-in)
+#### Optional AI review (`ai_review`, default off)
 
-`migration.ai_verify: true` adds an AI **parse + deterministic-compare** pass between DDL generation and exec (#55). The verifier model parses the proposed target DDL into structured `Column[]` JSON; Go-side `CompareColumns` runs the six per-column criteria mechanically (max_length, precision/scale, nullability, identity, TZ class, default class) against the source. Any deltas surface as `Issues` and feed back into the next generation attempt as `PreviousAttempt`, sharing the `ai_max_retries` budget with exec-fail retries. Cache hits skip verify (cached DDL was already verified and executed). By default, generation and verification use the same provider; set `migration.ai_verifier_model` to a different provider entry in the secrets file to pair a cheap generator with a stronger parser (recommended pattern when the generator is Haiku-class — Sonnet parses more reliably than Haiku does). Opt-in default — set the flag to enable. To force re-verification of cached entries after enabling, clear `~/.smt/type-cache.json`.
+`ai_review.enabled: true` adds an AI **parse + deterministic-compare** pass that inspects the already-rendered deterministic DDL before apply. It does **not** author or rewrite executable DDL — review is advisory (`ai_review.mode: warn`) or a hard gate (`mode: fail`), never a generator. The reviewer model parses the proposed target DDL into structured `Column[]` JSON; Go-side `CompareColumns` (`internal/driver/verify_compare.go`) runs the per-column criteria mechanically (max_length, precision/scale, nullability, identity, TZ class, default class) against the source and surfaces any deltas as `Issues`. Pair a cheap parser with a stronger one via `ai_review.model` (a provider entry in the secrets file). The legacy `migration.ai_verify` / `ai_verifier_model` keys are accepted as deprecated aliases (warned at load — see #67).
 
-The split is deliberate. The earlier free-text auditor (PR #47, abandoned in #53) asked one model to do two cognitive jobs in one response — parse the DDL AND judge equivalence per criterion. LLMs are good at the first and inconsistent at the second; cross-dialect runs hit prose-drift and lexical-vs-class confusion that prompt iteration could not fix (see #53's closing comment for evidence across Haiku+Sonnet, Sonnet+Opus pairings). #55 keeps the AI on the parse step it's good at and moves comparison to deterministic Go where lexical/class distinctions are unambiguous.
+The AI-parses / Go-compares split is deliberate (#55). An earlier free-text auditor asked one model to both parse the DDL and judge equivalence per criterion; LLMs are good at the first and inconsistent at the second, and cross-dialect runs hit prose-drift and lexical-vs-class confusion that prompt iteration could not fix (#53). Keeping the AI on the parse step and moving comparison to deterministic Go makes lexical/class distinctions unambiguous.
 
-The deterministic comparator handles class-equivalence cases the auditor used to false-positive on: `nvarchar(N) ≡ varchar(N)`, `datetime2 ≡ timestamp`, `datetimeoffset ≡ timestamptz`, `GETUTCDATE() ≡ CURRENT_TIMESTAMP`, MSSQL `((0))/((1))` ≡ pg `false/true`, `uniqueidentifier ≡ uuid ≡ char(36) ≡ binary(16)`, MSSQL MAX-sentinel max_length=-1 ≡ unbounded targets max_length=0. Computed columns short-circuit length/precision/scale checks (the engine synthesizes those from the expression). All equivalence rules live in `internal/driver/verify_compare.go` with unit tests pinning each cross-dialect case — adding a new rule means editing Go, not editing prompts.
+The deterministic comparator handles class-equivalence cases the free-text auditor used to false-positive on: `nvarchar(N) ≡ varchar(N)`, `datetime2 ≡ timestamp`, `datetimeoffset ≡ timestamptz`, `GETUTCDATE() ≡ CURRENT_TIMESTAMP`, MSSQL `((0))/((1))` ≡ pg `false/true`, `uniqueidentifier ≡ uuid ≡ char(36) ≡ binary(16)`, MSSQL MAX-sentinel max_length=-1 ≡ unbounded targets max_length=0, MySQL LOB-tier ranks (LONGTEXT ≠ TEXT same-dialect, but either ≡ pg text cross-dialect). Computed columns short-circuit length/precision/scale checks (the engine synthesizes those from the expression). All equivalence rules live in `internal/driver/verify_compare.go` with unit tests pinning each cross-dialect case — adding a rule means editing Go, not a prompt.
 
-Scope note: #55 v1 covers TABLE DDL only. CREATE INDEX / FOREIGN KEY / CHECK CONSTRAINT verify still go through the legacy free-text auditor (`buildVerifyIndexDDLPrompt` etc.). Index and FK shapes are simple enough that the prose-drift class doesn't fire often there; CHECK predicates remain the rough surface — predicate-translation work (regex → LIKE etc.) probably needs AST-level normalization, a separate effort.
+Scope note: the deterministic comparator covers TABLE DDL. CREATE INDEX / FOREIGN KEY / CHECK CONSTRAINT review still goes through the legacy free-text auditor (`buildVerifyIndexDDLPrompt` etc.); index/FK shapes are simple enough that prose-drift rarely fires there, while CHECK predicates remain the rough surface (regex→LIKE-class translation likely needs AST-level normalization, a separate effort).
 
-**Same-model verify size threshold (empirical).** Same-model verify is reliable above roughly 20B parameters. End-to-end on the CRM Companies fixture, mssql→pg, with `ai_verify: true`:
+Criterion 6 is currently a binary "has-default Y/N" check, not full expression equivalence — it catches the common dropped-default regression but a wrong-but-plausible translation (`now()` vs `CURRENT_TIMESTAMP`) would pass. Tightening needs per-dialect normalization tables (#64-adjacent follow-up).
 
-| Model | Verify retries | External harness |
-|---|---|---|
-| Sonnet 4.6 | 0 | PASS |
-| `openai/gpt-oss-20b` | 0 | PASS |
-| `qwen/qwen3-coder-30b` | 0 | PASS |
-| `gemma-4-26b-a4b-it-mlx` (MLX, 26B/4B-active MoE) | 0 | PASS |
-| `gemma-4-e4b-it-mlx` (MLX, ~4B effective) | 2 | **FAIL** — auditor false-positives on the prompt's ACCEPTABLE list (MSSQL `((1))` → PG `true` for bit→boolean defaults, `IDENTITY ≡ GENERATED BY DEFAULT AS IDENTITY`, `GETUTCDATE() ≡ CURRENT_TIMESTAMP`); the generator "corrects" by dropping a real default to silence the auditor. Net: introduces a regression worse than verify-off. |
-
-Below the threshold the auditor doesn't reliably hold the equivalence rules in working memory. For sub-20B local models, either upgrade the local model, leave `ai_verify: false`, or use cross-model verify (`ai_verifier_model: <cloud-provider>`) — a cloud auditor over a cheap local generator avoids the correlated-bias trap entirely. Cross-model verify is also the recommended pattern on platforms with poor local-AI performance (e.g. ARM Windows / Snapdragon X without CUDA): point generation at a cheap cloud provider (Haiku) and verification at a strong one (Sonnet); cost is essentially the same as same-model Sonnet verify since the generator handles the bulk of the tokens.
-
-Criterion 6 is currently a binary "has-default Y/N" check, not full expression equivalence. It catches the most common regression (dropped default) but a target that translates `GETUTCDATE()` to a wrong-but-plausible target expression (e.g. `now()` instead of `CURRENT_TIMESTAMP`) would pass. Tightening to expression equivalence requires per-dialect normalization tables and is a follow-up.
-
-When editing prompts, re-run the CRM fixture end-to-end with the column-diff harness; do not trust count-only checks.
-
-Caveats:
-- **Local models** (gpt-oss-20b, qwen3-coder-30b) score around 3-5/9 with model-specific failure patterns; see #28 for the documented analysis. The validate-and-retry feature (`migration.ai_max_retries`, default 3) materially helps local-model reliability — gpt-oss-20b mssql→mssql went 6/14 → 14/22/31 at temperature=0 with retries fixing parser-rejected DDL on the second attempt.
-- **Local models + `ai_verify: true`** — works cleanly at 20B+ parameters (gpt-oss-20b, qwen3-coder-30b, gemma-4-26b-a4b-it-mlx all verified). Sub-20B local (gemma-4-e4b-it-mlx) hits same-model correlated-bias false positives that net-regress the schema; either upgrade the local or use cross-model verify via `ai_verifier_model` (Phase 2 — see below).
-
-Default model is `claude-sonnet-4-6`. Haiku was tried and reverted historically because of `pg → mssql` PERSISTED computed-column issues; with #13 plumbed (full SourceContext in the prompt) Haiku now lands mssql↔pg correctly, useful for cost-sensitive workloads — though mssql↔mysql with Haiku is still flaky.
+**Reviewer model sizing.** Because review only parses DDL (it no longer judges equivalence), small models are far less fragile than under the old free-text auditor — but a too-small reviewer can still misparse and false-positive, prompting noise. Above ~20B parameters reviewing is reliable (gpt-oss-20b, qwen3-coder-30b, gemma-4-26b verified clean on the CRM Companies fixture). For sub-20B local models, leave `ai_review.enabled: false` or point `ai_review.model` at a cloud provider; the same cross-model pattern suits platforms with poor local-AI performance (ARM Windows / Snapdragon X without CUDA). Standing rule: the fix for a misbehaving model is a different model, not per-model compensating code in SMT.
 
 ### Resolved (kept here as decision log)
 
+- **#101 (PR #103)** — Source-dialect awareness in the renderer (`Renderer.WithSource`). mysql→mysql preserves `TIMESTAMP` and `tinyint(1)` verbatim; cross-dialect mappings unchanged. Added `Column.DisplayWidth` (tinyint(1) only) and snapshot version 4 with backfill.
+- **#42 / #43 (PR #104)** — Removed the dead DMT-era AI tuning config (`ai:` section, `ai_adjust`) and the checkpoint AI-adjustment/tuning-history tables and APIs — none had a consumer after the runtime-tuning monitor was dropped. Incidentally closed an unredacted-`ai.api_key`-in-run-history leak.
+- **#46 (PR #105)** — `testdata/crm/type_smoke` boundary-type table per fixture, plus pg blob→bytea mapping and LOB/binary length rules in both the comparator and `verify_columns.sh`.
+- **#71 (PR #106)** — Golden + stability + risk-gating tests for deterministic sync plans (`internal/schemadiff/golden_test.go`, regenerate with `UPDATE_GOLDEN=1`). The golden run caught and fixed a pg `CHECK`-parenthesization bug.
+- **#54 (PR #107)** — Un-configured render concurrency drops from 8 to 2 when `ai_review` is enabled, so cold-cache review runs stay under provider rate limits. Explicit `ai_concurrency` still passes through.
+- **#108 (PR #109)** — Stopped downgrading LOB capacity on MySQL targets: foreign `text`→`LONGTEXT`, `image`→`LONGBLOB`, unbounded binary→`LONGBLOB`, oversized varchar→`MEDIUMTEXT`/`LONGTEXT`; MySQL's own blob tiers preserved.
+- **#67 (PR #110)** — `migration.ai_verify` / `ai_verifier_model` now warn at config load as deprecated aliases for `ai_review.*`. Drive-by: `logging.SetOutput(nil)` resets to the default instead of panicking on the next write.
 - **#25 (PRs #96, #99)** — MySQL InnoDB CHECK-constraint deadlocks (Error 1213) under concurrent creation. First mitigated by serializing the CHECK phase for MySQL targets, then mooted entirely when #99 made all DDL execution sequential (rendering stays concurrent).
 
 - `create` and `sync` now agree on identifier naming. Both go through `driver.NormalizeIdentifier(targetType, name)` — a single source of truth that matches PostgreSQL's case-folding (lowercases + slugs non-alphanumeric) and passes MSSQL/MySQL through. The deterministic DDL renderer also uses this path for create and sync statements.
@@ -207,4 +198,5 @@ Default model is `claude-sonnet-4-6`. Haiku was tried and reverted historically 
 - The driver registry depends on blank imports in `internal/pool/factory.go`. If a new driver isn't being found, that's the file to check.
 - Tests under `internal/driver/{postgres,mssql,mysql}/` include integration tests behind build tags that need live databases (`make test-dbs-up`); `-short` skips them.
 - OpenAI reasoning models (o-series, gpt-5.x) reject the default `temperature: 0` with HTTP 400. SMT's `Provider.ModelTemperature` (yaml `model_temperature`) lets the user override per provider — set `model_temperature: 1` in the openai block of the secrets file to use them. There is no model-name list in code (intentional; see PR #11).
-- AI prompts are sensitive to wording — small phrasing changes can flip whether the AI preserves NOT NULL / DEFAULT / generated columns / `max_length`. PR #9 fixed a regression where the prompt's `OUTPUT REQUIREMENTS` section had a DMT-era line telling the AI to drop NOT NULL "for data migration flexibility." A separate regression introduced by PR #16 (May 2026) — moving from synthesized source-DDL strings to raw introspection facts — silently broke `max_length` fidelity on sub-Sonnet models because the prompt didn't explicitly demand exact preservation; the AI had to *compose* `VARCHAR(20)` from `data_type=varchar` + `max_length=20`, and weaker models reached for "round to a friendly bucket" heuristics. Fixed by adding an emphatic length/precision/scale rule. When editing prompts, re-run the CRM fixture end-to-end with the column-diff harness in `testdata/crm/verify_columns.sh` (criteria 1–6 above; criterion 7 is harness-TODO); do not trust count-only checks.
+- Executable DDL is **deterministic** — column fidelity (NOT NULL / DEFAULT / generated columns / `max_length` / precision / TZ class) is owned by `internal/ddl.Renderer` and the per-driver renderers, not by any prompt. The fidelity bar lives in code and is pinned by unit tests plus the `testdata/crm/verify_columns.sh` end-to-end harness; re-run it after any renderer change (criteria 1–6; criterion 7 is harness-TODO) and do not trust count-only checks. (History: model-authored DDL was sensitive to prompt wording — weak models would drop NOT NULL or bucket-round `varchar` lengths — which is precisely why the executable path was moved off the model in #77/#97. The optional AI **review** path still uses prompts, but only to *parse* DDL for the deterministic comparator, never to author it; review-prompt wording is far less load-bearing as a result.)
+- The renderer carries the **source dialect** (`Renderer.WithSource`, plumbed from the orchestrator and sync). Same-dialect runs pass types through verbatim where the generic cross-dialect mapping would lose semantics — MySQL `TIMESTAMP` (UTC-normalized) and `tinyint(1)` (boolean convention) on mysql→mysql (#101), and MySQL LOB tiers preserved rather than flattened (#108). When adding a type rule that only makes sense same-dialect, gate it on `r.source`.
