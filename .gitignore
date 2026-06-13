@@ -39,3 +39,4 @@ vendor/
 migrations/
 *.sql
 !testdata/**/*.sql
+!internal/**/testdata/**/*.sql

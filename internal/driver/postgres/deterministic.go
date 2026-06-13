@@ -267,7 +267,34 @@ func (r deterministicDDL) createCheckConstraint(t *driver.Table, chk *driver.Che
 	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
 		r.dialect.QualifyTable(targetSchema, tableName),
 		r.dialect.QuoteIdentifier(checkName),
-		expr), nil
+		ensureOuterParens(expr)), nil
+}
+
+// ensureOuterParens wraps expr in parentheses unless it already carries a
+// balanced outer pair. CHECK requires them: source catalogs usually emit
+// parenthesized predicates (mssql `([amount]>(0))`, mysql "(`amount` > 0)"),
+// but pg_get_expr returns a bare expression for single-node predicates
+// (`is_active`), which would render as invalid `CHECK is_active`.
+func ensureOuterParens(expr string) string {
+	s := strings.TrimSpace(expr)
+	if len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
+		depth := 0
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 && i < len(s)-1 {
+					// The opening paren closes before the end — not an
+					// outer pair (e.g. "(a) AND (b)").
+					return "(" + s + ")"
+				}
+			}
+		}
+		return s
+	}
+	return "(" + s + ")"
 }
 
 func (r deterministicDDL) columnType(col driver.Column) (string, error) {
