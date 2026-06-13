@@ -625,3 +625,32 @@ func TestDefaultExpressionClass_SysUTCDatetime(t *testing.T) {
 		}
 	}
 }
+
+// MySQL ENUM/SET → unbounded target (pg text) must not flag a length delta:
+// the enum's reported max_length is the longest member, not a user bound.
+func TestCompareColumns_EnumToTextNoLengthDrift(t *testing.T) {
+	src := []Column{{Name: "status", DataType: "enum", MaxLength: 8}}
+	tgt := []Column{{Name: "status", DataType: "text", MaxLength: 0}}
+	for _, d := range CompareColumns(src, tgt, "mysql", "postgres") {
+		if d.Criterion == "max_length" {
+			t.Errorf("enum→text should not flag max_length: %s", d.String())
+		}
+	}
+}
+
+// CURRENT_TIMESTAMP(6) (MySQL fsp) ≡ CURRENT_TIMESTAMP — the precision is a
+// column detail, not a default class, so it must not flag a default delta.
+func TestDefaultExpressionClass_NowFspArgStripped(t *testing.T) {
+	for _, f := range []string{"current_timestamp(6)", "CURRENT_TIMESTAMP(3)", "now(6)", "(current_timestamp(6))"} {
+		if got := defaultExpressionClass(f); got != "current_dt" {
+			t.Errorf("defaultExpressionClass(%q) = %q, want current_dt", f, got)
+		}
+	}
+	src := []Column{{Name: "at", DataType: "datetime", DefaultExpression: "CURRENT_TIMESTAMP(6)"}}
+	tgt := []Column{{Name: "at", DataType: "timestamp", DefaultExpression: "CURRENT_TIMESTAMP"}}
+	for _, d := range CompareColumns(src, tgt, "mysql", "postgres") {
+		if d.Criterion == "default" {
+			t.Errorf("CURRENT_TIMESTAMP(6)→CURRENT_TIMESTAMP should not flag default: %s", d.String())
+		}
+	}
+}

@@ -16,8 +16,15 @@ package driver
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// fspNowArgPattern matches a bare function name with a single numeric
+// (fractional-seconds) argument, e.g. "current_timestamp(6)" or "now(3)",
+// capturing the function name so the precision arg can be dropped for
+// default-class comparison.
+var fspNowArgPattern = regexp.MustCompile(`^([a-z_]+)\([0-9]+\)$`)
 
 // ColumnDelta records a single per-(column, criterion) mismatch from
 // CompareColumns. Format() renders it in the same wire shape #53's prompt
@@ -202,11 +209,18 @@ func normMaxLength(n int) int {
 // fixed capacity (65535, 16777215, ...), pg text/bytea report NULL → 0.
 // None of those numbers round-trip across dialects even when the mapping
 // is perfectly faithful, so they all collapse to the unbounded class.
+//
+// enum/set are included because their reported max_length is the longest
+// member value, not a user-chosen bound — and SMT maps a MySQL ENUM/SET to
+// an unbounded target type (pg text) on non-MySQL targets, so the length
+// must not flag. (The enum VALUE list, when both sides are MySQL, is a
+// separate concern not covered by length comparison.)
 var lobDataTypes = map[string]bool{
 	"text": true, "ntext": true, "image": true,
 	"tinytext": true, "mediumtext": true, "longtext": true,
 	"blob": true, "tinyblob": true, "mediumblob": true, "longblob": true,
 	"bytea": true, "xml": true,
+	"enum": true, "set": true,
 }
 
 // effectiveMaxLength is normMaxLength with LOB awareness: LOB types compare
@@ -518,6 +532,15 @@ func defaultExpressionClass(expr string) string {
 		if zone := strings.TrimSpace(norm[i+len(" at time zone "):]); zone == "'utc'" {
 			norm = strings.TrimSpace(norm[:i])
 		}
+	}
+	// Strip a fractional-seconds precision argument from a now-function:
+	// CURRENT_TIMESTAMP(6) ≡ CURRENT_TIMESTAMP, NOW(3) ≡ NOW(). The precision
+	// is a column-level detail (DatetimePrecision), not a default class — MySQL
+	// reports `CURRENT_TIMESTAMP(6)` while a PG target renders bare
+	// `CURRENT_TIMESTAMP`. Only a bare function-name with a numeric arg is
+	// reduced, so literals and multi-arg calls are untouched.
+	if m := fspNowArgPattern.FindStringSubmatch(norm); m != nil {
+		norm = m[1]
 	}
 
 	// "Now-style" function families. Split into three classes by what the

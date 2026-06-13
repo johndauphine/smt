@@ -248,28 +248,24 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 	// CompareColumns checks length/precision/nullability/identity/TZ/default
 	// but not the general type family, so an `int` → `text` change (both with
 	// no length/default/identity) slips through. Flag a high-confidence family
-	// mismatch on matched columns. Conservative on purpose: only the strict
-	// families (numeric/string/temporal/binary) participate, so legitimate
-	// cross-dialect equivalences the comparator already understands
-	// (bit→boolean, uniqueidentifier→char(36), json→jsonb) don't false-flag.
+	// mismatch on matched columns. Deliberately conservative — only the strict
+	// families participate, and a flag fires ONLY when BOTH sides resolve to a
+	// known, differing family. This avoids false positives on a freshly created
+	// target, which is the bar drift must clear: SMT's own mappings must read
+	// as "no drift." Cases left to the comparator's existing equivalence rules
+	// (and therefore NOT family-flagged) include bit/boolean (mssql bit → pg
+	// boolean, mysql tinyint(1) → pg smallint — SMT maps these differently per
+	// target, so "boolean" is not a portable family here), uuid (uniqueidentifier
+	// → char(36)), and json/xml.
 	//
-	// The flag fires only when BOTH sides resolve to a known class and the
-	// classes differ. A ONE-SIDED class (e.g. source numeric `int` vs a target
-	// the classifier doesn't cover, like `uuid` or pg `bit`/`bit varying`) is
-	// deliberately NOT flagged: the unrecognized side is exactly where legit
-	// cross-dialect equivalences live (uniqueidentifier→char(36), uuid→char(36)
-	// that CompareColumns handles specially), so flagging "known vs unknown"
-	// would false-positive on those. Catching those one-sided cases correctly
-	// needs the canonical concrete-type model (#62).
-	//
-	// Other known limitations, same #62 root: a SAME-family type change the
-	// comparator treats as equivalent (integer→bigint, varchar(20)→char(20))
-	// is not flagged, and per-column EXPRESSION/value details whose text
-	// differs across dialects — a changed computed expression body, MySQL
+	// Known limitations, all rooted in the lack of a canonical concrete-type /
+	// expression model (#62): a SAME-family type change (integer→bigint,
+	// varchar(20)→char(20)), a one-sided class change involving an unrecognized
+	// type (int→uuid, bit→integer), and per-column EXPRESSION/value details
+	// whose text differs across dialects — computed-expression bodies, MySQL
 	// ENUM/SET value lists, ON UPDATE expressions, spatial SRID — are not
-	// compared either. Drift catches presence/structure (computed Y/N + storage
-	// class, type family, length/precision/nullability/identity/TZ/default)
-	// today; expression-level and concrete-type equivalence is follow-up work.
+	// compared. Drift catches presence/structure (computed Y/N + storage class,
+	// type family, length/precision/nullability/identity/TZ/default) today.
 	haveByName := make(map[string]driver.Column, len(have.Columns))
 	for _, c := range have.Columns {
 		haveByName[strings.ToLower(c.Name)] = c
@@ -280,7 +276,7 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 			continue
 		}
 		name := strings.ToLower(sc.Name)
-		if sf, tf := columnTypeClass(sc, sourceDialect), columnTypeClass(tc, targetDialect); sf != "" && tf != "" && sf != tf {
+		if sf, tf := strictTypeFamily(sc.DataType), strictTypeFamily(tc.DataType); sf != "" && tf != "" && sf != tf {
 			td.ColumnDeltas = append(td.ColumnDeltas,
 				name+" type class: source="+sf+" target="+tf)
 		}
@@ -293,7 +289,13 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 		if sc.IsComputed != tc.IsComputed {
 			td.ColumnDeltas = append(td.ColumnDeltas,
 				name+" computed: source="+boolStr(sc.IsComputed)+" target="+boolStr(tc.IsComputed))
-		} else if sc.IsComputed && sc.ComputedPersisted != tc.ComputedPersisted {
+		} else if sc.IsComputed && sc.ComputedPersisted != tc.ComputedPersisted && targetSupportsVirtualComputed(targetDialect) {
+			// Storage class is only meaningful drift when the target can
+			// actually represent both: PostgreSQL generated columns are always
+			// STORED, so its reader reports every computed column persisted —
+			// comparing a source VIRTUAL column against it would false-drift on
+			// a faithfully created target. MySQL (VIRTUAL/STORED) and MSSQL
+			// (PERSISTED or not) can represent both.
 			td.ColumnDeltas = append(td.ColumnDeltas,
 				name+" computed storage: source persisted="+boolStr(sc.ComputedPersisted)+" target persisted="+boolStr(tc.ComputedPersisted))
 		}
@@ -379,6 +381,19 @@ func indexKeys(idxs []driver.Index) []string {
 	return out
 }
 
+// targetSupportsVirtualComputed reports whether the dialect can represent both
+// a VIRTUAL (non-persisted) and a STORED/PERSISTED computed column. PostgreSQL
+// only has STORED generated columns, so its storage class isn't a faithful
+// round-trip of a VIRTUAL source and must not be compared as drift.
+func targetSupportsVirtualComputed(dialect string) bool {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "mysql", "mariadb", "mssql", "sqlserver":
+		return true
+	default:
+		return false
+	}
+}
+
 func boolStr(b bool) string {
 	if b {
 		return "true"
@@ -416,38 +431,6 @@ func fkKeys(fks []driver.ForeignKey, ownerSchema string) []string {
 			"|"+normAction(fk.OnDelete)+"|"+normAction(fk.OnUpdate))
 	}
 	return out
-}
-
-// columnTypeClass returns the high-confidence type class of a column —
-// "boolean" or one of strictTypeFamily's families — used to flag an
-// incompatible cross-class change (boolean→integer, integer→text) that
-// CompareColumns doesn't catch. Boolean is its own class so bit↔boolean↔
-// tinyint(1) stay equivalent; uuid/json/xml/unknown return "" so the
-// comparator's existing equivalence rules apply unchallenged.
-func columnTypeClass(c driver.Column, dialect string) string {
-	if isBooleanType(c, dialect) {
-		return "boolean"
-	}
-	return strictTypeFamily(c.DataType)
-}
-
-// isBooleanType reports whether a column is the boolean class. Dialect-aware
-// because "bit" means different things: MSSQL/MySQL BIT is a boolean, but
-// PostgreSQL bit / bit varying is a fixed-length bit STRING, not boolean.
-// pg boolean is spelled "boolean"; MySQL tinyint(1) is the boolean convention
-// (plain tinyint is numeric).
-func isBooleanType(c driver.Column, dialect string) bool {
-	dt := strings.ToLower(strings.TrimSpace(c.DataType))
-	switch dt {
-	case "boolean", "bool":
-		return true
-	case "bit":
-		return strings.ToLower(strings.TrimSpace(dialect)) != "postgres"
-	case "tinyint":
-		return c.DisplayWidth == 1
-	default:
-		return false
-	}
 }
 
 // strictTypeFamily classifies a data type into one of the families where a

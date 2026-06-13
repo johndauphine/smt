@@ -340,18 +340,35 @@ func TestComputeDrift_ComputedColumn(t *testing.T) {
 		t.Errorf("missing computed delta: %v", d.ChangedTables[0].ColumnDeltas)
 	}
 
-	// Both computed but storage class changed (persisted → virtual).
+	// Both computed but storage class changed (persisted → virtual). Use an
+	// MSSQL target, which can represent both — a PG target can't (always
+	// STORED), so storage is not compared there (see the PG-virtual case below).
 	desired[0].Columns[0].IsComputed, existing[0].Columns[0].IsComputed = true, true
 	existing[0].Columns[0].ComputedPersisted = false
-	d = ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
+	d = ComputeDrift(desired, existing, "mssql", "mssql", DefaultDriftOptions())
 	if len(d.ChangedTables) != 1 || !strings.Contains(strings.Join(d.ChangedTables[0].ColumnDeltas, " "), "storage") {
-		t.Errorf("storage-class change should drift, got %+v", d.ChangedTables)
+		t.Errorf("storage-class change should drift on an mssql target, got %+v", d.ChangedTables)
 	}
 
 	// Both computed, same storage → no drift.
 	existing[0].Columns[0].ComputedPersisted = true
-	if d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions()); !d.IsEmpty() {
+	if d := ComputeDrift(desired, existing, "mssql", "mssql", DefaultDriftOptions()); !d.IsEmpty() {
 		t.Errorf("equivalent computed columns should not drift, got %+v", d.ChangedTables)
+	}
+}
+
+// PostgreSQL generated columns are always STORED, so a source VIRTUAL computed
+// column landing as STORED on a freshly created PG target is NOT drift — the
+// storage class must not be compared for PG targets (#115 review).
+func TestComputeDrift_PostgresVirtualComputedNoDrift(t *testing.T) {
+	desired := []driver.Table{{Name: "T", Columns: []driver.Column{
+		{Name: "margin", DataType: "decimal", IsComputed: true, ComputedExpression: "a-b", ComputedPersisted: false}, // VIRTUAL source
+	}}}
+	existing := []driver.Table{{Name: "t", Columns: []driver.Column{
+		{Name: "margin", DataType: "numeric", IsComputed: true, ComputedExpression: "a-b", ComputedPersisted: true}, // PG forces STORED
+	}}}
+	if d := ComputeDrift(desired, existing, "mysql", "postgres", DefaultDriftOptions()); !d.IsEmpty() {
+		t.Errorf("PG STORED of a VIRTUAL source must not drift, got %+v", d.ChangedTables)
 	}
 }
 
@@ -417,65 +434,6 @@ func TestComputeDrift_FKRefSchemaRelative(t *testing.T) {
 	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
 	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].MissingForeignKeys) == 0 {
 		t.Fatalf("cross-schema FK drift should be detected, got %+v", d.ChangedTables)
-	}
-}
-
-// Boolean→non-boolean type changes must drift while bit↔boolean↔tinyint(1)
-// stay equivalent.
-func TestComputeDrift_BooleanTypeClass(t *testing.T) {
-	bcol := func(name, dt string, width int) driver.Column {
-		return driver.Column{Name: name, DataType: dt, DisplayWidth: width, IsNullable: true}
-	}
-	// bit → integer: boolean vs numeric → drift.
-	d := ComputeDrift(
-		[]driver.Table{{Name: "T", Columns: []driver.Column{bcol("flag", "bit", 0)}}},
-		[]driver.Table{{Name: "t", Columns: []driver.Column{bcol("flag", "integer", 0)}}},
-		"mssql", "postgres", DefaultDriftOptions())
-	if len(d.ChangedTables) != 1 || !strings.Contains(strings.Join(d.ChangedTables[0].ColumnDeltas, " "), "boolean") {
-		t.Fatalf("bit→integer should drift on type class, got %+v", d.ChangedTables)
-	}
-
-	// bit → boolean and tinyint(1) → boolean: equivalent, no drift.
-	for _, src := range []driver.Column{bcol("flag", "bit", 0), bcol("flag", "tinyint", 1)} {
-		dd := ComputeDrift(
-			[]driver.Table{{Name: "T", Columns: []driver.Column{src}}},
-			[]driver.Table{{Name: "t", Columns: []driver.Column{bcol("flag", "boolean", 0)}}},
-			"mysql", "postgres", DefaultDriftOptions())
-		if !dd.IsEmpty() {
-			t.Errorf("%s→boolean should not drift, got %+v", src.DataType, dd.ChangedTables)
-		}
-	}
-
-	// Plain tinyint (no display width) is numeric, not boolean → vs boolean drifts.
-	d = ComputeDrift(
-		[]driver.Table{{Name: "T", Columns: []driver.Column{bcol("n", "tinyint", 0)}}},
-		[]driver.Table{{Name: "t", Columns: []driver.Column{bcol("n", "boolean", 0)}}},
-		"mysql", "postgres", DefaultDriftOptions())
-	if d.IsEmpty() {
-		t.Error("plain tinyint→boolean should drift (numeric vs boolean)")
-	}
-}
-
-// PG bit/bit varying is a bit-STRING, not boolean — an MSSQL bit (boolean)
-// drifting to a PG bit column must flag a type-class change. MSSQL bit stays
-// boolean (so bit→pg boolean is fine, bit→pg bit is drift).
-func TestComputeDrift_PostgresBitNotBoolean(t *testing.T) {
-	// mssql bit (boolean) → pg bit (bit-string): boolean vs "" ... pg bit is
-	// not a strict family either, so to make the drift visible we compare the
-	// classes directly through ComputeDrift with a numeric target.
-	if isBooleanType(driver.Column{DataType: "bit"}, "postgres") {
-		t.Error("postgres bit must not be classified boolean")
-	}
-	if !isBooleanType(driver.Column{DataType: "bit"}, "mssql") {
-		t.Error("mssql bit must be classified boolean")
-	}
-	// mssql bit → pg integer: boolean vs numeric → drift.
-	d := ComputeDrift(
-		[]driver.Table{{Name: "T", Columns: []driver.Column{{Name: "f", DataType: "bit"}}}},
-		[]driver.Table{{Name: "t", Columns: []driver.Column{{Name: "f", DataType: "integer"}}}},
-		"mssql", "postgres", DefaultDriftOptions())
-	if d.IsEmpty() {
-		t.Error("mssql bit → pg integer should drift on type class")
 	}
 }
 
