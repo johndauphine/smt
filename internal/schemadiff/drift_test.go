@@ -455,3 +455,41 @@ func TestComputeDrift_BooleanTypeClass(t *testing.T) {
 		t.Error("plain tinyint→boolean should drift (numeric vs boolean)")
 	}
 }
+
+// PG bit/bit varying is a bit-STRING, not boolean — an MSSQL bit (boolean)
+// drifting to a PG bit column must flag a type-class change. MSSQL bit stays
+// boolean (so bit→pg boolean is fine, bit→pg bit is drift).
+func TestComputeDrift_PostgresBitNotBoolean(t *testing.T) {
+	// mssql bit (boolean) → pg bit (bit-string): boolean vs "" ... pg bit is
+	// not a strict family either, so to make the drift visible we compare the
+	// classes directly through ComputeDrift with a numeric target.
+	if isBooleanType(driver.Column{DataType: "bit"}, "postgres") {
+		t.Error("postgres bit must not be classified boolean")
+	}
+	if !isBooleanType(driver.Column{DataType: "bit"}, "mssql") {
+		t.Error("mssql bit must be classified boolean")
+	}
+	// mssql bit → pg integer: boolean vs numeric → drift.
+	d := ComputeDrift(
+		[]driver.Table{{Name: "T", Columns: []driver.Column{{Name: "f", DataType: "bit"}}}},
+		[]driver.Table{{Name: "t", Columns: []driver.Column{{Name: "f", DataType: "integer"}}}},
+		"mssql", "postgres", DefaultDriftOptions())
+	if d.IsEmpty() {
+		t.Error("mssql bit → pg integer should drift on type class")
+	}
+}
+
+// A target-only CHECK (target has MORE checks than the source) is drift too —
+// it can reject rows the source allows.
+func TestComputeDrift_TargetOnlyCheck(t *testing.T) {
+	desired := []driver.Table{{Name: "T", Columns: []driver.Column{dcol("a", "int")}}}
+	existing := []driver.Table{{
+		Name:             "t",
+		Columns:          []driver.Column{dcol("a", "integer")},
+		CheckConstraints: []driver.CheckConstraint{{Name: "ck", Definition: "a > 0"}},
+	}}
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 || d.ChangedTables[0].CheckDrift == "" {
+		t.Fatalf("target-only CHECK should drift, got %+v", d.ChangedTables)
+	}
+}

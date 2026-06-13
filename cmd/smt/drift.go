@@ -112,7 +112,7 @@ func runDrift(c *cli.Context) error {
 	// no scope set, the target is left whole so genuine extra tables are still
 	// detected.
 	if len(include) > 0 || len(exclude) > 0 {
-		existing = filterToManagedSet(existing, desired)
+		existing = filterToManagedSet(existing, desired, include, exclude)
 	}
 	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
 		return err
@@ -164,24 +164,39 @@ func matchesAnyExact(name string, patterns []string) bool {
 	return false
 }
 
-// filterToManagedSet keeps only the existing (target) tables whose name matches
-// an in-scope desired table by normalized name, comparing case-insensitively.
-// This scopes the target to the managed set via membership rather than
-// re-running the source-cased patterns against already-normalized target
-// names. Under include/exclude, out-of-scope target tables are simply not
-// compared (so they're neither flagged extra nor mistaken for managed).
-func filterToManagedSet(existing, desired []driver.Table) []driver.Table {
+// filterToManagedSet scopes the target tables under include/exclude. A target
+// table is kept when it is either a managed table — its normalized name matches
+// an in-scope desired table — or a genuine in-scope extra: not present in the
+// source but still matching the scope rules (so e.g. include_tables: ["*"]
+// still surfaces a target-only table as extra). Out-of-scope target tables are
+// dropped so they're not mistaken for drift. Managed-table matching is by
+// normalized-name membership (no case/glob ambiguity); the in-scope check for
+// extras matches the target name against the patterns the same way create/sync
+// do (case-sensitive filepath.Match).
+func filterToManagedSet(existing, desired []driver.Table, include, exclude []string) []driver.Table {
 	managed := make(map[string]bool, len(desired))
 	for _, t := range desired {
 		managed[strings.ToLower(t.Name)] = true
 	}
 	out := make([]driver.Table, 0, len(existing))
 	for _, t := range existing {
-		if managed[strings.ToLower(t.Name)] {
+		if managed[strings.ToLower(t.Name)] || inScope(t.Name, include, exclude) {
 			out = append(out, t)
 		}
 	}
 	return out
+}
+
+// inScope reports whether a table name passes the include/exclude rules, with
+// create/sync semantics (exclude wins; include, when set, is an allowlist).
+func inScope(name string, include, exclude []string) bool {
+	if matchesAnyExact(name, exclude) {
+		return false
+	}
+	if len(include) > 0 && !matchesAnyExact(name, include) {
+		return false
+	}
+	return true
 }
 
 // loadConstraintsGated loads only the constraint kinds that are managed

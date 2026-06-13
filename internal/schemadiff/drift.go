@@ -247,7 +247,7 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 			continue
 		}
 		name := strings.ToLower(sc.Name)
-		if sf, tf := columnTypeClass(sc), columnTypeClass(tc); sf != "" && tf != "" && sf != tf {
+		if sf, tf := columnTypeClass(sc, sourceDialect), columnTypeClass(tc, targetDialect); sf != "" && tf != "" && sf != tf {
 			td.ColumnDeltas = append(td.ColumnDeltas,
 				name+" type class: source="+sf+" target="+tf)
 		}
@@ -282,9 +282,11 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 			fkKeys(want.ForeignKeys, want.Schema), fkKeys(have.ForeignKeys, have.Schema))
 	}
 	// CHECK constraints: predicate text is rewritten cross-dialect, so a
-	// faithful target may carry textually different predicates. Only flag a
-	// likely drop — the target having fewer checks than the source.
-	if opts.CompareChecks && len(have.CheckConstraints) < len(want.CheckConstraints) {
+	// faithful target may carry textually different predicates — only the
+	// COUNT is compared. A mismatch in either direction is drift: fewer on the
+	// target means a check was dropped; more means a target-only check that can
+	// reject rows the source allows.
+	if opts.CompareChecks && len(have.CheckConstraints) != len(want.CheckConstraints) {
 		td.CheckDrift = "source has " + strconv.Itoa(len(want.CheckConstraints)) +
 			" check constraint(s), target has " + strconv.Itoa(len(have.CheckConstraints))
 	}
@@ -389,20 +391,25 @@ func fkKeys(fks []driver.ForeignKey, ownerSchema string) []string {
 // CompareColumns doesn't catch. Boolean is its own class so bit↔boolean↔
 // tinyint(1) stay equivalent; uuid/json/xml/unknown return "" so the
 // comparator's existing equivalence rules apply unchallenged.
-func columnTypeClass(c driver.Column) string {
-	if isBooleanType(c) {
+func columnTypeClass(c driver.Column, dialect string) string {
+	if isBooleanType(c, dialect) {
 		return "boolean"
 	}
 	return strictTypeFamily(c.DataType)
 }
 
-// isBooleanType reports whether a column is the boolean class across dialects:
-// pg boolean, MSSQL bit, and MySQL tinyint(1) (DisplayWidth captured by the
-// reader). Plain tinyint (no display width) is numeric, not boolean.
-func isBooleanType(c driver.Column) bool {
-	switch strings.ToLower(strings.TrimSpace(c.DataType)) {
-	case "boolean", "bool", "bit":
+// isBooleanType reports whether a column is the boolean class. Dialect-aware
+// because "bit" means different things: MSSQL/MySQL BIT is a boolean, but
+// PostgreSQL bit / bit varying is a fixed-length bit STRING, not boolean.
+// pg boolean is spelled "boolean"; MySQL tinyint(1) is the boolean convention
+// (plain tinyint is numeric).
+func isBooleanType(c driver.Column, dialect string) bool {
+	dt := strings.ToLower(strings.TrimSpace(c.DataType))
+	switch dt {
+	case "boolean", "bool":
 		return true
+	case "bit":
+		return strings.ToLower(strings.TrimSpace(dialect)) != "postgres"
 	case "tinyint":
 		return c.DisplayWidth == 1
 	default:
