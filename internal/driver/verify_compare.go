@@ -118,14 +118,71 @@ func CompareColumns(src, tgt []Column, srcDialect, tgtDialect string) []ColumnDe
 // without flagging. The AI parser is instructed to emit 0 for unbounded
 // types; this normalization keeps the comparison stable regardless of which
 // sentinel either side carries.
-func cmpMaxLength(src, tgt Column, _, _ string) *ColumnDelta {
-	if normMaxLength(src.MaxLength) == normMaxLength(tgt.MaxLength) {
+func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
+	// PG has no sized binary type: every binary-family source necessarily
+	// lands as unbounded bytea, so length is not user-controlled there and
+	// must not flag (binary(16) → bytea is the only possible mapping).
+	if isBinaryFamilyType(src.DataType) && strings.EqualFold(strings.TrimSpace(tgt.DataType), "bytea") {
+		return nil
+	}
+	// MySQL's LOB tiers ARE user-meaningful capacity choices when both
+	// sides speak them: LONGTEXT → TEXT silently rejects values above
+	// 64KiB, so a same-family tier change must flag even though both types
+	// are "unbounded LOBs" for cross-dialect purposes. Compared by name
+	// rank rather than catalog length because the AI parser reports 0 for
+	// the target's tier types.
+	if sf, sr := mysqlLOBTier(srcDialect, src.DataType); sr > 0 {
+		if tf, tr := mysqlLOBTier(tgtDialect, tgt.DataType); tr > 0 {
+			if sf == tf && sr != tr {
+				return &ColumnDelta{
+					Column: src.Name, Criterion: "max_length",
+					SourceVal: strings.ToLower(strings.TrimSpace(src.DataType)),
+					TargetVal: strings.ToLower(strings.TrimSpace(tgt.DataType)),
+				}
+			}
+			return nil
+		}
+	}
+	if effectiveMaxLength(src) == effectiveMaxLength(tgt) {
 		return nil
 	}
 	return &ColumnDelta{
 		Column: src.Name, Criterion: "max_length",
 		SourceVal: fmt.Sprintf("%d", src.MaxLength),
 		TargetVal: fmt.Sprintf("%d", tgt.MaxLength),
+	}
+}
+
+// mysqlLOBTier classifies MySQL's sized LOB families by capacity rank:
+// tiny=1 (255B), base=2 (64KiB), medium=3 (16MiB), long=4 (4GiB), with the
+// family ("text" or "blob") alongside. Returns rank 0 when the type isn't a
+// MySQL-tiered LOB or the dialect doesn't encode tiers (mssql `text` is a
+// 2GB LOB, not a 64KiB tier — only mysql/mariadb names carry tier meaning).
+func mysqlLOBTier(dialect, dataType string) (family string, rank int) {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "mysql", "mariadb":
+	default:
+		return "", 0
+	}
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "tinytext":
+		return "text", 1
+	case "text":
+		return "text", 2
+	case "mediumtext":
+		return "text", 3
+	case "longtext":
+		return "text", 4
+	case "tinyblob":
+		return "blob", 1
+	case "blob":
+		return "blob", 2
+	case "mediumblob":
+		return "blob", 3
+	case "longblob":
+		return "blob", 4
+	default:
+		return "", 0
 	}
 }
 
@@ -137,6 +194,40 @@ func normMaxLength(n int) int {
 		return 0
 	}
 	return n
+}
+
+// lobDataTypes are unbounded LOB types whose reported max_length is a
+// storage artifact rather than a user choice: mssql text/image report
+// 2147483647 and ntext 1073741823, mysql text/blob tiers report their
+// fixed capacity (65535, 16777215, ...), pg text/bytea report NULL → 0.
+// None of those numbers round-trip across dialects even when the mapping
+// is perfectly faithful, so they all collapse to the unbounded class.
+var lobDataTypes = map[string]bool{
+	"text": true, "ntext": true, "image": true,
+	"tinytext": true, "mediumtext": true, "longtext": true,
+	"blob": true, "tinyblob": true, "mediumblob": true, "longblob": true,
+	"bytea": true, "xml": true,
+}
+
+// effectiveMaxLength is normMaxLength with LOB awareness: LOB types compare
+// as unbounded regardless of the capacity number the catalog reports.
+func effectiveMaxLength(c Column) int {
+	if lobDataTypes[strings.ToLower(strings.TrimSpace(c.DataType))] {
+		return 0
+	}
+	return normMaxLength(c.MaxLength)
+}
+
+// isBinaryFamilyType reports whether the type stores raw bytes (sized or
+// unbounded). Used by the bytea exemption in cmpMaxLength.
+func isBinaryFamilyType(dt string) bool {
+	switch strings.ToLower(strings.TrimSpace(dt)) {
+	case "binary", "varbinary", "image", "bytea", "rowversion",
+		"blob", "tinyblob", "mediumblob", "longblob":
+		return true
+	default:
+		return false
+	}
 }
 
 // cmpPrecisionScale enforces criterion 2 (numeric precision/scale): only

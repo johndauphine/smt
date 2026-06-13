@@ -488,3 +488,85 @@ func TestCompareColumns_CaseInsensitiveLookup(t *testing.T) {
 		t.Errorf("expected zero deltas for case-equivalent column names, got %v", deltas)
 	}
 }
+
+// TestCompareColumns_BinaryAndLOBLengths pins the #46 type_smoke cases:
+// sized binary sources can only land as unbounded bytea on PG (no sized
+// binary type exists), and LOB capacity numbers (mssql text=2147483647,
+// mysql blob=65535, ...) are storage artifacts that must compare as
+// unbounded — while sized-vs-sized binary mismatches still flag.
+func TestCompareColumns_BinaryAndLOBLengths(t *testing.T) {
+	pass := []struct {
+		name             string
+		src, tgt         Column
+		srcDial, tgtDial string
+	}{
+		{"binary(16) → bytea", Column{Name: "b", DataType: "binary", MaxLength: 16}, Column{Name: "b", DataType: "bytea", MaxLength: 0}, "mssql", "postgres"},
+		{"varbinary(50) → bytea", Column{Name: "b", DataType: "varbinary", MaxLength: 50}, Column{Name: "b", DataType: "bytea", MaxLength: 0}, "mssql", "postgres"},
+		{"varbinary(MAX) → bytea", Column{Name: "b", DataType: "varbinary", MaxLength: -1}, Column{Name: "b", DataType: "bytea", MaxLength: 0}, "mssql", "postgres"},
+		{"legacy text → text", Column{Name: "b", DataType: "text", MaxLength: 2147483647}, Column{Name: "b", DataType: "text", MaxLength: 0}, "mssql", "postgres"},
+		{"legacy image → bytea", Column{Name: "b", DataType: "image", MaxLength: 2147483647}, Column{Name: "b", DataType: "bytea", MaxLength: 0}, "mssql", "postgres"},
+		{"mysql blob → bytea", Column{Name: "b", DataType: "blob", MaxLength: 65535}, Column{Name: "b", DataType: "bytea", MaxLength: 0}, "mysql", "postgres"},
+		{"mysql mediumtext → text", Column{Name: "b", DataType: "mediumtext", MaxLength: 16777215}, Column{Name: "b", DataType: "text", MaxLength: 0}, "mysql", "postgres"},
+		{"mysql blob → mssql VARBINARY(MAX)", Column{Name: "b", DataType: "blob", MaxLength: 65535}, Column{Name: "b", DataType: "varbinary", MaxLength: -1}, "mysql", "mssql"},
+	}
+	for _, tc := range pass {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, tc.srcDial, tc.tgtDial)
+			if len(deltas) != 0 {
+				t.Errorf("expected zero deltas, got %v", deltas)
+			}
+		})
+	}
+
+	// Negative: sized binary on a target that CAN size binary must still
+	// round-trip exactly (the bytea exemption is pg-specific).
+	src := []Column{{Name: "b", DataType: "varbinary", MaxLength: 50}}
+	tgt := []Column{{Name: "b", DataType: "varbinary", MaxLength: 49}}
+	deltas := CompareColumns(src, tgt, "mssql", "mysql")
+	if len(deltas) != 1 || deltas[0].Criterion != "max_length" {
+		t.Fatalf("expected one max_length delta for varbinary(50)→varbinary(49), got %v", deltas)
+	}
+}
+
+// Codex review finding on the #46 LOB rules: MySQL tier names are real
+// capacity choices when both sides speak them — LONGTEXT → TEXT rejects
+// values above 64KiB and must flag — while cross-dialect mappings (pg text,
+// mssql VARBINARY(MAX)) stay in the unbounded class. mssql's legacy `text`
+// is a 2GB LOB, not a 64KiB tier, so it never participates.
+func TestCompareColumns_MySQLLOBTiers(t *testing.T) {
+	flag := []struct {
+		name     string
+		src, tgt Column
+	}{
+		{"longtext downgraded to text", Column{Name: "c", DataType: "longtext"}, Column{Name: "c", DataType: "text"}},
+		{"mediumblob downgraded to blob", Column{Name: "c", DataType: "mediumblob"}, Column{Name: "c", DataType: "blob"}},
+		{"text upgraded to longtext", Column{Name: "c", DataType: "text"}, Column{Name: "c", DataType: "longtext"}},
+	}
+	for _, tc := range flag {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, "mysql", "mysql")
+			if len(deltas) != 1 || deltas[0].Criterion != "max_length" {
+				t.Fatalf("expected one max_length delta, got %v", deltas)
+			}
+		})
+	}
+
+	pass := []struct {
+		name             string
+		src, tgt         Column
+		srcDial, tgtDial string
+	}{
+		{"same tier", Column{Name: "c", DataType: "mediumtext"}, Column{Name: "c", DataType: "mediumtext"}, "mysql", "mysql"},
+		{"tier → pg text", Column{Name: "c", DataType: "longtext", MaxLength: 4294967295}, Column{Name: "c", DataType: "text"}, "mysql", "postgres"},
+		{"tier → mssql MAX", Column{Name: "c", DataType: "longblob"}, Column{Name: "c", DataType: "varbinary", MaxLength: -1}, "mysql", "mssql"},
+		{"mssql legacy text is not a tier", Column{Name: "c", DataType: "text", MaxLength: 2147483647}, Column{Name: "c", DataType: "longtext"}, "mssql", "mysql"},
+	}
+	for _, tc := range pass {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, tc.srcDial, tc.tgtDial)
+			if len(deltas) != 0 {
+				t.Fatalf("expected zero deltas, got %v", deltas)
+			}
+		})
+	}
+}

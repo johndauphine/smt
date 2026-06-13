@@ -51,7 +51,11 @@ SELECT
   LOWER(c.DATA_TYPE) AS dt,
   -- Normalize MSSQL's MAX sentinel (-1) to '' so it equates to unbounded PG
   -- targets (text, etc.) where character_maximum_length is NULL → ''.
+  -- Legacy LOB types (text/ntext/image) report their fixed capacity
+  -- (2147483647 / 1073741823) rather than a user-chosen length; they are
+  -- unbounded for comparison purposes too.
   CASE
+    WHEN c.DATA_TYPE IN ('text','ntext','image') THEN ''
     WHEN c.CHARACTER_MAXIMUM_LENGTH IS NULL THEN ''
     WHEN c.CHARACTER_MAXIMUM_LENGTH = -1     THEN ''
     ELSE CAST(c.CHARACTER_MAXIMUM_LENGTH AS VARCHAR)
@@ -151,8 +155,10 @@ BEGIN {
     if (!(key in tgt_seen)) {
       printf("  FAIL %s — column missing on target\n", key); fail++; continue
     }
-    # 1: max_length
-    if (s_len[key] != t_len[key]) {
+    # 1: max_length. PG has no sized binary type, so binary-family sources
+    # (binary/varbinary/image) necessarily land as unbounded bytea — length
+    # is not user-controlled there and must not flag.
+    if (s_len[key] != t_len[key] && !(t_dt[key] == "bytea" && s_dt[key] ~ /^(binary|varbinary|image|rowversion)$/)) {
       printf("  FAIL %s max_length: source=%s target=%s\n", key, s_len[key], t_len[key]); fail++
     }
     # 2: precision/scale (only for numeric/decimal where these are user-meaningful;

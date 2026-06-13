@@ -65,3 +65,17 @@ func TestDeterministicDatetimePrecision(t *testing.T) {
 		}
 	}
 }
+
+// #46 — MySQL blob tiers must land as bytea instead of failing the
+// unknown-type policy when the type_smoke fixture migrates mysql→pg.
+func TestColumnType_MySQLBlobTiers(t *testing.T) {
+	for _, dt := range []string{"blob", "tinyblob", "mediumblob", "longblob"} {
+		typ, err := RenderColumnTypeWithPolicy(driver.Column{Name: "b", DataType: dt, MaxLength: 65535}, "fail")
+		if err != nil {
+			t.Fatalf("RenderColumnTypeWithPolicy(%s): %v", dt, err)
+		}
+		if typ != "bytea" {
+			t.Errorf("RenderColumnTypeWithPolicy(%s) = %q, want bytea", dt, typ)
+		}
+	}
+}
