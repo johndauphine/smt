@@ -125,6 +125,31 @@ func deepCopyTable(t driver.Table) driver.Table {
 	return t
 }
 
+// RetargetSchema returns a deep copy of tables with every schema reference —
+// the table's own Schema and each foreign key's RefSchema — set to
+// targetSchema. create/sync do this (Diff.WithTargetSchema) because SMT
+// migrates everything into one target schema, collapsing even a source
+// cross-schema FK to the target schema. Drift must apply the same collapse to
+// the DESIRED side so its FK signatures match what was actually generated on
+// the target; the existing (introspected) side is left untouched so a genuine
+// cross-schema reference on the target still drifts. Input is not mutated;
+// pass-through when targetSchema is empty.
+func RetargetSchema(tables []driver.Table, targetSchema string) []driver.Table {
+	if strings.TrimSpace(targetSchema) == "" {
+		return tables
+	}
+	out := make([]driver.Table, len(tables))
+	for i := range tables {
+		t := deepCopyTable(tables[i])
+		t.Schema = targetSchema
+		for j := range t.ForeignKeys {
+			t.ForeignKeys[j].RefSchema = targetSchema
+		}
+		out[i] = t
+	}
+	return out
+}
+
 // IsEmpty reports whether the target matches the desired schema.
 func (d Drift) IsEmpty() bool {
 	return len(d.MissingTables) == 0 && len(d.ExtraTables) == 0 && len(d.ChangedTables) == 0

@@ -78,6 +78,13 @@ func runDrift(c *cli.Context) error {
 		return fmt.Errorf("introspecting source: %w", err)
 	}
 	norm := func(name string) string { return driver.NormalizeIdentifier(targetDialect, name) }
+	// allSourceNorm is every source table's normalized name — used to tell an
+	// out-of-scope source table (which exists on the target but isn't managed)
+	// apart from a genuine target-only extra.
+	allSourceNorm := make(map[string]bool, len(desired))
+	for _, t := range desired {
+		allSourceNorm[strings.ToLower(norm(t.Name))] = true
+	}
 	// Filter the SOURCE side with exactly the semantics create/sync use —
 	// case-sensitive filepath.Match on the original source names — so drift's
 	// scope is identical to what the migration manages.
@@ -87,11 +94,11 @@ func runDrift(c *cli.Context) error {
 		return err
 	}
 	// Fold every desired identifier — table, column, AND index/FK column lists
-	// and referenced tables — to the target's on-disk convention so constraint
-	// comparisons line up with the introspected (already-normalized) target.
-	// FK referenced-schema comparison is schema-relative inside ComputeDrift,
-	// so no schema retargeting is needed here.
+	// and referenced tables — to the target's on-disk convention, then collapse
+	// schema references to the target schema exactly as create/sync do, so FK
+	// signatures match what was generated on the target.
 	desired = schemadiff.NormalizeIdentifiers(desired, norm)
+	desired = schemadiff.RetargetSchema(desired, cfg.Target.Schema)
 
 	// Existing: introspect the live target through a reader on the target
 	// connection.
@@ -105,14 +112,15 @@ func runDrift(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("introspecting target: %w", err)
 	}
-	// Scope the target to the same managed set: when include/exclude is in
-	// effect, keep only target tables whose name matches an in-scope desired
-	// table (by normalized name) — membership, not pattern matching, so there's
-	// no case/glob ambiguity against the already-normalized target names. With
-	// no scope set, the target is left whole so genuine extra tables are still
-	// detected.
+	// Scope the target to the same managed set when include/exclude is in
+	// effect. A target table is kept iff it is managed (its normalized name is
+	// in the filtered desired set) or a genuine target-only extra (its
+	// normalized name is not any source table's). An out-of-scope source table
+	// that happens to exist on the target — e.g. an excluded one — is dropped.
+	// All matching is by normalized-name membership, so there's no case/glob
+	// ambiguity against the already-normalized target names.
 	if len(include) > 0 || len(exclude) > 0 {
-		existing = filterToManagedSet(existing, desired, include, exclude)
+		existing = filterToManagedSet(existing, desired, allSourceNorm)
 	}
 	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
 		return err
@@ -164,39 +172,25 @@ func matchesAnyExact(name string, patterns []string) bool {
 	return false
 }
 
-// filterToManagedSet scopes the target tables under include/exclude. A target
-// table is kept when it is either a managed table — its normalized name matches
-// an in-scope desired table — or a genuine in-scope extra: not present in the
-// source but still matching the scope rules (so e.g. include_tables: ["*"]
-// still surfaces a target-only table as extra). Out-of-scope target tables are
-// dropped so they're not mistaken for drift. Managed-table matching is by
-// normalized-name membership (no case/glob ambiguity); the in-scope check for
-// extras matches the target name against the patterns the same way create/sync
-// do (case-sensitive filepath.Match).
-func filterToManagedSet(existing, desired []driver.Table, include, exclude []string) []driver.Table {
+// filterToManagedSet scopes the target tables. desired holds the managed
+// (in-scope, normalized) source tables; allSourceNorm holds EVERY source
+// table's normalized name. A target table is kept iff it is managed, or it is
+// a genuine target-only extra (not any source table). A target table that
+// corresponds to a source table which was filtered out of scope (e.g. an
+// excluded one) is dropped, so excluded tables aren't reported as drift.
+func filterToManagedSet(existing, desired []driver.Table, allSourceNorm map[string]bool) []driver.Table {
 	managed := make(map[string]bool, len(desired))
 	for _, t := range desired {
 		managed[strings.ToLower(t.Name)] = true
 	}
 	out := make([]driver.Table, 0, len(existing))
 	for _, t := range existing {
-		if managed[strings.ToLower(t.Name)] || inScope(t.Name, include, exclude) {
+		lt := strings.ToLower(t.Name)
+		if managed[lt] || !allSourceNorm[lt] {
 			out = append(out, t)
 		}
 	}
 	return out
-}
-
-// inScope reports whether a table name passes the include/exclude rules, with
-// create/sync semantics (exclude wins; include, when set, is an allowlist).
-func inScope(name string, include, exclude []string) bool {
-	if matchesAnyExact(name, exclude) {
-		return false
-	}
-	if len(include) > 0 && !matchesAnyExact(name, include) {
-		return false
-	}
-	return true
 }
 
 // loadConstraintsGated loads only the constraint kinds that are managed

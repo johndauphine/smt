@@ -615,3 +615,13 @@ func TestDefaultExpressionClass_NonUTCZonePreserved(t *testing.T) {
 		t.Error("UTC and non-UTC AT TIME ZONE defaults must classify differently")
 	}
 }
+
+// SYSUTCDATETIME() (MSSQL UTC now) must classify as current_dt so it matches
+// the PG `CURRENT_TIMESTAMP AT TIME ZONE 'UTC'` SMT renders from it.
+func TestDefaultExpressionClass_SysUTCDatetime(t *testing.T) {
+	for _, f := range []string{"sysutcdatetime()", "SYSUTCDATETIME()", "(sysutcdatetime())"} {
+		if got := defaultExpressionClass(f); got != "current_dt" {
+			t.Errorf("defaultExpressionClass(%q) = %q, want current_dt", f, got)
+		}
+	}
+}

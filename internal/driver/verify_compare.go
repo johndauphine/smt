@@ -536,6 +536,7 @@ func defaultExpressionClass(expr string) string {
 	case "current_timestamp", "now()", "now",
 		"getdate()", "getdate", "getutcdate()", "getutcdate",
 		"sysdatetime()", "sysdatetime",
+		"sysutcdatetime()", "sysutcdatetime",
 		"sysdatetimeoffset()", "sysdatetimeoffset",
 		"systimestamp",
 		"localtimestamp", "localtimestamp()":

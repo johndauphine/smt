@@ -493,3 +493,23 @@ func TestComputeDrift_TargetOnlyCheck(t *testing.T) {
 		t.Fatalf("target-only CHECK should drift, got %+v", d.ChangedTables)
 	}
 }
+
+// RetargetSchema collapses table + FK schema references to the target schema
+// (mirroring create/sync) without mutating the input.
+func TestRetargetSchema(t *testing.T) {
+	in := []driver.Table{{
+		Name: "Orders", Schema: "dbo",
+		ForeignKeys: []driver.ForeignKey{{Name: "fk", RefSchema: "other", RefTable: "C"}},
+	}}
+	out := RetargetSchema(in, "public")
+	if out[0].Schema != "public" || out[0].ForeignKeys[0].RefSchema != "public" {
+		t.Errorf("RetargetSchema did not collapse to target schema: %+v", out[0])
+	}
+	if in[0].Schema != "dbo" || in[0].ForeignKeys[0].RefSchema != "other" {
+		t.Errorf("RetargetSchema mutated its input: %+v", in[0])
+	}
+	// Empty target schema → pass-through (values unchanged).
+	if got := RetargetSchema(in, ""); got[0].Schema != "dbo" {
+		t.Errorf("empty target schema should pass through, got %q", got[0].Schema)
+	}
+}

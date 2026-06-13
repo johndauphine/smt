@@ -75,33 +75,31 @@ func TestFilterDesiredScope_MatchesOrchestrator(t *testing.T) {
 	}
 }
 
-// filterToManagedSet keeps managed tables (by normalized-name membership) and
-// in-scope target-only extras, dropping out-of-scope target tables.
+// filterToManagedSet keeps managed tables and genuine target-only extras,
+// dropping target tables that correspond to an out-of-scope (e.g. excluded)
+// source table.
 func TestFilterToManagedSet(t *testing.T) {
-	desired := []driver.Table{{Name: "orders"}, {Name: "items"}} // normalized names
-	existing := []driver.Table{{Name: "orders"}, {Name: "items"}, {Name: "legacy"}}
-
-	// include ["*"] is a no-op for create/sync, so a target-only "legacy"
-	// table must still surface (it's in scope) for extra detection.
-	got := filterToManagedSet(existing, desired, []string{"*"}, nil)
-	if len(got) != 3 {
-		t.Errorf("include [*] should keep managed + in-scope extra: %+v", got)
+	// Source has orders, items, auditlog; auditlog is excluded → not in desired.
+	desired := []driver.Table{{Name: "orders"}, {Name: "items"}} // managed (normalized)
+	allSource := map[string]bool{"orders": true, "items": true, "auditlog": true}
+	existing := []driver.Table{
+		{Name: "orders"},   // managed
+		{Name: "items"},    // managed
+		{Name: "auditlog"}, // excluded source table on target → drop
+		{Name: "legacy"},   // target-only, not a source table → keep (extra)
 	}
-
-	// exclude ["legacy"] drops the target-only table from scope.
-	got = filterToManagedSet(existing, desired, nil, []string{"legacy"})
+	got := filterToManagedSet(existing, desired, allSource)
+	names := map[string]bool{}
 	for _, tb := range got {
-		if tb.Name == "legacy" {
-			t.Errorf("excluded table should be dropped: %+v", got)
-		}
+		names[tb.Name] = true
 	}
-	if len(got) != 2 {
-		t.Errorf("exclude [legacy] should keep only managed: %+v", got)
+	if names["auditlog"] {
+		t.Error("excluded source table on target must be dropped from drift scope")
 	}
-
-	// include allowlist that doesn't cover the extra → extra not surfaced.
-	got = filterToManagedSet(existing, desired, []string{"orders", "items"}, nil)
-	if len(got) != 2 {
-		t.Errorf("include allowlist should drop out-of-scope legacy: %+v", got)
+	if !names["orders"] || !names["items"] {
+		t.Error("managed tables must be kept")
+	}
+	if !names["legacy"] {
+		t.Error("genuine target-only table must be kept for extra detection")
 	}
 }
