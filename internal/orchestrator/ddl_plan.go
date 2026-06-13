@@ -417,7 +417,13 @@ func (r createDDLRenderer) reviewFinalization(ctx context.Context, ddlType drive
 }
 
 func handleReviewVerdict(mode, label string, verdict *driver.VerifyResult) error {
-	if verdict == nil || verdict.OK {
+	// A nil verdict with no error is a reviewer-contract violation: review is
+	// enabled but produced no audit result. Fail closed (regardless of mode,
+	// like a provider failure) rather than letting apply proceed unreviewed.
+	if verdict == nil {
+		return fmt.Errorf("AI review for %s produced no verdict (reviewer returned nothing); failing closed", label)
+	}
+	if verdict.OK {
 		logging.Debug("AI review OK: %s", label)
 		return nil
 	}
