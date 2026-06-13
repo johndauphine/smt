@@ -233,6 +233,15 @@ func verifySO2010(t *testing.T, src, tgt []driver.Table, schema string) verifyRe
 			}
 		}
 
+		// CHECK constraints must not be silently dropped. Predicate text is
+		// rewritten cross-dialect (mssql `([x]>(0))` → pg `x > 0`), so exact
+		// comparison would false-positive; assert the count instead, which
+		// catches a renderer regression that omits CHECK statements wholesale.
+		if len(tt.CheckConstraints) < len(s.CheckConstraints) {
+			rep.Failures = append(rep.Failures,
+				fmt.Sprintf("%s check constraints: source=%d target=%d", s.Name, len(s.CheckConstraints), len(tt.CheckConstraints)))
+		}
+
 		totalPK += len(tt.PrimaryKey)
 		totalFK += len(tt.ForeignKeys)
 		rep.Tables = append(rep.Tables, tr)
@@ -330,10 +339,35 @@ func colSetKey(cols []string) string {
 	return strings.Join(lowerSorted(cols), ",")
 }
 
-// fkKey identifies a foreign key by its local column set and referenced
-// table — dialect-independent, ignoring the (normalized) constraint name.
+// fkKey identifies a foreign key by its local→referenced column pairs,
+// referenced table, and referential actions — dialect-independent, ignoring
+// the (normalized) constraint name. Column/refcolumn pairing is positional,
+// so pairs are formed first and then sorted as a set; this catches composite
+// FKs that point at the wrong referenced columns or use different actions.
 func fkKey(fk driver.ForeignKey) string {
-	return colSetKey(fk.Columns) + "->" + strings.ToLower(fk.RefTable)
+	pairs := make([]string, 0, len(fk.Columns))
+	for i, c := range fk.Columns {
+		ref := ""
+		if i < len(fk.RefColumns) {
+			ref = strings.ToLower(fk.RefColumns[i])
+		}
+		pairs = append(pairs, strings.ToLower(c)+":"+ref)
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ",") + "->" + strings.ToLower(fk.RefTable) +
+		"|" + normAction(fk.OnDelete) + "|" + normAction(fk.OnUpdate)
+}
+
+// normAction folds the no-op referential-action spellings ("", "NO ACTION",
+// "RESTRICT") to one token so a source NO ACTION matches a target that
+// reports the default differently.
+func normAction(a string) string {
+	switch strings.ToUpper(strings.TrimSpace(a)) {
+	case "", "NO ACTION", "RESTRICT":
+		return "noaction"
+	default:
+		return strings.ToLower(strings.Join(strings.Fields(a), " "))
+	}
 }
 
 func lowerSorted(in []string) []string {
@@ -362,4 +396,34 @@ func countWithPK(tables []driver.Table) int {
 		}
 	}
 	return n
+}
+
+// Hermetic unit test for the FK identity key (no live DB). Pins that
+// composite FKs are matched by paired local→ref columns and that
+// no-op referential actions fold together while real ones don't.
+func TestFKKey(t *testing.T) {
+	base := driver.ForeignKey{
+		Name: "fk1", Columns: []string{"a", "b"}, RefTable: "Parent",
+		RefColumns: []string{"x", "y"}, OnDelete: "CASCADE", OnUpdate: "",
+	}
+	// Order-insensitive at the FK level, case-insensitive, name-independent.
+	reordered := driver.ForeignKey{
+		Name: "renamed", Columns: []string{"B", "A"}, RefTable: "parent",
+		RefColumns: []string{"Y", "X"}, OnDelete: "cascade", OnUpdate: "NO ACTION",
+	}
+	if fkKey(base) != fkKey(reordered) {
+		t.Errorf("equivalent FKs produced different keys:\n %s\n %s", fkKey(base), fkKey(reordered))
+	}
+	// Wrong referenced column must differ.
+	wrongRef := base
+	wrongRef.RefColumns = []string{"x", "z"}
+	if fkKey(base) == fkKey(wrongRef) {
+		t.Error("FK pointing at different referenced columns must not match")
+	}
+	// Different action must differ.
+	wrongAction := base
+	wrongAction.OnDelete = "SET NULL"
+	if fkKey(base) == fkKey(wrongAction) {
+		t.Error("FK with different ON DELETE must not match")
+	}
 }
