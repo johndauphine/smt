@@ -260,3 +260,36 @@ func TestCompute_DatetimePrecisionVersioning(t *testing.T) {
 		t.Fatalf("real fsp change not detected: %+v", d)
 	}
 }
+
+// #101 — pre-v4 snapshots lack DisplayWidth; backfill prevents spurious
+// diffs on tinyint(1) columns, while v4 snapshots still detect real changes.
+func TestCompute_DisplayWidthVersioning(t *testing.T) {
+	oldSnap := Snapshot{
+		Version: 3,
+		Tables: []driver.Table{{
+			Name:    "flags",
+			Columns: []driver.Column{{Name: "active", DataType: "tinyint"}},
+		}},
+	}
+	curr := Snapshot{
+		Version: CurrentSnapshotVersion,
+		Tables: []driver.Table{{
+			Name:    "flags",
+			Columns: []driver.Column{{Name: "active", DataType: "tinyint", DisplayWidth: 1}},
+		}},
+	}
+	if d := Compute(oldSnap, curr); !d.IsEmpty() {
+		t.Fatalf("v3 snapshot produced spurious display-width diff: %+v", d.ChangedTables)
+	}
+
+	prev := Snapshot{
+		Version: CurrentSnapshotVersion,
+		Tables: []driver.Table{{
+			Name:    "flags",
+			Columns: []driver.Column{{Name: "active", DataType: "tinyint"}},
+		}},
+	}
+	if d := Compute(prev, curr); len(d.ChangedTables) != 1 {
+		t.Fatalf("real display-width change not detected: %+v", d)
+	}
+}

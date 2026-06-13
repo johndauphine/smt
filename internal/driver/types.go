@@ -115,7 +115,8 @@ type Column struct {
 	DatetimePrecision  *int     `json:"datetime_precision,omitempty"` // fractional-seconds precision for datetime/time-class columns; nil = unknown (pre-v3 snapshots)
 	IsNullable         bool     `json:"is_nullable"`
 	IsIdentity         bool     `json:"is_identity"`
-	IsUnsigned         bool     `json:"is_unsigned,omitempty"` // true for MySQL unsigned numeric columns
+	IsUnsigned         bool     `json:"is_unsigned,omitempty"`   // true for MySQL unsigned numeric columns
+	DisplayWidth       int      `json:"display_width,omitempty"` // MySQL integer display width, captured only for tinyint(1) (the boolean convention); other widths are deprecated and intentionally not captured
 	OrdinalPos         int      `json:"ordinal_position"`
 	DefaultExpression  string   `json:"default_expression,omitempty"`   // raw default clause from source dialect (e.g. "((0))", "getutcdate()", "'pending'") — empty if no default
 	OnUpdateExpression string   `json:"on_update_expression,omitempty"` // raw MySQL ON UPDATE expression (e.g. "CURRENT_TIMESTAMP")

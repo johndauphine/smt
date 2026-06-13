@@ -99,3 +99,27 @@ func TestParseOnUpdateExpression(t *testing.T) {
 		}
 	}
 }
+
+// #101 — COLUMN_TYPE "tinyint(1)" is the boolean convention and must survive
+// a same-dialect round-trip; every other tinyint declaration is left alone.
+func TestIsTinyint1ColumnType(t *testing.T) {
+	tests := []struct {
+		columnType string
+		want       bool
+	}{
+		{"tinyint(1)", true},
+		{"TINYINT(1)", true},
+		{"tinyint(1) unsigned", true},
+		{"tinyint(1) unsigned zerofill", true},
+		{"tinyint", false},
+		{"tinyint(4)", false},
+		{"tinyint(3) unsigned", false},
+		{"smallint(1)", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := isTinyint1ColumnType(tc.columnType); got != tc.want {
+			t.Errorf("isTinyint1ColumnType(%q) = %v, want %v", tc.columnType, got, tc.want)
+		}
+	}
+}

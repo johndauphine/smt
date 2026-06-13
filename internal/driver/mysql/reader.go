@@ -248,6 +248,15 @@ func isUnsignedColumnType(columnType string) bool {
 	return false
 }
 
+// isTinyint1ColumnType reports whether COLUMN_TYPE declares the tinyint(1)
+// boolean convention. Only width 1 matters: other display widths are
+// deprecated cosmetics (MySQL 8.0.17+), but tinyint(1) is what connectors and
+// ORMs treat as boolean, so a same-dialect migration must preserve it.
+func isTinyint1ColumnType(columnType string) bool {
+	first, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(columnType)), " ")
+	return first == "tinyint(1)"
+}
+
 func parseOnUpdateExpression(extra string) string {
 	lower := strings.ToLower(extra)
 	idx := strings.Index(lower, "on update ")
@@ -366,6 +375,9 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			c.EnumValues = values
 		}
 		c.IsUnsigned = isUnsignedColumnType(columnType)
+		if strings.EqualFold(c.DataType, "tinyint") && isTinyint1ColumnType(columnType) {
+			c.DisplayWidth = 1
+		}
 		c.OnUpdateExpression = parseOnUpdateExpression(extra)
 		if computed, persisted := parseGeneratedColumnExtra(extra); computed {
 			c.IsComputed = true

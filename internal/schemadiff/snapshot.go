@@ -24,7 +24,8 @@ import (
 //   - 0/1: original format (a snapshot without a version field decodes as 0)
 //   - 2: Column gained IsUnsigned, EnumValues, OnUpdateExpression
 //   - 3: Column gained DatetimePrecision
-const CurrentSnapshotVersion = 3
+//   - 4: Column gained DisplayWidth (tinyint(1) boolean convention)
+const CurrentSnapshotVersion = 4
 
 // Snapshot is a serializable point-in-time view of a source schema.
 type Snapshot struct {
