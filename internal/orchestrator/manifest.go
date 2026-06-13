@@ -12,15 +12,21 @@ package orchestrator
 //     entries instead of replaying them.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 
 	"smt/internal/ddl"
+	"smt/internal/driver"
 	"smt/internal/version"
 )
 
-// manifestArtifactName is the filename of the run manifest within the run dir.
+// manifestArtifactName is the filename of the run manifest. It lives in the
+// same ddl/ directory as schema.sql so the two travel together.
 const manifestArtifactName = "manifest.json"
 
 type runManifest struct {
@@ -38,9 +44,13 @@ type runManifest struct {
 }
 
 // writeRunManifest fingerprints the source schema and the rendered SQL and
-// writes the manifest into the run directory.
-func (o *Orchestrator) writeRunManifest(runID string, r createDDLRenderer, planSQL string) error {
-	srcFP, err := fingerprintJSON(o.tables)
+// writes the manifest into the ddl/ run directory beside schema.sql.
+func (o *Orchestrator) writeRunManifest(ctx context.Context, runID string, r createDDLRenderer, planSQL string) error {
+	snap, err := o.canonicalSourceSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("building source fingerprint snapshot: %w", err)
+	}
+	srcFP, err := fingerprintJSON(snap)
 	if err != nil {
 		return err
 	}
@@ -57,7 +67,57 @@ func (o *Orchestrator) writeRunManifest(runID string, r createDDLRenderer, planS
 		SourceFingerprint: srcFP,
 		PlanFingerprint:   fingerprintBytes([]byte(planSQL)),
 	}
-	return o.writeJSONArtifact(runID, manifestArtifactName, m)
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := o.ddlArtifactDir(runID)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, manifestArtifactName), append(data, '\n'), 0600)
+}
+
+// canonicalSourceSnapshot returns a copy of the in-scope source tables loaded
+// with exactly the constraint metadata that drives the rendered plan — the
+// per-table render helpers load indexes/FKs/checks into goroutine-local
+// copies, so o.tables alone carries only columns/PKs. Non-DDL statistics
+// (row counts, sample values) are zeroed so the fingerprint tracks schema
+// shape, not table contents. Only the enabled create_* categories are loaded,
+// keeping the fingerprint aligned with what the plan actually contains.
+func (o *Orchestrator) canonicalSourceSnapshot(ctx context.Context) ([]driver.Table, error) {
+	out := make([]driver.Table, len(o.tables))
+	for i := range o.tables {
+		t := o.tables[i] // value copy; Load* mutate the copy, not o.tables
+		if o.config.Migration.CreateIndexes {
+			if err := o.source.LoadIndexes(ctx, &t); err != nil {
+				return nil, fmt.Errorf("loading indexes for %s: %w", t.Name, err)
+			}
+		}
+		if o.config.Migration.CreateForeignKeys {
+			if err := o.source.LoadForeignKeys(ctx, &t); err != nil {
+				return nil, fmt.Errorf("loading FKs for %s: %w", t.Name, err)
+			}
+		}
+		if o.config.Migration.CreateCheckConstraints {
+			if err := o.source.LoadCheckConstraints(ctx, &t); err != nil {
+				return nil, fmt.Errorf("loading checks for %s: %w", t.Name, err)
+			}
+		}
+		canonicalizeForFingerprint(&t)
+		out[i] = t
+	}
+	return out, nil
+}
+
+// canonicalizeForFingerprint zeroes the non-DDL fields so the fingerprint
+// reflects schema shape rather than table data or transient stats.
+func canonicalizeForFingerprint(t *driver.Table) {
+	t.RowCount = 0
+	t.EstimatedRowSize = 0
+	for j := range t.Columns {
+		t.Columns[j].SampleValues = nil
+	}
 }
 
 // fingerprintJSON returns "sha256:<hex>" over the stable JSON encoding of v.

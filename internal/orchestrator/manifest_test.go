@@ -31,6 +31,46 @@ func TestFingerprintStableAndSensitive(t *testing.T) {
 	if !strings.HasPrefix(fa, "sha256:") {
 		t.Errorf("fingerprint missing sha256: prefix: %q", fa)
 	}
+
+	// The canonical snapshot loads indexes/FKs/checks, so the fingerprint
+	// must move when any of those change — the gap that prompted hashing
+	// the full snapshot rather than columns/PKs alone.
+	withIdx := []driver.Table{{
+		Name:    "Users",
+		Columns: []driver.Column{{Name: "Id", DataType: "int"}},
+		Indexes: []driver.Index{{Name: "ix_users_id", Columns: []string{"Id"}}},
+	}}
+	withFK := []driver.Table{{
+		Name:        "Users",
+		Columns:     []driver.Column{{Name: "Id", DataType: "int"}},
+		ForeignKeys: []driver.ForeignKey{{Name: "fk", Columns: []string{"Id"}, RefTable: "Orgs", RefColumns: []string{"Id"}}},
+	}}
+	fIdx, _ := fingerprintJSON(withIdx)
+	fFK, _ := fingerprintJSON(withFK)
+	if fIdx == fa {
+		t.Error("adding an index did not change the fingerprint")
+	}
+	if fFK == fa {
+		t.Error("adding a foreign key did not change the fingerprint")
+	}
+}
+
+// Non-DDL stats (row counts, sample values) must not perturb the fingerprint,
+// so it tracks schema shape rather than table contents.
+func TestCanonicalizeForFingerprintIgnoresStats(t *testing.T) {
+	base := driver.Table{Name: "T", Columns: []driver.Column{{Name: "c", DataType: "int"}}}
+	noisy := driver.Table{
+		Name:             "T",
+		RowCount:         9999,
+		EstimatedRowSize: 128,
+		Columns:          []driver.Column{{Name: "c", DataType: "int", SampleValues: []string{"1", "2"}}},
+	}
+	canonicalizeForFingerprint(&noisy)
+	fb, _ := fingerprintJSON([]driver.Table{base})
+	fn, _ := fingerprintJSON([]driver.Table{noisy})
+	if fb != fn {
+		t.Errorf("row-count/sample-value stats leaked into the fingerprint:\n %s\n %s", fb, fn)
+	}
 }
 
 func TestFingerprintBytes(t *testing.T) {
