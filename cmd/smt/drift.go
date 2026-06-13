@@ -85,11 +85,10 @@ func runDrift(c *cli.Context) error {
 	}
 	// Fold every desired identifier — table, column, AND index/FK column lists
 	// and referenced tables — to the target's on-disk convention so constraint
-	// comparisons line up with the introspected (already-normalized) target,
-	// then resolve schema references to the target schema so cross-schema FK
-	// signatures compare equal.
+	// comparisons line up with the introspected (already-normalized) target.
+	// FK referenced-schema comparison is schema-relative inside ComputeDrift,
+	// so no schema retargeting is needed here.
 	desired = schemadiff.NormalizeIdentifiers(desired, norm)
-	desired = schemadiff.RetargetSchema(desired, cfg.Target.Schema)
 
 	// Existing: introspect the live target through a reader on the target
 	// connection.
@@ -111,7 +110,6 @@ func runDrift(c *cli.Context) error {
 	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
 		return err
 	}
-	existing = schemadiff.RetargetSchema(existing, cfg.Target.Schema)
 
 	drift := schemadiff.ComputeDrift(desired, existing, sourceDialect, targetDialect, opts)
 	printDriftReport(drift)

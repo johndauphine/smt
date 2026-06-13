@@ -173,7 +173,7 @@ func TestComputeDrift_IndexFKCheck(t *testing.T) {
 	if len(td.ExtraIndexes) != 1 || td.ExtraIndexes[0] != "id,customerid" {
 		t.Errorf("extra indexes = %v, want [id,customerid]", td.ExtraIndexes)
 	}
-	if len(td.MissingForeignKeys) != 1 || td.MissingForeignKeys[0] != "customerid:id->customers|noaction|noaction" {
+	if len(td.MissingForeignKeys) != 1 || td.MissingForeignKeys[0] != "customerid:id->self.customers|noaction|noaction" {
 		t.Errorf("missing FKs = %v, want [customerid:id->customers|noaction|noaction]", td.MissingForeignKeys)
 	}
 	if td.CheckDrift == "" {
@@ -386,38 +386,72 @@ func TestComputeDrift_IndexIncludeAndFilter(t *testing.T) {
 	}
 }
 
-// A foreign key pointing at a different referenced SCHEMA must drift even when
-// the referenced table/columns match. RetargetSchema aligns both sides to the
-// target schema so same-schema FKs don't false-drift.
-func TestComputeDrift_FKRefSchemaAndRetarget(t *testing.T) {
+// FK referenced-schema comparison is schema-relative: a same-schema reference
+// (RefSchema equal to the owning table's schema, or empty) reads as "self" and
+// compares equal across dialects even when the literal schema names differ
+// (source "dbo" vs target "public"); a genuine cross-schema reference that
+// changes drifts.
+func TestComputeDrift_FKRefSchemaRelative(t *testing.T) {
+	// Same-schema FK on both sides but with different literal schema names —
+	// must NOT drift (both are "self").
 	desired := []driver.Table{{
-		Name:    "Orders",
+		Name: "Orders", Schema: "dbo",
 		Columns: []driver.Column{dcol("cust", "int")},
 		ForeignKeys: []driver.ForeignKey{
-			{Name: "fk", Columns: []string{"cust"}, RefSchema: "app", RefTable: "Customers", RefColumns: []string{"id"}},
+			{Name: "fk", Columns: []string{"cust"}, RefSchema: "dbo", RefTable: "Customers", RefColumns: []string{"id"}},
 		},
 	}}
-	// Same FK shape but pointing at a different schema on the target.
 	existing := []driver.Table{{
-		Name:    "orders",
+		Name: "orders", Schema: "public",
 		Columns: []driver.Column{dcol("cust", "integer")},
 		ForeignKeys: []driver.ForeignKey{
-			{Name: "fk", Columns: []string{"cust"}, RefSchema: "legacy", RefTable: "customers", RefColumns: []string{"id"}},
+			{Name: "fk", Columns: []string{"cust"}, RefSchema: "public", RefTable: "customers", RefColumns: []string{"id"}},
 		},
 	}}
-	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
-	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].MissingForeignKeys) == 0 {
-		t.Fatalf("cross-schema FK ref should drift, got %+v", d.ChangedTables)
+	if d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions()); !d.IsEmpty() {
+		t.Fatalf("same-schema FK across dialects should not drift, got %+v", d.ChangedTables)
 	}
 
-	// After retargeting both sides to the same schema, the FK matches.
-	rd := RetargetSchema(desired, "public")
-	re := RetargetSchema(existing, "public")
-	if d := ComputeDrift(rd, re, "mssql", "postgres", DefaultDriftOptions()); !d.IsEmpty() {
-		t.Errorf("same-schema FK after retarget should not drift, got %+v", d.ChangedTables)
+	// Target FK drifted to reference a different (cross-)schema → must drift.
+	existing[0].ForeignKeys[0].RefSchema = "legacy"
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].MissingForeignKeys) == 0 {
+		t.Fatalf("cross-schema FK drift should be detected, got %+v", d.ChangedTables)
 	}
-	// RetargetSchema must not mutate the input.
-	if desired[0].ForeignKeys[0].RefSchema != "app" {
-		t.Errorf("RetargetSchema mutated its input: %q", desired[0].ForeignKeys[0].RefSchema)
+}
+
+// Boolean→non-boolean type changes must drift while bit↔boolean↔tinyint(1)
+// stay equivalent.
+func TestComputeDrift_BooleanTypeClass(t *testing.T) {
+	bcol := func(name, dt string, width int) driver.Column {
+		return driver.Column{Name: name, DataType: dt, DisplayWidth: width, IsNullable: true}
+	}
+	// bit → integer: boolean vs numeric → drift.
+	d := ComputeDrift(
+		[]driver.Table{{Name: "T", Columns: []driver.Column{bcol("flag", "bit", 0)}}},
+		[]driver.Table{{Name: "t", Columns: []driver.Column{bcol("flag", "integer", 0)}}},
+		"mssql", "postgres", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 || !strings.Contains(strings.Join(d.ChangedTables[0].ColumnDeltas, " "), "boolean") {
+		t.Fatalf("bit→integer should drift on type class, got %+v", d.ChangedTables)
+	}
+
+	// bit → boolean and tinyint(1) → boolean: equivalent, no drift.
+	for _, src := range []driver.Column{bcol("flag", "bit", 0), bcol("flag", "tinyint", 1)} {
+		dd := ComputeDrift(
+			[]driver.Table{{Name: "T", Columns: []driver.Column{src}}},
+			[]driver.Table{{Name: "t", Columns: []driver.Column{bcol("flag", "boolean", 0)}}},
+			"mysql", "postgres", DefaultDriftOptions())
+		if !dd.IsEmpty() {
+			t.Errorf("%s→boolean should not drift, got %+v", src.DataType, dd.ChangedTables)
+		}
+	}
+
+	// Plain tinyint (no display width) is numeric, not boolean → vs boolean drifts.
+	d = ComputeDrift(
+		[]driver.Table{{Name: "T", Columns: []driver.Column{bcol("n", "tinyint", 0)}}},
+		[]driver.Table{{Name: "t", Columns: []driver.Column{bcol("n", "boolean", 0)}}},
+		"mysql", "postgres", DefaultDriftOptions())
+	if d.IsEmpty() {
+		t.Error("plain tinyint→boolean should drift (numeric vs boolean)")
 	}
 }

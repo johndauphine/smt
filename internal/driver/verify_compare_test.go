@@ -570,3 +570,31 @@ func TestCompareColumns_MySQLLOBTiers(t *testing.T) {
 		})
 	}
 }
+
+// PG renders MSSQL GETUTCDATE()/SYSUTCDATETIME() as CURRENT_TIMESTAMP AT TIME
+// ZONE 'UTC'. Both are current-datetime defaults; the comparator must treat
+// them as equivalent so a freshly-created target doesn't report drift.
+func TestDefaultExpressionClass_UTCNowEquivalence(t *testing.T) {
+	utcForms := []string{
+		"getutcdate()",
+		"(getutcdate())",
+		"CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
+		"(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')",
+		"(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)",
+		"current_timestamp",
+	}
+	for _, f := range utcForms {
+		if got := defaultExpressionClass(f); got != "current_dt" {
+			t.Errorf("defaultExpressionClass(%q) = %q, want current_dt", f, got)
+		}
+	}
+	// A source getutcdate() column vs a target rendered as the PG UTC form
+	// must not flag a default delta.
+	src := []Column{{Name: "at", DataType: "datetime2", DefaultExpression: "(getutcdate())"}}
+	tgt := []Column{{Name: "at", DataType: "timestamp", DefaultExpression: "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)"}}
+	for _, d := range CompareColumns(src, tgt, "mssql", "postgres") {
+		if d.Criterion == "default" {
+			t.Errorf("unexpected default delta for UTC-now round-trip: %s", d.String())
+		}
+	}
+}

@@ -125,29 +125,6 @@ func deepCopyTable(t driver.Table) driver.Table {
 	return t
 }
 
-// RetargetSchema returns a deep copy of tables with every schema reference
-// (the table's own Schema and each foreign key's RefSchema) set to
-// targetSchema. SMT migrates source.X to target.Y, so a same-schema FK on the
-// source resolves to the target schema; aligning both sides lets FK drift
-// signatures (which include the referenced schema) compare equal instead of
-// flagging a source-vs-target schema-name difference. The input is not
-// mutated. A pass-through when targetSchema is empty.
-func RetargetSchema(tables []driver.Table, targetSchema string) []driver.Table {
-	if strings.TrimSpace(targetSchema) == "" {
-		return tables
-	}
-	out := make([]driver.Table, len(tables))
-	for i := range tables {
-		t := deepCopyTable(tables[i])
-		t.Schema = targetSchema
-		for j := range t.ForeignKeys {
-			t.ForeignKeys[j].RefSchema = targetSchema
-		}
-		out[i] = t
-	}
-	return out
-}
-
 // IsEmpty reports whether the target matches the desired schema.
 func (d Drift) IsEmpty() bool {
 	return len(d.MissingTables) == 0 && len(d.ExtraTables) == 0 && len(d.ChangedTables) == 0
@@ -270,8 +247,7 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 			continue
 		}
 		name := strings.ToLower(sc.Name)
-		sf, tf := strictTypeFamily(sc.DataType), strictTypeFamily(tc.DataType)
-		if sf != "" && tf != "" && sf != tf {
+		if sf, tf := columnTypeClass(sc), columnTypeClass(tc); sf != "" && tf != "" && sf != tf {
 			td.ColumnDeltas = append(td.ColumnDeltas,
 				name+" type class: source="+sf+" target="+tf)
 		}
@@ -302,7 +278,8 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 		td.MissingIndexes, td.ExtraIndexes = diffKeys(indexKeys(want.Indexes), indexKeys(have.Indexes))
 	}
 	if opts.CompareForeignKeys {
-		td.MissingForeignKeys, td.ExtraForeignKeys = diffKeys(fkKeys(want.ForeignKeys), fkKeys(have.ForeignKeys))
+		td.MissingForeignKeys, td.ExtraForeignKeys = diffKeys(
+			fkKeys(want.ForeignKeys, want.Schema), fkKeys(have.ForeignKeys, have.Schema))
 	}
 	// CHECK constraints: predicate text is rewritten cross-dialect, so a
 	// faithful target may carry textually different predicates. Only flag a
@@ -375,10 +352,17 @@ func boolStr(b bool) string {
 }
 
 // fkKeys returns a signature for each foreign key built from its ordered
-// local→referenced column pairs, referenced table, and referential actions —
-// so a target FK that changes ON DELETE/UPDATE or points at different
-// referenced columns no longer matches.
-func fkKeys(fks []driver.ForeignKey) []string {
+// local→referenced column pairs, referenced table+schema, and referential
+// actions — so a target FK that changes ON DELETE/UPDATE, points at different
+// referenced columns, or references a different schema no longer matches.
+//
+// The referenced schema is encoded RELATIVE to the FK's owning table: a
+// same-schema reference (empty RefSchema or equal to ownerSchema) becomes
+// "self", so the common case compares equal across dialects without
+// retargeting (source "dbo" and target "public" both read as "self"), while a
+// genuine cross-schema reference keeps its literal schema and drifts if it
+// changes.
+func fkKeys(fks []driver.ForeignKey, ownerSchema string) []string {
 	out := make([]string, 0, len(fks))
 	for _, fk := range fks {
 		pairs := make([]string, len(fk.Columns))
@@ -389,20 +373,47 @@ func fkKeys(fks []driver.ForeignKey) []string {
 			}
 			pairs[i] = strings.ToLower(c) + ":" + ref
 		}
-		ref := strings.ToLower(fk.RefTable)
-		if s := strings.TrimSpace(fk.RefSchema); s != "" {
-			ref = strings.ToLower(s) + "." + ref
+		schema := "self"
+		if s := strings.TrimSpace(fk.RefSchema); s != "" && !strings.EqualFold(s, ownerSchema) {
+			schema = strings.ToLower(s)
 		}
-		out = append(out, strings.Join(pairs, ",")+"->"+ref+
+		out = append(out, strings.Join(pairs, ",")+"->"+schema+"."+strings.ToLower(fk.RefTable)+
 			"|"+normAction(fk.OnDelete)+"|"+normAction(fk.OnUpdate))
 	}
 	return out
 }
 
+// columnTypeClass returns the high-confidence type class of a column —
+// "boolean" or one of strictTypeFamily's families — used to flag an
+// incompatible cross-class change (boolean→integer, integer→text) that
+// CompareColumns doesn't catch. Boolean is its own class so bit↔boolean↔
+// tinyint(1) stay equivalent; uuid/json/xml/unknown return "" so the
+// comparator's existing equivalence rules apply unchallenged.
+func columnTypeClass(c driver.Column) string {
+	if isBooleanType(c) {
+		return "boolean"
+	}
+	return strictTypeFamily(c.DataType)
+}
+
+// isBooleanType reports whether a column is the boolean class across dialects:
+// pg boolean, MSSQL bit, and MySQL tinyint(1) (DisplayWidth captured by the
+// reader). Plain tinyint (no display width) is numeric, not boolean.
+func isBooleanType(c driver.Column) bool {
+	switch strings.ToLower(strings.TrimSpace(c.DataType)) {
+	case "boolean", "bool", "bit":
+		return true
+	case "tinyint":
+		return c.DisplayWidth == 1
+	default:
+		return false
+	}
+}
+
 // strictTypeFamily classifies a data type into one of the families where a
 // cross-family change is unambiguously incompatible (numeric/string/temporal/
 // binary). Types with known cross-dialect equivalences that span families —
-// boolean (bit↔boolean↔tinyint(1)), uuid (uniqueidentifier↔char(36)), json,
+// boolean (handled by isBooleanType), uuid (uniqueidentifier↔char(36)), json,
 // xml — and anything unrecognized return "" so they are left to the
 // deterministic comparator and never produce a false family mismatch.
 func strictTypeFamily(dataType string) string {
