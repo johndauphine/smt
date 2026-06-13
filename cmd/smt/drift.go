@@ -78,8 +78,11 @@ func runDrift(c *cli.Context) error {
 		return fmt.Errorf("introspecting source: %w", err)
 	}
 	norm := func(name string) string { return driver.NormalizeIdentifier(targetDialect, name) }
-	// Filter on SOURCE names with the source-cased patterns (globs intact).
-	desired = filterTablesByScope(desired, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables, norm)
+	// Filter the SOURCE side with exactly the semantics create/sync use —
+	// case-sensitive filepath.Match on the original source names — so drift's
+	// scope is identical to what the migration manages.
+	include, exclude := cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables
+	desired = filterDesiredScope(desired, include, exclude)
 	if err := loadConstraintsGated(ctx, orch.Source(), desired, opts); err != nil {
 		return err
 	}
@@ -102,11 +105,15 @@ func runDrift(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("introspecting target: %w", err)
 	}
-	// Scope the target the same way: only compare tables the source manages,
-	// so unrelated objects living in the target schema aren't flagged extra.
-	// The target names are already normalized, so the filter also tries the
-	// normalized form of each literal pattern (see filterTablesByScope).
-	existing = filterTablesByScope(existing, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables, norm)
+	// Scope the target to the same managed set: when include/exclude is in
+	// effect, keep only target tables whose name matches an in-scope desired
+	// table (by normalized name) — membership, not pattern matching, so there's
+	// no case/glob ambiguity against the already-normalized target names. With
+	// no scope set, the target is left whole so genuine extra tables are still
+	// detected.
+	if len(include) > 0 || len(exclude) > 0 {
+		existing = filterToManagedSet(existing, desired)
+	}
 	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
 		return err
 	}
@@ -126,23 +133,21 @@ func runDrift(c *cli.Context) error {
 
 // targetAsSource adapts the target connection into a SourceConfig so the same
 // deterministic reader path can introspect it.
-// filterTablesByScope applies the migration include/exclude rules the same way
-// the orchestrator does (exclude wins; include, when set, is an allowlist).
-// It matches a name against each pattern case-insensitively (with glob
-// support), and additionally tries the target-normalized form of literal
-// patterns via norm — so a literal pattern like "Order Items" still matches a
-// target table the dialect slugged to "order_items". Globs are not normalized
-// (normalization would mangle `*`/`?`), so they keep plain CI semantics.
-func filterTablesByScope(tables []driver.Table, include, exclude []string, norm func(string) string) []driver.Table {
+// filterDesiredScope applies the migration include/exclude rules with exactly
+// the semantics the orchestrator's create/sync use: exclude wins, include
+// (when set) is an allowlist, and patterns are matched case-sensitively with
+// filepath.Match on the original source names. Keeping this identical to the
+// migration path means drift's scope is the migration's scope.
+func filterDesiredScope(tables []driver.Table, include, exclude []string) []driver.Table {
 	if len(include) == 0 && len(exclude) == 0 {
 		return tables
 	}
 	out := make([]driver.Table, 0, len(tables))
 	for _, t := range tables {
-		if matchesAnyScoped(t.Name, exclude, norm) {
+		if matchesAnyExact(t.Name, exclude) {
 			continue
 		}
-		if len(include) > 0 && !matchesAnyScoped(t.Name, include, norm) {
+		if len(include) > 0 && !matchesAnyExact(t.Name, include) {
 			continue
 		}
 		out = append(out, t)
@@ -150,19 +155,33 @@ func filterTablesByScope(tables []driver.Table, include, exclude []string, norm 
 	return out
 }
 
-func matchesAnyScoped(name string, patterns []string, norm func(string) string) bool {
-	lower := strings.ToLower(name)
+func matchesAnyExact(name string, patterns []string) bool {
 	for _, p := range patterns {
-		if ok, _ := filepath.Match(strings.ToLower(p), lower); ok {
-			return true
-		}
-		// Literal (glob-free) patterns: also match the dialect-normalized
-		// form, so a name that needed slugging on the target still matches.
-		if norm != nil && !strings.ContainsAny(p, "*?[") && norm(p) == name {
+		if ok, _ := filepath.Match(p, name); ok {
 			return true
 		}
 	}
 	return false
+}
+
+// filterToManagedSet keeps only the existing (target) tables whose name matches
+// an in-scope desired table by normalized name, comparing case-insensitively.
+// This scopes the target to the managed set via membership rather than
+// re-running the source-cased patterns against already-normalized target
+// names. Under include/exclude, out-of-scope target tables are simply not
+// compared (so they're neither flagged extra nor mistaken for managed).
+func filterToManagedSet(existing, desired []driver.Table) []driver.Table {
+	managed := make(map[string]bool, len(desired))
+	for _, t := range desired {
+		managed[strings.ToLower(t.Name)] = true
+	}
+	out := make([]driver.Table, 0, len(existing))
+	for _, t := range existing {
+		if managed[strings.ToLower(t.Name)] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // loadConstraintsGated loads only the constraint kinds that are managed

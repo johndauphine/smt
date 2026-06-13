@@ -48,26 +48,47 @@ func TestDriftDialectCanonicalization(t *testing.T) {
 	}
 }
 
-// A literal include/exclude pattern that the target dialect slugs (spaces →
-// underscores) must still match the normalized target table name.
-func TestFilterTablesByScope_NormalizedLiteral(t *testing.T) {
-	norm := func(s string) string { return driver.NormalizeIdentifier("postgres", s) }
-	// Target table is already normalized to "order_items".
-	tables := []driver.Table{{Name: "order_items"}, {Name: "orders"}}
+// filterDesiredScope must match create/sync exactly: case-sensitive
+// filepath.Match on the original source names (exclude wins; include is an
+// allowlist).
+func TestFilterDesiredScope_MatchesOrchestrator(t *testing.T) {
+	tables := []driver.Table{{Name: "Orders"}, {Name: "AuditLog"}, {Name: "Items"}}
 
-	// Exclude the literal source name "Order Items" — must drop order_items.
-	got := filterTablesByScope(tables, nil, []string{"Order Items"}, norm)
-	if len(got) != 1 || got[0].Name != "orders" {
-		t.Errorf("literal slug-needing exclude failed: %+v", got)
+	// Exclude glob — case-sensitive, like the orchestrator.
+	got := filterDesiredScope(tables, nil, []string{"Audit*"})
+	if len(got) != 2 || got[0].Name != "Orders" || got[1].Name != "Items" {
+		t.Errorf("exclude Audit* = %+v, want [Orders Items]", got)
 	}
-	// Include the literal name — must keep only order_items.
-	got = filterTablesByScope(tables, []string{"Order Items"}, nil, norm)
-	if len(got) != 1 || got[0].Name != "order_items" {
-		t.Errorf("literal slug-needing include failed: %+v", got)
+	// Case-sensitive: lowercase pattern must NOT match the capitalized name.
+	got = filterDesiredScope(tables, nil, []string{"audit*"})
+	if len(got) != 3 {
+		t.Errorf("case-sensitive exclude should not match AuditLog: %+v", got)
 	}
-	// A glob still works via plain CI matching.
-	got = filterTablesByScope(tables, []string{"order*"}, nil, norm)
+	// Include allowlist.
+	got = filterDesiredScope(tables, []string{"Orders"}, nil)
+	if len(got) != 1 || got[0].Name != "Orders" {
+		t.Errorf("include [Orders] = %+v", got)
+	}
+	// No scope → unchanged.
+	if got := filterDesiredScope(tables, nil, nil); len(got) != 3 {
+		t.Errorf("no scope should pass through, got %+v", got)
+	}
+}
+
+// filterToManagedSet scopes the target to managed tables by normalized-name
+// membership (case-insensitive), so out-of-scope target tables aren't compared.
+func TestFilterToManagedSet(t *testing.T) {
+	desired := []driver.Table{{Name: "orders"}, {Name: "items"}} // normalized names
+	existing := []driver.Table{{Name: "orders"}, {Name: "ORDERS_BAK"}, {Name: "items"}, {Name: "audit_log"}}
+	got := filterToManagedSet(existing, desired)
 	if len(got) != 2 {
-		t.Errorf("glob include should match both: %+v", got)
+		t.Fatalf("managed set should keep only orders+items, got %+v", got)
+	}
+	names := map[string]bool{}
+	for _, t := range got {
+		names[t.Name] = true
+	}
+	if !names["orders"] || !names["items"] {
+		t.Errorf("managed set missing expected tables: %+v", got)
 	}
 }
