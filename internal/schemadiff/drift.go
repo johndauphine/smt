@@ -34,7 +34,7 @@ type Drift struct {
 	ChangedTables []TableDrift
 }
 
-// TableDrift captures per-table column drift for a table present on both sides.
+// TableDrift captures per-table drift for a table present on both sides.
 type TableDrift struct {
 	Name string
 	// MissingColumns are in the source but absent on the target.
@@ -47,6 +47,25 @@ type TableDrift struct {
 	// Each entry is a human-readable description from the deterministic
 	// comparator.
 	ColumnDeltas []string
+	// MissingIndexes / ExtraIndexes are secondary-index column sets present on
+	// only one side (matched by column set, not name, since the renderer
+	// normalizes index names per dialect).
+	MissingIndexes []string
+	ExtraIndexes   []string
+	// MissingForeignKeys / ExtraForeignKeys are FK signatures ("(cols)->ref")
+	// present on only one side.
+	MissingForeignKeys []string
+	ExtraForeignKeys   []string
+	// CheckDrift is non-empty when the target has fewer CHECK constraints than
+	// the source (a likely dropped check). Predicate text is rewritten
+	// cross-dialect, so checks are compared by count, not text.
+	CheckDrift string
+}
+
+func (td TableDrift) hasChanges() bool {
+	return len(td.MissingColumns) > 0 || len(td.ExtraColumns) > 0 || len(td.ColumnDeltas) > 0 ||
+		len(td.MissingIndexes) > 0 || len(td.ExtraIndexes) > 0 ||
+		len(td.MissingForeignKeys) > 0 || len(td.ExtraForeignKeys) > 0 || td.CheckDrift != ""
 }
 
 // IsEmpty reports whether the target matches the desired schema.
@@ -143,12 +162,78 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string) (T
 		td.ColumnDeltas = append(td.ColumnDeltas, delta.String())
 	}
 
+	// Secondary indexes, matched by column set (names are renderer-normalized
+	// per dialect, so they don't compare across engines).
+	td.MissingIndexes, td.ExtraIndexes = diffKeys(indexKeys(want.Indexes), indexKeys(have.Indexes))
+	// Foreign keys, matched by local column set + referenced table.
+	td.MissingForeignKeys, td.ExtraForeignKeys = diffKeys(fkKeys(want.ForeignKeys), fkKeys(have.ForeignKeys))
+	// CHECK constraints: predicate text is rewritten cross-dialect, so a
+	// faithful target may carry textually different predicates. Only flag a
+	// likely drop — the target having fewer checks than the source.
+	if len(have.CheckConstraints) < len(want.CheckConstraints) {
+		td.CheckDrift = "source has " + strconv.Itoa(len(want.CheckConstraints)) +
+			" check constraint(s), target has " + strconv.Itoa(len(have.CheckConstraints))
+	}
+
 	sort.Strings(td.MissingColumns)
 	sort.Strings(td.ExtraColumns)
 	sort.Strings(td.ColumnDeltas)
 
-	changed := len(td.MissingColumns) > 0 || len(td.ExtraColumns) > 0 || len(td.ColumnDeltas) > 0
-	return td, changed
+	return td, td.hasChanges()
+}
+
+// indexKeys returns the order-insensitive column-set key of each index.
+func indexKeys(idxs []driver.Index) []string {
+	out := make([]string, 0, len(idxs))
+	for _, ix := range idxs {
+		out = append(out, colSet(ix.Columns))
+	}
+	return out
+}
+
+// fkKeys returns a "(localcols)->reftable" signature for each foreign key.
+func fkKeys(fks []driver.ForeignKey) []string {
+	out := make([]string, 0, len(fks))
+	for _, fk := range fks {
+		out = append(out, colSet(fk.Columns)+"->"+strings.ToLower(fk.RefTable))
+	}
+	return out
+}
+
+// diffKeys returns the keys present only in want (missing on target) and only
+// in have (extra on target), each sorted.
+func diffKeys(want, have []string) (missing, extra []string) {
+	haveSet := make(map[string]bool, len(have))
+	for _, k := range have {
+		haveSet[k] = true
+	}
+	wantSet := make(map[string]bool, len(want))
+	for _, k := range want {
+		wantSet[k] = true
+	}
+	for _, k := range want {
+		if !haveSet[k] {
+			missing = append(missing, k)
+		}
+	}
+	for _, k := range have {
+		if !wantSet[k] {
+			extra = append(extra, k)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	return missing, extra
+}
+
+// colSet is an order-insensitive, case-insensitive key for a column list.
+func colSet(cols []string) string {
+	lowered := make([]string, len(cols))
+	for i, c := range cols {
+		lowered[i] = strings.ToLower(c)
+	}
+	sort.Strings(lowered)
+	return strings.Join(lowered, ",")
 }
 
 func indexByLowerName(tables []driver.Table) map[string]driver.Table {

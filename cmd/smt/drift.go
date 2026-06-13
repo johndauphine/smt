@@ -142,5 +142,20 @@ func printDriftReport(d schemadiff.Drift) {
 		for _, delta := range td.ColumnDeltas {
 			fmt.Printf("                ~ %s\n", delta)
 		}
+		for _, ix := range td.MissingIndexes {
+			fmt.Printf("                + index on (%s) missing on target\n", ix)
+		}
+		for _, ix := range td.ExtraIndexes {
+			fmt.Printf("                - index on (%s) extra on target\n", ix)
+		}
+		for _, fk := range td.MissingForeignKeys {
+			fmt.Printf("                + foreign key %s missing on target\n", fk)
+		}
+		for _, fk := range td.ExtraForeignKeys {
+			fmt.Printf("                - foreign key %s extra on target\n", fk)
+		}
+		if td.CheckDrift != "" {
+			fmt.Printf("                ~ check constraints: %s\n", td.CheckDrift)
+		}
 	}
 }

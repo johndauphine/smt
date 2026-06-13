@@ -133,3 +133,55 @@ func TestComputeDrift_StableOrdering(t *testing.T) {
 		t.Errorf("missing tables not sorted: %v", first)
 	}
 }
+
+// Index, FK, and CHECK drift on a table present on both sides, matched by
+// column set / signature so renderer-normalized names don't cause false drift.
+func TestComputeDrift_IndexFKCheck(t *testing.T) {
+	desired := []driver.Table{{
+		Name:    "Orders",
+		Columns: []driver.Column{dcol("Id", "int"), dcol("CustomerId", "int")},
+		Indexes: []driver.Index{
+			{Name: "IX_Orders_Customer", Columns: []string{"CustomerId"}}, // present both sides
+			{Name: "IX_Orders_Id", Columns: []string{"Id"}},               // missing on target
+		},
+		ForeignKeys: []driver.ForeignKey{
+			{Name: "FK_Orders_Cust", Columns: []string{"CustomerId"}, RefTable: "Customers", RefColumns: []string{"Id"}},
+		},
+		CheckConstraints: []driver.CheckConstraint{{Name: "CK_a", Definition: "Id > 0"}, {Name: "CK_b", Definition: "CustomerId > 0"}},
+	}}
+	existing := []driver.Table{{
+		Name:    "orders",
+		Columns: []driver.Column{dcol("id", "integer"), dcol("customerid", "integer")},
+		Indexes: []driver.Index{
+			{Name: "ix_orders_customer", Columns: []string{"customerid"}},    // matches desired by column set
+			{Name: "ix_orders_extra", Columns: []string{"id", "customerid"}}, // extra on target
+		},
+		// FK dropped on target.
+		ForeignKeys: nil,
+		// One CHECK dropped on target.
+		CheckConstraints: []driver.CheckConstraint{{Name: "ck_a", Definition: "id > 0"}},
+	}}
+
+	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %d: %+v", len(d.ChangedTables), d.ChangedTables)
+	}
+	td := d.ChangedTables[0]
+	if len(td.MissingIndexes) != 1 || td.MissingIndexes[0] != "id" {
+		t.Errorf("missing indexes = %v, want [id]", td.MissingIndexes)
+	}
+	if len(td.ExtraIndexes) != 1 || td.ExtraIndexes[0] != "customerid,id" {
+		t.Errorf("extra indexes = %v, want [customerid,id]", td.ExtraIndexes)
+	}
+	if len(td.MissingForeignKeys) != 1 || td.MissingForeignKeys[0] != "customerid->customers" {
+		t.Errorf("missing FKs = %v, want [customerid->customers]", td.MissingForeignKeys)
+	}
+	if td.CheckDrift == "" {
+		t.Error("expected check drift (target dropped a CHECK)")
+	}
+	// Index/FK/check-only drops are not data-loss destructive (no row loss),
+	// so HasDestructiveDrift stays false here (no extra columns/tables).
+	if d.HasDestructiveDrift() {
+		t.Error("index/FK/check drift should not be classified as destructive (no data loss)")
+	}
+}
