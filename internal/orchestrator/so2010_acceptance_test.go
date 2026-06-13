@@ -174,6 +174,17 @@ func verifySO2010(t *testing.T, src, tgt []driver.Table, schema string) verifyRe
 	for _, tt := range tgt {
 		tgtByName[strings.ToLower(tt.Name)] = tt
 	}
+	srcByName := map[string]bool{}
+	for _, s := range src {
+		srcByName[strings.ToLower(s.Name)] = true
+	}
+	// The schema was dropped before the run, so the target must contain
+	// exactly the source tables — any extra was produced by the migration.
+	for _, tt := range tgt {
+		if !srcByName[strings.ToLower(tt.Name)] {
+			rep.Failures = append(rep.Failures, fmt.Sprintf("unexpected extra table %s on target", tt.Name))
+		}
+	}
 
 	var totalFK, totalPK int
 	for _, s := range src {
