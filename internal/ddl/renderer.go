@@ -11,6 +11,14 @@ import (
 	pgddl "smt/internal/driver/postgres"
 )
 
+// RendererVersion identifies the deterministic renderer's output contract.
+// Bump it whenever a change can alter the rendered DDL for the same input
+// (a new type mapping, default rewrite, identifier rule, etc.) so persisted
+// run manifests distinguish artifacts produced by different renderer logic.
+// It is the single "renderer + type-mapper version" token #64 fingerprints
+// on — type mapping and DDL rendering are one deterministic unit here.
+const RendererVersion = "1"
+
 type Renderer struct {
 	target            string
 	schema            string

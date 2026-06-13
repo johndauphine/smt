@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +30,7 @@ import (
 	"time"
 
 	"smt/internal/config"
+	"smt/internal/ddl"
 	"smt/internal/driver"
 	"smt/internal/pool"
 )
@@ -124,6 +127,10 @@ ai_review:
 	if err := orch.Run(ctx); err != nil {
 		t.Fatalf("orchestrator Run (no-AI create+apply): %v", err)
 	}
+
+	// The run must have persisted a deterministic manifest (#64) recording
+	// the renderer version + fingerprints that produced schema.sql.
+	assertManifestWritten(t, dataDir)
 
 	// Introspect both sides through the deterministic readers and compare.
 	srcCfg := cfg.Source
@@ -397,6 +404,39 @@ func containsCI(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// assertManifestWritten finds the run manifest under dataDir and checks it
+// records the current renderer version and a plan fingerprint (#64).
+func assertManifestWritten(t *testing.T, dataDir string) {
+	t.Helper()
+	var found string
+	_ = filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "manifest.json" {
+			found = path
+		}
+		return nil
+	})
+	if found == "" {
+		t.Fatal("no manifest.json artifact written by the run (#64)")
+	}
+	blob, err := os.ReadFile(found)
+	if err != nil {
+		t.Fatalf("reading manifest: %v", err)
+	}
+	var m runManifest
+	if err := json.Unmarshal(blob, &m); err != nil {
+		t.Fatalf("manifest is not valid JSON: %v", err)
+	}
+	if m.RendererVersion != ddl.RendererVersion {
+		t.Errorf("manifest renderer_version=%q, want %q", m.RendererVersion, ddl.RendererVersion)
+	}
+	if !strings.HasPrefix(m.PlanFingerprint, "sha256:") || !strings.HasPrefix(m.SourceFingerprint, "sha256:") {
+		t.Errorf("manifest fingerprints malformed: plan=%q source=%q", m.PlanFingerprint, m.SourceFingerprint)
+	}
+	if m.AIReviewEnabled {
+		t.Error("manifest reports ai_review_enabled=true in the no-AI acceptance run")
+	}
 }
 
 func countWithPK(tables []driver.Table) int {
