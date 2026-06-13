@@ -4,24 +4,7 @@ import (
 	"testing"
 
 	"smt/internal/config"
-	"smt/internal/driver"
 )
-
-// normalizeTableNames must fold source identifiers to the target's on-disk
-// convention so desired names line up with the introspected target (PG
-// lowercases; MSSQL/MySQL pass through).
-func TestNormalizeTableNames_Postgres(t *testing.T) {
-	tables := []driver.Table{
-		{Name: "Posts", Columns: []driver.Column{{Name: "Id"}, {Name: "Title"}}},
-	}
-	normalizeTableNames(tables, "postgres")
-	if tables[0].Name != "posts" {
-		t.Errorf("table name = %q, want posts", tables[0].Name)
-	}
-	if tables[0].Columns[0].Name != "id" || tables[0].Columns[1].Name != "title" {
-		t.Errorf("column names not normalized: %+v", tables[0].Columns)
-	}
-}
 
 // targetAsSource must carry the connection details the target reader needs,
 // including the MSSQL TLS knobs, so introspecting an MSSQL target works the

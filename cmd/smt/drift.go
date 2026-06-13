@@ -63,7 +63,12 @@ func runDrift(c *cli.Context) error {
 	if err := loadAllConstraints(ctx, orch.Source(), desired); err != nil {
 		return err
 	}
-	normalizeTableNames(desired, cfg.Target.Type)
+	// Fold every desired identifier — table, column, AND index/FK column lists
+	// and referenced tables — to the target's on-disk convention so constraint
+	// comparisons line up with the introspected (already-normalized) target.
+	desired = schemadiff.NormalizeIdentifiers(desired, func(name string) string {
+		return driver.NormalizeIdentifier(cfg.Target.Type, name)
+	})
 
 	// Existing: introspect the live target through a reader on the target
 	// connection.
@@ -108,15 +113,6 @@ func targetAsSource(cfg *config.Config) *config.SourceConfig {
 		SSLMode:         cfg.Target.SSLMode,
 		TrustServerCert: cfg.Target.TrustServerCert,
 		Encrypt:         cfg.Target.Encrypt,
-	}
-}
-
-func normalizeTableNames(tables []driver.Table, targetType string) {
-	for i := range tables {
-		tables[i].Name = driver.NormalizeIdentifier(targetType, tables[i].Name)
-		for j := range tables[i].Columns {
-			tables[i].Columns[j].Name = driver.NormalizeIdentifier(targetType, tables[i].Columns[j].Name)
-		}
 	}
 }
 

@@ -47,13 +47,16 @@ type TableDrift struct {
 	// Each entry is a human-readable description from the deterministic
 	// comparator.
 	ColumnDeltas []string
-	// MissingIndexes / ExtraIndexes are secondary-index column sets present on
-	// only one side (matched by column set, not name, since the renderer
-	// normalizes index names per dialect).
+	// MissingIndexes / ExtraIndexes are secondary indexes present on only one
+	// side, keyed by ordered column list (+ a unique: prefix) rather than
+	// name, since the renderer normalizes index names per dialect. Column
+	// order is significant, so (a,b) and (b,a) are distinct.
 	MissingIndexes []string
 	ExtraIndexes   []string
-	// MissingForeignKeys / ExtraForeignKeys are FK signatures ("(cols)->ref")
-	// present on only one side.
+	// MissingForeignKeys / ExtraForeignKeys are FKs present on only one side,
+	// keyed by ordered local→referenced column pairs, referenced table, and
+	// referential actions — so a changed ON DELETE/UPDATE or referenced
+	// column drifts.
 	MissingForeignKeys []string
 	ExtraForeignKeys   []string
 	// CheckDrift is non-empty when the target has fewer CHECK constraints than
@@ -66,6 +69,40 @@ func (td TableDrift) hasChanges() bool {
 	return len(td.MissingColumns) > 0 || len(td.ExtraColumns) > 0 || len(td.ColumnDeltas) > 0 ||
 		len(td.MissingIndexes) > 0 || len(td.ExtraIndexes) > 0 ||
 		len(td.MissingForeignKeys) > 0 || len(td.ExtraForeignKeys) > 0 || td.CheckDrift != ""
+}
+
+// NormalizeIdentifiers returns a deep copy of tables with every identifier
+// (table, column, PK, index columns, FK columns / referenced table /
+// referenced columns, check names) folded through norm — so source-form
+// identifiers line up with a target whose dialect rewrites names (e.g. PG
+// lowercasing "Order ID" to "order_id"). Callers normalize the desired schema
+// with the target's rule before ComputeDrift so constraint comparisons don't
+// see false drift. The input is not mutated.
+func NormalizeIdentifiers(tables []driver.Table, norm func(string) string) []driver.Table {
+	out := make([]driver.Table, len(tables))
+	for i := range tables {
+		out[i] = normalizeTable(deepCopyTable(tables[i]), norm)
+	}
+	return out
+}
+
+// deepCopyTable copies the slices normalizeTable mutates so normalization
+// can't reach back into the caller's tables.
+func deepCopyTable(t driver.Table) driver.Table {
+	t.Columns = append([]driver.Column(nil), t.Columns...)
+	t.PrimaryKey = append([]string(nil), t.PrimaryKey...)
+	t.Indexes = append([]driver.Index(nil), t.Indexes...)
+	for i := range t.Indexes {
+		t.Indexes[i].Columns = append([]string(nil), t.Indexes[i].Columns...)
+		t.Indexes[i].IncludeCols = append([]string(nil), t.Indexes[i].IncludeCols...)
+	}
+	t.ForeignKeys = append([]driver.ForeignKey(nil), t.ForeignKeys...)
+	for i := range t.ForeignKeys {
+		t.ForeignKeys[i].Columns = append([]string(nil), t.ForeignKeys[i].Columns...)
+		t.ForeignKeys[i].RefColumns = append([]string(nil), t.ForeignKeys[i].RefColumns...)
+	}
+	t.CheckConstraints = append([]driver.CheckConstraint(nil), t.CheckConstraints...)
+	return t
 }
 
 // IsEmpty reports whether the target matches the desired schema.
@@ -162,6 +199,29 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string) (T
 		td.ColumnDeltas = append(td.ColumnDeltas, delta.String())
 	}
 
+	// CompareColumns checks length/precision/nullability/identity/TZ/default
+	// but not the general type family, so an `int` → `text` change (both with
+	// no length/default/identity) slips through. Flag a high-confidence family
+	// mismatch on matched columns. Conservative on purpose: only the strict
+	// families (numeric/string/temporal/binary) participate, so legitimate
+	// cross-dialect equivalences the comparator already understands
+	// (bit→boolean, uniqueidentifier→char(36), json→jsonb) don't false-flag.
+	haveByName := make(map[string]driver.Column, len(have.Columns))
+	for _, c := range have.Columns {
+		haveByName[strings.ToLower(c.Name)] = c
+	}
+	for _, sc := range want.Columns {
+		tc, ok := haveByName[strings.ToLower(sc.Name)]
+		if !ok {
+			continue
+		}
+		sf, tf := strictTypeFamily(sc.DataType), strictTypeFamily(tc.DataType)
+		if sf != "" && tf != "" && sf != tf {
+			td.ColumnDeltas = append(td.ColumnDeltas,
+				strings.ToLower(sc.Name)+" type class: source="+sf+" target="+tf)
+		}
+	}
+
 	// Secondary indexes, matched by column set (names are renderer-normalized
 	// per dialect, so they don't compare across engines).
 	td.MissingIndexes, td.ExtraIndexes = diffKeys(indexKeys(want.Indexes), indexKeys(have.Indexes))
@@ -182,22 +242,91 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string) (T
 	return td, td.hasChanges()
 }
 
-// indexKeys returns the order-insensitive column-set key of each index.
+// indexKeys returns an ordered column-list key for each index. Column ORDER
+// is significant for an index (a, b) ≠ (b, a) for query planning, so the
+// columns are NOT sorted — only lowercased. Uniqueness is folded in so a
+// UNIQUE index does not match a non-unique one on the same columns.
 func indexKeys(idxs []driver.Index) []string {
 	out := make([]string, 0, len(idxs))
 	for _, ix := range idxs {
-		out = append(out, colSet(ix.Columns))
+		key := orderedCols(ix.Columns)
+		if ix.IsUnique {
+			key = "unique:" + key
+		}
+		out = append(out, key)
 	}
 	return out
 }
 
-// fkKeys returns a "(localcols)->reftable" signature for each foreign key.
+// fkKeys returns a signature for each foreign key built from its ordered
+// local→referenced column pairs, referenced table, and referential actions —
+// so a target FK that changes ON DELETE/UPDATE or points at different
+// referenced columns no longer matches.
 func fkKeys(fks []driver.ForeignKey) []string {
 	out := make([]string, 0, len(fks))
 	for _, fk := range fks {
-		out = append(out, colSet(fk.Columns)+"->"+strings.ToLower(fk.RefTable))
+		pairs := make([]string, len(fk.Columns))
+		for i, c := range fk.Columns {
+			ref := ""
+			if i < len(fk.RefColumns) {
+				ref = strings.ToLower(fk.RefColumns[i])
+			}
+			pairs[i] = strings.ToLower(c) + ":" + ref
+		}
+		out = append(out, strings.Join(pairs, ",")+"->"+strings.ToLower(fk.RefTable)+
+			"|"+normAction(fk.OnDelete)+"|"+normAction(fk.OnUpdate))
 	}
 	return out
+}
+
+// strictTypeFamily classifies a data type into one of the families where a
+// cross-family change is unambiguously incompatible (numeric/string/temporal/
+// binary). Types with known cross-dialect equivalences that span families —
+// boolean (bit↔boolean↔tinyint(1)), uuid (uniqueidentifier↔char(36)), json,
+// xml — and anything unrecognized return "" so they are left to the
+// deterministic comparator and never produce a false family mismatch.
+func strictTypeFamily(dataType string) string {
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint",
+		"int2", "int4", "int8", "serial", "bigserial", "smallserial",
+		"decimal", "numeric", "number", "money", "smallmoney",
+		"float", "double", "double precision", "real", "float4", "float8":
+		return "numeric"
+	case "char", "nchar", "character", "bpchar", "varchar", "nvarchar",
+		"character varying", "text", "ntext", "tinytext", "mediumtext",
+		"longtext", "enum", "set":
+		return "string"
+	case "date", "time", "timetz", "datetime", "datetime2", "smalldatetime",
+		"timestamp", "timestamptz", "datetimeoffset",
+		"timestamp without time zone", "timestamp with time zone",
+		"time without time zone", "time with time zone":
+		return "temporal"
+	case "binary", "varbinary", "image", "bytea", "rowversion",
+		"blob", "tinyblob", "mediumblob", "longblob":
+		return "binary"
+	default:
+		return ""
+	}
+}
+
+// orderedCols joins columns lowercased but order-preserved.
+func orderedCols(cols []string) string {
+	lowered := make([]string, len(cols))
+	for i, c := range cols {
+		lowered[i] = strings.ToLower(c)
+	}
+	return strings.Join(lowered, ",")
+}
+
+// normAction folds the no-op referential-action spellings to one token so a
+// source NO ACTION matches a target reporting the default differently.
+func normAction(a string) string {
+	switch strings.ToUpper(strings.TrimSpace(a)) {
+	case "", "NO ACTION", "RESTRICT":
+		return "noaction"
+	default:
+		return strings.ToLower(strings.Join(strings.Fields(a), " "))
+	}
 }
 
 // diffKeys returns the keys present only in want (missing on target) and only
@@ -224,16 +353,6 @@ func diffKeys(want, have []string) (missing, extra []string) {
 	sort.Strings(missing)
 	sort.Strings(extra)
 	return missing, extra
-}
-
-// colSet is an order-insensitive, case-insensitive key for a column list.
-func colSet(cols []string) string {
-	lowered := make([]string, len(cols))
-	for i, c := range cols {
-		lowered[i] = strings.ToLower(c)
-	}
-	sort.Strings(lowered)
-	return strings.Join(lowered, ",")
 }
 
 func indexByLowerName(tables []driver.Table) map[string]driver.Table {

@@ -170,11 +170,11 @@ func TestComputeDrift_IndexFKCheck(t *testing.T) {
 	if len(td.MissingIndexes) != 1 || td.MissingIndexes[0] != "id" {
 		t.Errorf("missing indexes = %v, want [id]", td.MissingIndexes)
 	}
-	if len(td.ExtraIndexes) != 1 || td.ExtraIndexes[0] != "customerid,id" {
-		t.Errorf("extra indexes = %v, want [customerid,id]", td.ExtraIndexes)
+	if len(td.ExtraIndexes) != 1 || td.ExtraIndexes[0] != "id,customerid" {
+		t.Errorf("extra indexes = %v, want [id,customerid]", td.ExtraIndexes)
 	}
-	if len(td.MissingForeignKeys) != 1 || td.MissingForeignKeys[0] != "customerid->customers" {
-		t.Errorf("missing FKs = %v, want [customerid->customers]", td.MissingForeignKeys)
+	if len(td.MissingForeignKeys) != 1 || td.MissingForeignKeys[0] != "customerid:id->customers|noaction|noaction" {
+		t.Errorf("missing FKs = %v, want [customerid:id->customers|noaction|noaction]", td.MissingForeignKeys)
 	}
 	if td.CheckDrift == "" {
 		t.Error("expected check drift (target dropped a CHECK)")
@@ -183,5 +183,89 @@ func TestComputeDrift_IndexFKCheck(t *testing.T) {
 	// so HasDestructiveDrift stays false here (no extra columns/tables).
 	if d.HasDestructiveDrift() {
 		t.Error("index/FK/check drift should not be classified as destructive (no data loss)")
+	}
+}
+
+// A matched column whose type changes family (int -> text) must drift even
+// though CompareColumns sees no length/precision/nullability delta. Legitimate
+// cross-family equivalences (bit -> boolean) must NOT false-flag.
+func TestComputeDrift_TypeFamilyMismatch(t *testing.T) {
+	desired := []driver.Table{dtbl("T",
+		dcol("a", "int"),
+		dcol("flag", "bit"),
+		dcol("name", "varchar", func(c *driver.Column) { c.MaxLength = 20 }),
+	)}
+	existing := []driver.Table{dtbl("t",
+		dcol("a", "text"),       // numeric -> string: drift
+		dcol("flag", "boolean"), // bit -> boolean: equivalent, no drift
+		dcol("name", "character varying", func(c *driver.Column) { c.MaxLength = 20 }), // equivalent
+	)}
+	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %d: %+v", len(d.ChangedTables), d.ChangedTables)
+	}
+	deltas := strings.Join(d.ChangedTables[0].ColumnDeltas, "\n")
+	if !strings.Contains(deltas, "a type class: source=numeric target=string") {
+		t.Errorf("missing int->text type-class delta, got: %v", d.ChangedTables[0].ColumnDeltas)
+	}
+	if strings.Contains(deltas, "flag") {
+		t.Errorf("bit->boolean false-flagged as type drift: %v", d.ChangedTables[0].ColumnDeltas)
+	}
+}
+
+// Composite index column ORDER is significant; FK referential ACTIONS matter.
+func TestComputeDrift_IndexOrderAndFKActions(t *testing.T) {
+	desired := []driver.Table{{
+		Name:    "T",
+		Columns: []driver.Column{dcol("a", "int"), dcol("b", "int")},
+		Indexes: []driver.Index{{Name: "ix", Columns: []string{"a", "b"}}},
+		ForeignKeys: []driver.ForeignKey{
+			{Name: "fk", Columns: []string{"a"}, RefTable: "P", RefColumns: []string{"id"}, OnDelete: "CASCADE"},
+		},
+	}}
+	existing := []driver.Table{{
+		Name:    "t",
+		Columns: []driver.Column{dcol("a", "integer"), dcol("b", "integer")},
+		Indexes: []driver.Index{{Name: "ix", Columns: []string{"b", "a"}}}, // reversed order
+		ForeignKeys: []driver.ForeignKey{
+			{Name: "fk", Columns: []string{"a"}, RefTable: "p", RefColumns: []string{"id"}, OnDelete: "NO ACTION"}, // action changed
+		},
+	}}
+	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %d", len(d.ChangedTables))
+	}
+	td := d.ChangedTables[0]
+	if len(td.MissingIndexes) != 1 || len(td.ExtraIndexes) != 1 {
+		t.Errorf("reversed-order index should drift: missing=%v extra=%v", td.MissingIndexes, td.ExtraIndexes)
+	}
+	if len(td.MissingForeignKeys) != 1 || len(td.ExtraForeignKeys) != 1 {
+		t.Errorf("changed FK action should drift: missing=%v extra=%v", td.MissingForeignKeys, td.ExtraForeignKeys)
+	}
+}
+
+// NormalizeIdentifiers folds all identifiers (including index/FK column lists
+// and referenced tables) and must not mutate the input.
+func TestNormalizeIdentifiers_FullAndPure(t *testing.T) {
+	in := []driver.Table{{
+		Name:       "Orders",
+		Columns:    []driver.Column{{Name: "OrderID"}},
+		PrimaryKey: []string{"OrderID"},
+		Indexes:    []driver.Index{{Name: "IX", Columns: []string{"OrderID"}}},
+		ForeignKeys: []driver.ForeignKey{
+			{Name: "FK", Columns: []string{"OrderID"}, RefTable: "Customers", RefColumns: []string{"CustID"}},
+		},
+	}}
+	out := NormalizeIdentifiers(in, func(s string) string { return strings.ToLower(s) })
+
+	// Input untouched.
+	if in[0].Name != "Orders" || in[0].Indexes[0].Columns[0] != "OrderID" || in[0].ForeignKeys[0].RefTable != "Customers" {
+		t.Errorf("NormalizeIdentifiers mutated its input: %+v", in[0])
+	}
+	// Output fully normalized.
+	o := out[0]
+	if o.Name != "orders" || o.Columns[0].Name != "orderid" || o.Indexes[0].Columns[0] != "orderid" ||
+		o.ForeignKeys[0].RefTable != "customers" || o.ForeignKeys[0].RefColumns[0] != "custid" {
+		t.Errorf("NormalizeIdentifiers did not fold all identifiers: %+v", o)
 	}
 }
