@@ -97,6 +97,7 @@ Storage: `internal/checkpoint/snapshots.go` adds a `schema_snapshots` table to t
 CLI flow:
 - `smt snapshot` — extract source, save to state DB
 - `smt sync` — diff vs latest snapshot, deterministically render SQL, write to `migration.sql` (default) or apply with `--apply`
+- `smt drift` — introspect the live **target** and report drift between the source-derived (desired) schema and the existing target (#69). Read-only; cross-dialect column equivalence via `driver.CompareColumns`, so `varchar(20)` ≡ `character varying(20)`. Classifies missing / extra / changed tables and columns (`schemadiff.ComputeDrift`). Exit 0 = in sync, 3 = drift; `--fail-on-destructive-only` exits 0 for additive-only drift (useful as a CI gate).
 
 ### Config + secrets split
 

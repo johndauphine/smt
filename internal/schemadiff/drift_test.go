@@ -1,0 +1,135 @@
+package schemadiff
+
+import (
+	"strings"
+	"testing"
+
+	"smt/internal/driver"
+)
+
+func dcol(name, dt string, opts ...func(*driver.Column)) driver.Column {
+	c := driver.Column{Name: name, DataType: dt, IsNullable: true}
+	for _, o := range opts {
+		o(&c)
+	}
+	return c
+}
+
+func dtbl(name string, cols ...driver.Column) driver.Table {
+	return driver.Table{Name: name, Columns: cols}
+}
+
+// Identical schemas (cross-dialect equivalent types) must report no drift:
+// mssql varchar(20) ≡ pg character varying(20), datetime2 ≡ timestamp, etc.
+func TestComputeDrift_NoFalsePositiveCrossDialect(t *testing.T) {
+	desired := []driver.Table{
+		dtbl("Users",
+			dcol("Id", "int", func(c *driver.Column) { c.IsIdentity = true; c.IsNullable = false }),
+			dcol("Name", "varchar", func(c *driver.Column) { c.MaxLength = 20; c.IsNullable = false }),
+			dcol("CreatedAt", "datetime2"),
+		),
+	}
+	existing := []driver.Table{
+		dtbl("users",
+			dcol("id", "integer", func(c *driver.Column) { c.IsIdentity = true; c.IsNullable = false }),
+			dcol("name", "character varying", func(c *driver.Column) { c.MaxLength = 20; c.IsNullable = false }),
+			dcol("createdat", "timestamp without time zone"),
+		),
+	}
+	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	if !d.IsEmpty() {
+		t.Fatalf("expected no drift for equivalent schemas, got: missing=%v extra=%v changed=%+v",
+			d.MissingTables, d.ExtraTables, d.ChangedTables)
+	}
+	if d.Summary() != "no drift: target matches the source-derived schema" {
+		t.Errorf("unexpected summary: %q", d.Summary())
+	}
+}
+
+func TestComputeDrift_MissingAndExtraTables(t *testing.T) {
+	desired := []driver.Table{dtbl("Orders", dcol("Id", "int")), dtbl("Items", dcol("Id", "int"))}
+	existing := []driver.Table{dtbl("orders", dcol("id", "integer")), dtbl("legacy", dcol("id", "integer"))}
+
+	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	if len(d.MissingTables) != 1 || d.MissingTables[0] != "items" {
+		t.Errorf("missing tables = %v, want [items]", d.MissingTables)
+	}
+	if len(d.ExtraTables) != 1 || d.ExtraTables[0] != "legacy" {
+		t.Errorf("extra tables = %v, want [legacy]", d.ExtraTables)
+	}
+	if !d.HasDestructiveDrift() {
+		t.Error("an extra target table is destructive drift")
+	}
+}
+
+func TestComputeDrift_ColumnLevel(t *testing.T) {
+	desired := []driver.Table{dtbl("Users",
+		dcol("Id", "int", func(c *driver.Column) { c.IsNullable = false }),
+		dcol("Email", "varchar", func(c *driver.Column) { c.MaxLength = 100 }),
+		dcol("Age", "int"),
+	)}
+	existing := []driver.Table{dtbl("users",
+		dcol("id", "integer", func(c *driver.Column) { c.IsNullable = false }),
+		// Email missing on target.
+		dcol("age", "integer"),
+		// Extra target column not in source.
+		dcol("legacy_flag", "boolean"),
+	)}
+
+	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %d: %+v", len(d.ChangedTables), d.ChangedTables)
+	}
+	td := d.ChangedTables[0]
+	if len(td.MissingColumns) != 1 || td.MissingColumns[0] != "email" {
+		t.Errorf("missing columns = %v, want [email]", td.MissingColumns)
+	}
+	if len(td.ExtraColumns) != 1 || td.ExtraColumns[0] != "legacy_flag" {
+		t.Errorf("extra columns = %v, want [legacy_flag]", td.ExtraColumns)
+	}
+	if !d.HasDestructiveDrift() {
+		t.Error("an extra target column is destructive drift")
+	}
+}
+
+// A type/length/nullability change on a matched column surfaces as a
+// ColumnDelta, not a missing/extra column.
+func TestComputeDrift_ColumnMetadataDelta(t *testing.T) {
+	desired := []driver.Table{dtbl("Users", dcol("Code", "varchar", func(c *driver.Column) { c.MaxLength = 20; c.IsNullable = false }))}
+	existing := []driver.Table{dtbl("users", dcol("code", "character varying", func(c *driver.Column) { c.MaxLength = 10; c.IsNullable = false }))}
+
+	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected 1 changed table, got %d", len(d.ChangedTables))
+	}
+	td := d.ChangedTables[0]
+	if len(td.ColumnDeltas) == 0 {
+		t.Fatal("expected a column delta for the length change")
+	}
+	joined := strings.Join(td.ColumnDeltas, " ")
+	if !strings.Contains(joined, "max_length") {
+		t.Errorf("column delta did not mention max_length: %v", td.ColumnDeltas)
+	}
+	if len(td.MissingColumns) != 0 || len(td.ExtraColumns) != 0 {
+		t.Errorf("metadata change misclassified as missing/extra: %+v", td)
+	}
+	if d.HasDestructiveDrift() {
+		t.Error("a length change is not destructive drift (no drops)")
+	}
+}
+
+// Output ordering must be deterministic for stable reports / CI diffs.
+func TestComputeDrift_StableOrdering(t *testing.T) {
+	desired := []driver.Table{dtbl("Bravo", dcol("Id", "int")), dtbl("Alpha", dcol("Id", "int")), dtbl("Charlie", dcol("Id", "int"))}
+	existing := []driver.Table{}
+	first := ComputeDrift(desired, existing, "mssql", "postgres").MissingTables
+	for i := 0; i < 10; i++ {
+		got := ComputeDrift(desired, existing, "mssql", "postgres").MissingTables
+		if strings.Join(got, ",") != strings.Join(first, ",") {
+			t.Fatalf("unstable ordering: %v vs %v", got, first)
+		}
+	}
+	if strings.Join(first, ",") != "alpha,bravo,charlie" {
+		t.Errorf("missing tables not sorted: %v", first)
+	}
+}

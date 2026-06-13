@@ -125,6 +125,7 @@ func commands() []*cli.Command {
 	return []*cli.Command{
 		createCommand(),
 		syncCommand(),
+		driftCommand(),
 		snapshotCommand(),
 		healthCheckCommand(),
 		initSecretsCommand(),
