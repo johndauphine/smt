@@ -30,6 +30,13 @@ import (
 // schemas (try 16-32) or for local LM Studio / Ollama (set to 1).
 const defaultAIConcurrency = 8
 
+// defaultAIReviewConcurrency is the un-configured fan-out when AI review is
+// enabled. Cold-cache verify-on runs make 1-2 provider calls per rendered
+// object; concurrency 8 pushed past Anthropic's per-org throughput limit
+// and surfaced as sustained 529s partway through matrix runs (#54).
+// Empirically 2 stays under the limit; warm-cache re-runs are unaffected.
+const defaultAIReviewConcurrency = 2
+
 // runParallel calls fn concurrently for each item in items, with at
 // most n calls in flight at once. First non-nil return cancels the
 // rest via the shared context. Same error semantics as the previous
@@ -174,6 +181,16 @@ func (o *Orchestrator) aiConcurrency() int {
 	n := o.config.Migration.AIConcurrency
 	if n <= 0 {
 		n = defaultAIConcurrency
+		// With AI review enabled every rendered object costs an AI call
+		// during the render fan-out, and reviewer-driven retries multiply
+		// that further. Eight parallel renderers against one provider
+		// rate-limit pool is how the #54 matrix run hit sustained 529s,
+		// so the un-configured default drops to 2 when review is on. An
+		// explicit ai_concurrency always passes through — the user opted
+		// into that number.
+		if aiReviewEnabled(o.config) {
+			n = defaultAIReviewConcurrency
+		}
 	}
 	return n
 }

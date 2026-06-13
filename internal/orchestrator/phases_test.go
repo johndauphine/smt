@@ -163,3 +163,35 @@ func TestMatchesAny_InvalidGlobIsTreatedAsNoMatch(t *testing.T) {
 		t.Errorf("malformed glob should not match")
 	}
 }
+
+// #54 — verify-on cold-cache runs at concurrency 8 exhaust the provider's
+// rate-limit pool (sustained 529s). The un-configured default must drop to
+// defaultAIReviewConcurrency when review is on; explicit user values pass
+// through unchanged in both postures.
+func TestAIConcurrency_ReviewAwareDefault(t *testing.T) {
+	enabled, disabled := true, false
+	cases := []struct {
+		name      string
+		userValue int
+		review    *bool
+		want      int
+	}{
+		{"unset, review off", 0, &disabled, defaultAIConcurrency},
+		{"unset, review omitted", 0, nil, defaultAIConcurrency},
+		{"unset, review on", 0, &enabled, defaultAIReviewConcurrency},
+		{"explicit, review off", 16, &disabled, 16},
+		{"explicit, review on", 16, &enabled, 16},
+		{"explicit 1, review on", 1, &enabled, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Migration.AIConcurrency = tc.userValue
+			cfg.AIReview.Enabled = tc.review
+			o := &Orchestrator{config: cfg}
+			if got := o.aiConcurrency(); got != tc.want {
+				t.Errorf("aiConcurrency() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

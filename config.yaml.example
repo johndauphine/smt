@@ -32,6 +32,9 @@ ai_review:
   enabled: false                       # optional review of deterministic DDL
   mode: warn                           # warn | fail
   # model: strong-reviewer             # provider entry in ~/.secrets/smt-config.yaml
+  # Note: with review enabled the un-configured render fan-out drops from 8
+  # to 2 so cold-cache runs stay under provider rate limits (#54). Set
+  # migration.ai_concurrency explicitly to override.
 
 profile:
   name: example
