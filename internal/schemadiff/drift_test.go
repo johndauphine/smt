@@ -36,7 +36,7 @@ func TestComputeDrift_NoFalsePositiveCrossDialect(t *testing.T) {
 			dcol("createdat", "timestamp without time zone"),
 		),
 	}
-	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
 	if !d.IsEmpty() {
 		t.Fatalf("expected no drift for equivalent schemas, got: missing=%v extra=%v changed=%+v",
 			d.MissingTables, d.ExtraTables, d.ChangedTables)
@@ -50,7 +50,7 @@ func TestComputeDrift_MissingAndExtraTables(t *testing.T) {
 	desired := []driver.Table{dtbl("Orders", dcol("Id", "int")), dtbl("Items", dcol("Id", "int"))}
 	existing := []driver.Table{dtbl("orders", dcol("id", "integer")), dtbl("legacy", dcol("id", "integer"))}
 
-	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
 	if len(d.MissingTables) != 1 || d.MissingTables[0] != "items" {
 		t.Errorf("missing tables = %v, want [items]", d.MissingTables)
 	}
@@ -76,7 +76,7 @@ func TestComputeDrift_ColumnLevel(t *testing.T) {
 		dcol("legacy_flag", "boolean"),
 	)}
 
-	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
 	if len(d.ChangedTables) != 1 {
 		t.Fatalf("expected 1 changed table, got %d: %+v", len(d.ChangedTables), d.ChangedTables)
 	}
@@ -98,7 +98,7 @@ func TestComputeDrift_ColumnMetadataDelta(t *testing.T) {
 	desired := []driver.Table{dtbl("Users", dcol("Code", "varchar", func(c *driver.Column) { c.MaxLength = 20; c.IsNullable = false }))}
 	existing := []driver.Table{dtbl("users", dcol("code", "character varying", func(c *driver.Column) { c.MaxLength = 10; c.IsNullable = false }))}
 
-	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
 	if len(d.ChangedTables) != 1 {
 		t.Fatalf("expected 1 changed table, got %d", len(d.ChangedTables))
 	}
@@ -122,9 +122,9 @@ func TestComputeDrift_ColumnMetadataDelta(t *testing.T) {
 func TestComputeDrift_StableOrdering(t *testing.T) {
 	desired := []driver.Table{dtbl("Bravo", dcol("Id", "int")), dtbl("Alpha", dcol("Id", "int")), dtbl("Charlie", dcol("Id", "int"))}
 	existing := []driver.Table{}
-	first := ComputeDrift(desired, existing, "mssql", "postgres").MissingTables
+	first := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions()).MissingTables
 	for i := 0; i < 10; i++ {
-		got := ComputeDrift(desired, existing, "mssql", "postgres").MissingTables
+		got := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions()).MissingTables
 		if strings.Join(got, ",") != strings.Join(first, ",") {
 			t.Fatalf("unstable ordering: %v vs %v", got, first)
 		}
@@ -162,7 +162,7 @@ func TestComputeDrift_IndexFKCheck(t *testing.T) {
 		CheckConstraints: []driver.CheckConstraint{{Name: "ck_a", Definition: "id > 0"}},
 	}}
 
-	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
 	if len(d.ChangedTables) != 1 {
 		t.Fatalf("expected 1 changed table, got %d: %+v", len(d.ChangedTables), d.ChangedTables)
 	}
@@ -200,7 +200,7 @@ func TestComputeDrift_TypeFamilyMismatch(t *testing.T) {
 		dcol("flag", "boolean"), // bit -> boolean: equivalent, no drift
 		dcol("name", "character varying", func(c *driver.Column) { c.MaxLength = 20 }), // equivalent
 	)}
-	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
 	if len(d.ChangedTables) != 1 {
 		t.Fatalf("expected 1 changed table, got %d: %+v", len(d.ChangedTables), d.ChangedTables)
 	}
@@ -231,7 +231,7 @@ func TestComputeDrift_IndexOrderAndFKActions(t *testing.T) {
 			{Name: "fk", Columns: []string{"a"}, RefTable: "p", RefColumns: []string{"id"}, OnDelete: "NO ACTION"}, // action changed
 		},
 	}}
-	d := ComputeDrift(desired, existing, "mssql", "postgres")
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
 	if len(d.ChangedTables) != 1 {
 		t.Fatalf("expected 1 changed table, got %d", len(d.ChangedTables))
 	}
@@ -267,5 +267,57 @@ func TestNormalizeIdentifiers_FullAndPure(t *testing.T) {
 	if o.Name != "orders" || o.Columns[0].Name != "orderid" || o.Indexes[0].Columns[0] != "orderid" ||
 		o.ForeignKeys[0].RefTable != "customers" || o.ForeignKeys[0].RefColumns[0] != "custid" {
 		t.Errorf("NormalizeIdentifiers did not fold all identifiers: %+v", o)
+	}
+}
+
+// A dropped or re-keyed primary key must drift — the index loaders exclude
+// PK-backed indexes, so it's checked directly.
+func TestComputeDrift_PrimaryKey(t *testing.T) {
+	desired := []driver.Table{{
+		Name:       "Users",
+		Columns:    []driver.Column{dcol("Id", "int"), dcol("Email", "varchar")},
+		PrimaryKey: []string{"Id"},
+	}}
+	// Target lost its PK.
+	existing := []driver.Table{{
+		Name:       "users",
+		Columns:    []driver.Column{dcol("id", "integer"), dcol("email", "character varying")},
+		PrimaryKey: nil,
+	}}
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 || d.ChangedTables[0].PKDrift == "" {
+		t.Fatalf("dropped PK should drift, got %+v", d.ChangedTables)
+	}
+
+	// Same PK (case-insensitive) → no drift.
+	existing[0].PrimaryKey = []string{"id"}
+	if d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions()); !d.IsEmpty() {
+		t.Errorf("equal PK should not drift, got %+v", d.ChangedTables)
+	}
+}
+
+// DriftOptions gates unmanaged object kinds: with index/FK/check comparison
+// off, differences in those kinds must not surface.
+func TestComputeDrift_OptionsGateUnmanagedKinds(t *testing.T) {
+	desired := []driver.Table{{
+		Name:             "Orders",
+		Columns:          []driver.Column{dcol("Id", "int")},
+		Indexes:          []driver.Index{{Name: "ix", Columns: []string{"Id"}}},
+		ForeignKeys:      []driver.ForeignKey{{Name: "fk", Columns: []string{"Id"}, RefTable: "P", RefColumns: []string{"id"}}},
+		CheckConstraints: []driver.CheckConstraint{{Name: "ck", Definition: "Id > 0"}},
+	}}
+	existing := []driver.Table{{
+		Name:    "orders",
+		Columns: []driver.Column{dcol("id", "integer")},
+		// No indexes/FKs/checks on the target.
+	}}
+	// All comparisons off → no drift despite the missing index/FK/check.
+	off := DriftOptions{CompareIndexes: false, CompareForeignKeys: false, CompareChecks: false}
+	if d := ComputeDrift(desired, existing, "mssql", "postgres", off); !d.IsEmpty() {
+		t.Errorf("gated-off kinds should not drift, got %+v", d.ChangedTables)
+	}
+	// All on → drift across all three kinds.
+	if d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions()); d.IsEmpty() {
+		t.Error("with comparison on, missing index/FK/check should drift")
 	}
 }

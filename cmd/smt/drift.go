@@ -13,6 +13,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/urfave/cli/v2"
@@ -52,6 +54,15 @@ func runDrift(c *cli.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	// Honor the same scope `create`/`sync` use: only the create_* object kinds
+	// that are managed participate in drift, so a config that intentionally
+	// leaves indexes/FKs/checks unmanaged doesn't report them as drift.
+	opts := schemadiff.DriftOptions{
+		CompareIndexes:     cfg.Migration.CreateIndexes,
+		CompareForeignKeys: cfg.Migration.CreateForeignKeys,
+		CompareChecks:      cfg.Migration.CreateCheckConstraints,
+	}
+
 	// Desired: the current source schema, with identifiers normalized to the
 	// target's on-disk convention so names line up with the introspected
 	// target (mssql "Posts" -> pg "posts").
@@ -60,7 +71,8 @@ func runDrift(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("introspecting source: %w", err)
 	}
-	if err := loadAllConstraints(ctx, orch.Source(), desired); err != nil {
+	desired = filterTablesByScope(desired, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables)
+	if err := loadConstraintsGated(ctx, orch.Source(), desired, opts); err != nil {
 		return err
 	}
 	// Fold every desired identifier — table, column, AND index/FK column lists
@@ -82,11 +94,14 @@ func runDrift(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("introspecting target: %w", err)
 	}
-	if err := loadAllConstraints(ctx, targetReader, existing); err != nil {
+	// Scope the target the same way: only compare tables the source manages,
+	// so unrelated objects living in the target schema aren't flagged extra.
+	existing = filterTablesByScope(existing, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables)
+	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
 		return err
 	}
 
-	drift := schemadiff.ComputeDrift(desired, existing, cfg.Source.Type, cfg.Target.Type)
+	drift := schemadiff.ComputeDrift(desired, existing, cfg.Source.Type, cfg.Target.Type, opts)
 	printDriftReport(drift)
 
 	if drift.IsEmpty() {
@@ -101,6 +116,62 @@ func runDrift(c *cli.Context) error {
 
 // targetAsSource adapts the target connection into a SourceConfig so the same
 // deterministic reader path can introspect it.
+// filterTablesByScope applies the migration include/exclude rules the same way
+// the orchestrator does (exclude wins; include, when set, is an allowlist),
+// matching case-insensitively so source-cased patterns line up with both
+// source-cased and target-normalized table names.
+func filterTablesByScope(tables []driver.Table, include, exclude []string) []driver.Table {
+	if len(include) == 0 && len(exclude) == 0 {
+		return tables
+	}
+	out := make([]driver.Table, 0, len(tables))
+	for _, t := range tables {
+		if matchesAnyCI(t.Name, exclude) {
+			continue
+		}
+		if len(include) > 0 && !matchesAnyCI(t.Name, include) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func matchesAnyCI(name string, patterns []string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range patterns {
+		if ok, _ := filepath.Match(strings.ToLower(p), lower); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// loadConstraintsGated loads only the constraint kinds that are managed
+// (per the create_* flags carried in opts), so unmanaged object kinds are
+// neither introspected nor compared.
+func loadConstraintsGated(ctx context.Context, src constraintLoader, tables []driver.Table, opts schemadiff.DriftOptions) error {
+	for i := range tables {
+		t := &tables[i]
+		if opts.CompareIndexes {
+			if err := src.LoadIndexes(ctx, t); err != nil {
+				return fmt.Errorf("loading indexes for %s: %w", t.Name, err)
+			}
+		}
+		if opts.CompareForeignKeys {
+			if err := src.LoadForeignKeys(ctx, t); err != nil {
+				return fmt.Errorf("loading FKs for %s: %w", t.Name, err)
+			}
+		}
+		if opts.CompareChecks {
+			if err := src.LoadCheckConstraints(ctx, t); err != nil {
+				return fmt.Errorf("loading checks for %s: %w", t.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
 func targetAsSource(cfg *config.Config) *config.SourceConfig {
 	return &config.SourceConfig{
 		Type:            cfg.Target.Type,
@@ -129,6 +200,9 @@ func printDriftReport(d schemadiff.Drift) {
 	}
 	for _, td := range d.ChangedTables {
 		fmt.Printf("  [changed]   table %s\n", td.Name)
+		if td.PKDrift != "" {
+			fmt.Printf("                ~ primary key: %s\n", td.PKDrift)
+		}
 		for _, c := range td.MissingColumns {
 			fmt.Printf("                + column %s missing on target\n", c)
 		}

@@ -63,12 +63,32 @@ type TableDrift struct {
 	// the source (a likely dropped check). Predicate text is rewritten
 	// cross-dialect, so checks are compared by count, not text.
 	CheckDrift string
+	// PKDrift is non-empty when the primary key column set differs (dropped,
+	// added, or re-keyed). The index loaders exclude PK-backed indexes, so the
+	// PK is compared here, not via MissingIndexes/ExtraIndexes.
+	PKDrift string
 }
 
 func (td TableDrift) hasChanges() bool {
 	return len(td.MissingColumns) > 0 || len(td.ExtraColumns) > 0 || len(td.ColumnDeltas) > 0 ||
 		len(td.MissingIndexes) > 0 || len(td.ExtraIndexes) > 0 ||
-		len(td.MissingForeignKeys) > 0 || len(td.ExtraForeignKeys) > 0 || td.CheckDrift != ""
+		len(td.MissingForeignKeys) > 0 || len(td.ExtraForeignKeys) > 0 ||
+		td.CheckDrift != "" || td.PKDrift != ""
+}
+
+// DriftOptions gates which object kinds ComputeDrift compares, so a config
+// that intentionally leaves indexes / FKs / checks unmanaged
+// (create_indexes/create_foreign_keys/create_check_constraints = false) does
+// not see those reported as drift. All default to true via DefaultDriftOptions.
+type DriftOptions struct {
+	CompareIndexes     bool
+	CompareForeignKeys bool
+	CompareChecks      bool
+}
+
+// DefaultDriftOptions compares every dimension.
+func DefaultDriftOptions() DriftOptions {
+	return DriftOptions{CompareIndexes: true, CompareForeignKeys: true, CompareChecks: true}
 }
 
 // NormalizeIdentifiers returns a deep copy of tables with every identifier
@@ -151,7 +171,8 @@ func (d Drift) HasDestructiveDrift() bool {
 // names line up (see Diff.Normalize / driver.NormalizeIdentifier).
 //
 // sourceDialect/targetDialect drive the cross-dialect column comparison.
-func ComputeDrift(desired, existing []driver.Table, sourceDialect, targetDialect string) Drift {
+// opts gates which object kinds are compared (see DriftOptions).
+func ComputeDrift(desired, existing []driver.Table, sourceDialect, targetDialect string, opts DriftOptions) Drift {
 	desiredByName := indexByLowerName(desired)
 	existingByName := indexByLowerName(existing)
 
@@ -163,7 +184,7 @@ func ComputeDrift(desired, existing []driver.Table, sourceDialect, targetDialect
 			d.MissingTables = append(d.MissingTables, name)
 			continue
 		}
-		if td, changed := tableDrift(want, have, sourceDialect, targetDialect); changed {
+		if td, changed := tableDrift(want, have, sourceDialect, targetDialect, opts); changed {
 			d.ChangedTables = append(d.ChangedTables, td)
 		}
 	}
@@ -175,7 +196,7 @@ func ComputeDrift(desired, existing []driver.Table, sourceDialect, targetDialect
 	return d
 }
 
-func tableDrift(want, have driver.Table, sourceDialect, targetDialect string) (TableDrift, bool) {
+func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, opts DriftOptions) (TableDrift, bool) {
 	td := TableDrift{Name: strings.ToLower(have.Name)}
 
 	wantCols := lowerColNames(want.Columns)
@@ -206,6 +227,13 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string) (T
 	// families (numeric/string/temporal/binary) participate, so legitimate
 	// cross-dialect equivalences the comparator already understands
 	// (bit→boolean, uniqueidentifier→char(36), json→jsonb) don't false-flag.
+	//
+	// Known limitation: a SAME-family change the comparator also treats as
+	// equivalent — e.g. integer→bigint, or varchar(20)→char(20) — is NOT
+	// flagged. Distinguishing those from genuine cross-dialect equivalences
+	// needs a canonical concrete-type model (#62); until that lands, drift
+	// catches family-level and length/precision/nullability/identity/TZ/
+	// default changes but not same-family width promotions.
 	haveByName := make(map[string]driver.Column, len(have.Columns))
 	for _, c := range have.Columns {
 		haveByName[strings.ToLower(c.Name)] = c
@@ -222,15 +250,24 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string) (T
 		}
 	}
 
-	// Secondary indexes, matched by column set (names are renderer-normalized
-	// per dialect, so they don't compare across engines).
-	td.MissingIndexes, td.ExtraIndexes = diffKeys(indexKeys(want.Indexes), indexKeys(have.Indexes))
-	// Foreign keys, matched by local column set + referenced table.
-	td.MissingForeignKeys, td.ExtraForeignKeys = diffKeys(fkKeys(want.ForeignKeys), fkKeys(have.ForeignKeys))
+	// Primary key: the index loaders exclude PK-backed indexes, so a dropped
+	// or re-keyed PK is invisible to the index comparison and must be checked
+	// directly. Compared as a column set (order is not semantically part of
+	// the key).
+	if !sameColSetCI(want.PrimaryKey, have.PrimaryKey) {
+		td.PKDrift = "source PK (" + joinLowerSorted(want.PrimaryKey) + ") vs target PK (" + joinLowerSorted(have.PrimaryKey) + ")"
+	}
+
+	if opts.CompareIndexes {
+		td.MissingIndexes, td.ExtraIndexes = diffKeys(indexKeys(want.Indexes), indexKeys(have.Indexes))
+	}
+	if opts.CompareForeignKeys {
+		td.MissingForeignKeys, td.ExtraForeignKeys = diffKeys(fkKeys(want.ForeignKeys), fkKeys(have.ForeignKeys))
+	}
 	// CHECK constraints: predicate text is rewritten cross-dialect, so a
 	// faithful target may carry textually different predicates. Only flag a
 	// likely drop — the target having fewer checks than the source.
-	if len(have.CheckConstraints) < len(want.CheckConstraints) {
+	if opts.CompareChecks && len(have.CheckConstraints) < len(want.CheckConstraints) {
 		td.CheckDrift = "source has " + strconv.Itoa(len(want.CheckConstraints)) +
 			" check constraint(s), target has " + strconv.Itoa(len(have.CheckConstraints))
 	}
@@ -240,6 +277,24 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string) (T
 	sort.Strings(td.ColumnDeltas)
 
 	return td, td.hasChanges()
+}
+
+// sameColSetCI reports whether two column lists hold the same set of names,
+// case-insensitively and order-independently.
+func sameColSetCI(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return joinLowerSorted(a) == joinLowerSorted(b)
+}
+
+func joinLowerSorted(in []string) string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = strings.ToLower(s)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }
 
 // indexKeys returns an ordered column-list key for each index. Column ORDER
