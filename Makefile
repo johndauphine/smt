@@ -1,4 +1,4 @@
-.PHONY: build clean test test-short test-coverage run install check setup-hooks fmt lint
+.PHONY: build clean test test-short test-coverage test-so2010 run install check setup-hooks fmt lint
 
 # Build variables
 BINARY_NAME=smt
@@ -43,6 +43,13 @@ test-coverage:
 	$(GOTEST) ./... -coverprofile=coverage.out
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
+
+# No-AI end-to-end acceptance: migrate StackOverflow2010 MSSQL -> PostgreSQL
+# deterministically and verify the result (#65). Needs live mssql + postgres
+# (load StackOverflow2010 into the mssql container first). Override
+# SO2010_* env vars for non-default connection params.
+test-so2010:
+	SMT_E2E_SO2010=1 $(GOTEST) -v -run TestSO2010 ./internal/orchestrator/
 
 deps:
 	$(GOMOD) download
