@@ -47,3 +47,27 @@ func TestDriftDialectCanonicalization(t *testing.T) {
 		}
 	}
 }
+
+// A literal include/exclude pattern that the target dialect slugs (spaces →
+// underscores) must still match the normalized target table name.
+func TestFilterTablesByScope_NormalizedLiteral(t *testing.T) {
+	norm := func(s string) string { return driver.NormalizeIdentifier("postgres", s) }
+	// Target table is already normalized to "order_items".
+	tables := []driver.Table{{Name: "order_items"}, {Name: "orders"}}
+
+	// Exclude the literal source name "Order Items" — must drop order_items.
+	got := filterTablesByScope(tables, nil, []string{"Order Items"}, norm)
+	if len(got) != 1 || got[0].Name != "orders" {
+		t.Errorf("literal slug-needing exclude failed: %+v", got)
+	}
+	// Include the literal name — must keep only order_items.
+	got = filterTablesByScope(tables, []string{"Order Items"}, nil, norm)
+	if len(got) != 1 || got[0].Name != "order_items" {
+		t.Errorf("literal slug-needing include failed: %+v", got)
+	}
+	// A glob still works via plain CI matching.
+	got = filterTablesByScope(tables, []string{"order*"}, nil, norm)
+	if len(got) != 2 {
+		t.Errorf("glob include should match both: %+v", got)
+	}
+}

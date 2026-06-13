@@ -125,6 +125,29 @@ func deepCopyTable(t driver.Table) driver.Table {
 	return t
 }
 
+// RetargetSchema returns a deep copy of tables with every schema reference
+// (the table's own Schema and each foreign key's RefSchema) set to
+// targetSchema. SMT migrates source.X to target.Y, so a same-schema FK on the
+// source resolves to the target schema; aligning both sides lets FK drift
+// signatures (which include the referenced schema) compare equal instead of
+// flagging a source-vs-target schema-name difference. The input is not
+// mutated. A pass-through when targetSchema is empty.
+func RetargetSchema(tables []driver.Table, targetSchema string) []driver.Table {
+	if strings.TrimSpace(targetSchema) == "" {
+		return tables
+	}
+	out := make([]driver.Table, len(tables))
+	for i := range tables {
+		t := deepCopyTable(tables[i])
+		t.Schema = targetSchema
+		for j := range t.ForeignKeys {
+			t.ForeignKeys[j].RefSchema = targetSchema
+		}
+		out[i] = t
+	}
+	return out
+}
+
 // IsEmpty reports whether the target matches the desired schema.
 func (d Drift) IsEmpty() bool {
 	return len(d.MissingTables) == 0 && len(d.ExtraTables) == 0 && len(d.ChangedTables) == 0
@@ -366,7 +389,11 @@ func fkKeys(fks []driver.ForeignKey) []string {
 			}
 			pairs[i] = strings.ToLower(c) + ":" + ref
 		}
-		out = append(out, strings.Join(pairs, ",")+"->"+strings.ToLower(fk.RefTable)+
+		ref := strings.ToLower(fk.RefTable)
+		if s := strings.TrimSpace(fk.RefSchema); s != "" {
+			ref = strings.ToLower(s) + "." + ref
+		}
+		out = append(out, strings.Join(pairs, ",")+"->"+ref+
 			"|"+normAction(fk.OnDelete)+"|"+normAction(fk.OnUpdate))
 	}
 	return out

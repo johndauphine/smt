@@ -385,3 +385,39 @@ func TestComputeDrift_IndexIncludeAndFilter(t *testing.T) {
 		t.Errorf("INCLUDE/filter loss should drift: missing=%v extra=%v", td.MissingIndexes, td.ExtraIndexes)
 	}
 }
+
+// A foreign key pointing at a different referenced SCHEMA must drift even when
+// the referenced table/columns match. RetargetSchema aligns both sides to the
+// target schema so same-schema FKs don't false-drift.
+func TestComputeDrift_FKRefSchemaAndRetarget(t *testing.T) {
+	desired := []driver.Table{{
+		Name:    "Orders",
+		Columns: []driver.Column{dcol("cust", "int")},
+		ForeignKeys: []driver.ForeignKey{
+			{Name: "fk", Columns: []string{"cust"}, RefSchema: "app", RefTable: "Customers", RefColumns: []string{"id"}},
+		},
+	}}
+	// Same FK shape but pointing at a different schema on the target.
+	existing := []driver.Table{{
+		Name:    "orders",
+		Columns: []driver.Column{dcol("cust", "integer")},
+		ForeignKeys: []driver.ForeignKey{
+			{Name: "fk", Columns: []string{"cust"}, RefSchema: "legacy", RefTable: "customers", RefColumns: []string{"id"}},
+		},
+	}}
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].MissingForeignKeys) == 0 {
+		t.Fatalf("cross-schema FK ref should drift, got %+v", d.ChangedTables)
+	}
+
+	// After retargeting both sides to the same schema, the FK matches.
+	rd := RetargetSchema(desired, "public")
+	re := RetargetSchema(existing, "public")
+	if d := ComputeDrift(rd, re, "mssql", "postgres", DefaultDriftOptions()); !d.IsEmpty() {
+		t.Errorf("same-schema FK after retarget should not drift, got %+v", d.ChangedTables)
+	}
+	// RetargetSchema must not mutate the input.
+	if desired[0].ForeignKeys[0].RefSchema != "app" {
+		t.Errorf("RetargetSchema mutated its input: %q", desired[0].ForeignKeys[0].RefSchema)
+	}
+}

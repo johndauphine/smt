@@ -77,16 +77,19 @@ func runDrift(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("introspecting source: %w", err)
 	}
-	desired = filterTablesByScope(desired, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables)
+	norm := func(name string) string { return driver.NormalizeIdentifier(targetDialect, name) }
+	// Filter on SOURCE names with the source-cased patterns (globs intact).
+	desired = filterTablesByScope(desired, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables, norm)
 	if err := loadConstraintsGated(ctx, orch.Source(), desired, opts); err != nil {
 		return err
 	}
 	// Fold every desired identifier — table, column, AND index/FK column lists
 	// and referenced tables — to the target's on-disk convention so constraint
-	// comparisons line up with the introspected (already-normalized) target.
-	desired = schemadiff.NormalizeIdentifiers(desired, func(name string) string {
-		return driver.NormalizeIdentifier(targetDialect, name)
-	})
+	// comparisons line up with the introspected (already-normalized) target,
+	// then resolve schema references to the target schema so cross-schema FK
+	// signatures compare equal.
+	desired = schemadiff.NormalizeIdentifiers(desired, norm)
+	desired = schemadiff.RetargetSchema(desired, cfg.Target.Schema)
 
 	// Existing: introspect the live target through a reader on the target
 	// connection.
@@ -102,10 +105,13 @@ func runDrift(c *cli.Context) error {
 	}
 	// Scope the target the same way: only compare tables the source manages,
 	// so unrelated objects living in the target schema aren't flagged extra.
-	existing = filterTablesByScope(existing, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables)
+	// The target names are already normalized, so the filter also tries the
+	// normalized form of each literal pattern (see filterTablesByScope).
+	existing = filterTablesByScope(existing, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables, norm)
 	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
 		return err
 	}
+	existing = schemadiff.RetargetSchema(existing, cfg.Target.Schema)
 
 	drift := schemadiff.ComputeDrift(desired, existing, sourceDialect, targetDialect, opts)
 	printDriftReport(drift)
@@ -123,19 +129,22 @@ func runDrift(c *cli.Context) error {
 // targetAsSource adapts the target connection into a SourceConfig so the same
 // deterministic reader path can introspect it.
 // filterTablesByScope applies the migration include/exclude rules the same way
-// the orchestrator does (exclude wins; include, when set, is an allowlist),
-// matching case-insensitively so source-cased patterns line up with both
-// source-cased and target-normalized table names.
-func filterTablesByScope(tables []driver.Table, include, exclude []string) []driver.Table {
+// the orchestrator does (exclude wins; include, when set, is an allowlist).
+// It matches a name against each pattern case-insensitively (with glob
+// support), and additionally tries the target-normalized form of literal
+// patterns via norm — so a literal pattern like "Order Items" still matches a
+// target table the dialect slugged to "order_items". Globs are not normalized
+// (normalization would mangle `*`/`?`), so they keep plain CI semantics.
+func filterTablesByScope(tables []driver.Table, include, exclude []string, norm func(string) string) []driver.Table {
 	if len(include) == 0 && len(exclude) == 0 {
 		return tables
 	}
 	out := make([]driver.Table, 0, len(tables))
 	for _, t := range tables {
-		if matchesAnyCI(t.Name, exclude) {
+		if matchesAnyScoped(t.Name, exclude, norm) {
 			continue
 		}
-		if len(include) > 0 && !matchesAnyCI(t.Name, include) {
+		if len(include) > 0 && !matchesAnyScoped(t.Name, include, norm) {
 			continue
 		}
 		out = append(out, t)
@@ -143,10 +152,15 @@ func filterTablesByScope(tables []driver.Table, include, exclude []string) []dri
 	return out
 }
 
-func matchesAnyCI(name string, patterns []string) bool {
+func matchesAnyScoped(name string, patterns []string, norm func(string) string) bool {
 	lower := strings.ToLower(name)
 	for _, p := range patterns {
 		if ok, _ := filepath.Match(strings.ToLower(p), lower); ok {
+			return true
+		}
+		// Literal (glob-free) patterns: also match the dialect-normalized
+		// form, so a name that needed slugging on the target still matches.
+		if norm != nil && !strings.ContainsAny(p, "*?[") && norm(p) == name {
 			return true
 		}
 	}
