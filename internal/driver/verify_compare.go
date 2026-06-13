@@ -16,8 +16,15 @@ package driver
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// fspNowArgPattern matches a bare function name with a single numeric
+// (fractional-seconds) argument, e.g. "current_timestamp(6)" or "now(3)",
+// capturing the function name so the precision arg can be dropped for
+// default-class comparison.
+var fspNowArgPattern = regexp.MustCompile(`^([a-z_]+)\([0-9]+\)$`)
 
 // ColumnDelta records a single per-(column, criterion) mismatch from
 // CompareColumns. Format() renders it in the same wire shape #53's prompt
@@ -125,6 +132,17 @@ func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	if isBinaryFamilyType(src.DataType) && strings.EqualFold(strings.TrimSpace(tgt.DataType), "bytea") {
 		return nil
 	}
+	// A MySQL ENUM/SET maps to an unbounded target type (pg text) on a
+	// NON-MySQL target; the enum's reported max_length is the longest member,
+	// not a user bound, so length must not flag there. Gated on a non-MySQL
+	// target so a same-dialect ENUM→ENUM still compares length AND an
+	// ENUM→TEXT change on a MySQL target keeps its length signal (the only
+	// delta that reveals the enum constraint was lost). The enum VALUE list
+	// itself is a #62 follow-up, not compared here.
+	if isEnumSetType(src.DataType) && !isMySQLDialect(tgtDialect) &&
+		lobDataTypes[strings.ToLower(strings.TrimSpace(tgt.DataType))] {
+		return nil
+	}
 	// MySQL's LOB tiers ARE user-meaningful capacity choices when both
 	// sides speak them: LONGTEXT → TEXT silently rejects values above
 	// 64KiB, so a same-family tier change must flag even though both types
@@ -216,6 +234,26 @@ func effectiveMaxLength(c Column) int {
 		return 0
 	}
 	return normMaxLength(c.MaxLength)
+}
+
+// isMySQLDialect reports whether the dialect is MySQL/MariaDB.
+func isMySQLDialect(dialect string) bool {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "mysql", "mariadb":
+		return true
+	default:
+		return false
+	}
+}
+
+// isEnumSetType reports whether the type is a MySQL ENUM or SET.
+func isEnumSetType(dt string) bool {
+	switch strings.ToLower(strings.TrimSpace(dt)) {
+	case "enum", "set":
+		return true
+	default:
+		return false
+	}
 }
 
 // isBinaryFamilyType reports whether the type stores raw bytes (sized or
@@ -507,6 +545,27 @@ func defaultExpressionClass(expr string) string {
 	if strings.HasPrefix(norm, "n'") && strings.HasSuffix(norm, "'") {
 		norm = norm[1:]
 	}
+	// Strip a trailing "at time zone 'utc'" wrapper only. PG renders MSSQL
+	// GETUTCDATE() / SYSUTCDATETIME() as `CURRENT_TIMESTAMP AT TIME ZONE
+	// 'UTC'`, which is still a current-datetime (UTC) default — the TZ
+	// conversion is a class detail checked separately via cmpTZClass on
+	// data_type. A NON-UTC zone (e.g. 'America/Chicago') changes the inserted
+	// value, so it must stay part of the class and not collapse to a bare
+	// current_timestamp.
+	if i := strings.Index(norm, " at time zone "); i >= 0 {
+		if zone := strings.TrimSpace(norm[i+len(" at time zone "):]); zone == "'utc'" {
+			norm = strings.TrimSpace(norm[:i])
+		}
+	}
+	// Strip a fractional-seconds precision argument from a now-function:
+	// CURRENT_TIMESTAMP(6) ≡ CURRENT_TIMESTAMP, NOW(3) ≡ NOW(). The precision
+	// is a column-level detail (DatetimePrecision), not a default class — MySQL
+	// reports `CURRENT_TIMESTAMP(6)` while a PG target renders bare
+	// `CURRENT_TIMESTAMP`. Only a bare function-name with a numeric arg is
+	// reduced, so literals and multi-arg calls are untouched.
+	if m := fspNowArgPattern.FindStringSubmatch(norm); m != nil {
+		norm = m[1]
+	}
 
 	// "Now-style" function families. Split into three classes by what the
 	// function actually returns: full date+time (current_dt), date-only
@@ -524,6 +583,7 @@ func defaultExpressionClass(expr string) string {
 	case "current_timestamp", "now()", "now",
 		"getdate()", "getdate", "getutcdate()", "getutcdate",
 		"sysdatetime()", "sysdatetime",
+		"sysutcdatetime()", "sysutcdatetime",
 		"sysdatetimeoffset()", "sysdatetimeoffset",
 		"systimestamp",
 		"localtimestamp", "localtimestamp()":

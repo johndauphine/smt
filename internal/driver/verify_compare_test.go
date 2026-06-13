@@ -570,3 +570,126 @@ func TestCompareColumns_MySQLLOBTiers(t *testing.T) {
 		})
 	}
 }
+
+// PG renders MSSQL GETUTCDATE()/SYSUTCDATETIME() as CURRENT_TIMESTAMP AT TIME
+// ZONE 'UTC'. Both are current-datetime defaults; the comparator must treat
+// them as equivalent so a freshly-created target doesn't report drift.
+func TestDefaultExpressionClass_UTCNowEquivalence(t *testing.T) {
+	utcForms := []string{
+		"getutcdate()",
+		"(getutcdate())",
+		"CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
+		"(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')",
+		"(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)",
+		"current_timestamp",
+	}
+	for _, f := range utcForms {
+		if got := defaultExpressionClass(f); got != "current_dt" {
+			t.Errorf("defaultExpressionClass(%q) = %q, want current_dt", f, got)
+		}
+	}
+	// A source getutcdate() column vs a target rendered as the PG UTC form
+	// must not flag a default delta.
+	src := []Column{{Name: "at", DataType: "datetime2", DefaultExpression: "(getutcdate())"}}
+	tgt := []Column{{Name: "at", DataType: "timestamp", DefaultExpression: "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text)"}}
+	for _, d := range CompareColumns(src, tgt, "mssql", "postgres") {
+		if d.Criterion == "default" {
+			t.Errorf("unexpected default delta for UTC-now round-trip: %s", d.String())
+		}
+	}
+}
+
+// Only the UTC AT TIME ZONE form collapses to current_dt; a non-UTC zone
+// changes the value and must stay a distinct class so it doesn't match a
+// plain UTC now-default.
+func TestDefaultExpressionClass_NonUTCZonePreserved(t *testing.T) {
+	utc := defaultExpressionClass("CURRENT_TIMESTAMP AT TIME ZONE 'UTC'")
+	chicago := defaultExpressionClass("CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago'")
+	if utc != "current_dt" {
+		t.Errorf("UTC form should be current_dt, got %q", utc)
+	}
+	if chicago == "current_dt" {
+		t.Error("non-UTC zone must not collapse to current_dt")
+	}
+	if utc == chicago {
+		t.Error("UTC and non-UTC AT TIME ZONE defaults must classify differently")
+	}
+}
+
+// SYSUTCDATETIME() (MSSQL UTC now) must classify as current_dt so it matches
+// the PG `CURRENT_TIMESTAMP AT TIME ZONE 'UTC'` SMT renders from it.
+func TestDefaultExpressionClass_SysUTCDatetime(t *testing.T) {
+	for _, f := range []string{"sysutcdatetime()", "SYSUTCDATETIME()", "(sysutcdatetime())"} {
+		if got := defaultExpressionClass(f); got != "current_dt" {
+			t.Errorf("defaultExpressionClass(%q) = %q, want current_dt", f, got)
+		}
+	}
+}
+
+// MySQL ENUM/SET → unbounded target (pg text) must not flag a length delta:
+// the enum's reported max_length is the longest member, not a user bound.
+func TestCompareColumns_EnumToTextNoLengthDrift(t *testing.T) {
+	src := []Column{{Name: "status", DataType: "enum", MaxLength: 8}}
+	tgt := []Column{{Name: "status", DataType: "text", MaxLength: 0}}
+	for _, d := range CompareColumns(src, tgt, "mysql", "postgres") {
+		if d.Criterion == "max_length" {
+			t.Errorf("enum→text should not flag max_length: %s", d.String())
+		}
+	}
+}
+
+// CURRENT_TIMESTAMP(6) (MySQL fsp) ≡ CURRENT_TIMESTAMP — the precision is a
+// column detail, not a default class, so it must not flag a default delta.
+func TestDefaultExpressionClass_NowFspArgStripped(t *testing.T) {
+	for _, f := range []string{"current_timestamp(6)", "CURRENT_TIMESTAMP(3)", "now(6)", "(current_timestamp(6))"} {
+		if got := defaultExpressionClass(f); got != "current_dt" {
+			t.Errorf("defaultExpressionClass(%q) = %q, want current_dt", f, got)
+		}
+	}
+	src := []Column{{Name: "at", DataType: "datetime", DefaultExpression: "CURRENT_TIMESTAMP(6)"}}
+	tgt := []Column{{Name: "at", DataType: "timestamp", DefaultExpression: "CURRENT_TIMESTAMP"}}
+	for _, d := range CompareColumns(src, tgt, "mysql", "postgres") {
+		if d.Criterion == "default" {
+			t.Errorf("CURRENT_TIMESTAMP(6)→CURRENT_TIMESTAMP should not flag default: %s", d.String())
+		}
+	}
+}
+
+// enum/set exemption is scoped to an unbounded target: ENUM→TEXT cross-dialect
+// doesn't flag length, but a same-dialect ENUM→ENUM still compares length.
+func TestCompareColumns_EnumExemptionScoped(t *testing.T) {
+	// enum → pg text: exempt, no length flag.
+	if d := CompareColumns(
+		[]Column{{Name: "s", DataType: "enum", MaxLength: 8}},
+		[]Column{{Name: "s", DataType: "text", MaxLength: 0}}, "mysql", "postgres"); hasCriterion(d, "max_length") {
+		t.Error("enum→text should not flag max_length")
+	}
+	// enum → enum (mysql→mysql) with different length still flags.
+	if d := CompareColumns(
+		[]Column{{Name: "s", DataType: "enum", MaxLength: 3}},
+		[]Column{{Name: "s", DataType: "enum", MaxLength: 8}}, "mysql", "mysql"); !hasCriterion(d, "max_length") {
+		t.Error("enum→enum length difference should flag (value-set proxy)")
+	}
+}
+
+func hasCriterion(ds []ColumnDelta, crit string) bool {
+	for _, d := range ds {
+		if d.Criterion == crit {
+			return true
+		}
+	}
+	return false
+}
+
+// ENUM→TEXT keeps its length signal on a MySQL target (the enum constraint
+// was lost) but is exempt cross-dialect (faithful enum→pg text mapping).
+func TestCompareColumns_EnumToTextMySQLTargetFlags(t *testing.T) {
+	src := []Column{{Name: "s", DataType: "enum", MaxLength: 8}}
+	tgtText := []Column{{Name: "s", DataType: "text", MaxLength: 0}}
+	if !hasCriterion(CompareColumns(src, tgtText, "mysql", "mysql"), "max_length") {
+		t.Error("enum→text on a mysql target should flag (enum constraint lost)")
+	}
+	if hasCriterion(CompareColumns(src, tgtText, "mysql", "postgres"), "max_length") {
+		t.Error("enum→text cross-dialect (pg) should not flag")
+	}
+}

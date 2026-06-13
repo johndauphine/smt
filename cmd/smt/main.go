@@ -8,6 +8,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -32,6 +33,17 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
+		// A command that returns a cli.ExitCoder (e.g. `smt drift` signaling
+		// "drift detected" with cli.Exit("", 3)) owns its exit code and is not
+		// an error condition — exit with that code and print its message only
+		// if it carries one, without the generic Error/Exit-code banner.
+		var coder cli.ExitCoder
+		if errors.As(err, &coder) {
+			if msg := err.Error(); msg != "" {
+				fmt.Fprintln(os.Stderr, msg)
+			}
+			os.Exit(coder.ExitCode())
+		}
 		code := exitcodes.FromError(err)
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Exit code %d (%s)\n", code, exitcodes.Description(code))
@@ -125,6 +137,7 @@ func commands() []*cli.Command {
 	return []*cli.Command{
 		createCommand(),
 		syncCommand(),
+		driftCommand(),
 		snapshotCommand(),
 		healthCheckCommand(),
 		initSecretsCommand(),
