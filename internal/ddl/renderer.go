@@ -649,6 +649,13 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 		}
 		return sizedType("CHAR", col.MaxLength, "1"), nil
 	case "text", "ntext", "tinytext", "mediumtext", "longtext":
+		// "text" is dialect-ambiguous: MySQL's 64KiB tier vs the unbounded
+		// LOB of pg (1GB) and legacy mssql (2GB). Same-dialect keeps the
+		// tier verbatim; foreign unbounded sources need LONGTEXT to avoid
+		// a silent capacity downgrade (#108).
+		if dt == "text" && r.source != "mysql" {
+			return "LONGTEXT", nil
+		}
 		return mysqlTextType(dt), nil
 	case "json", "jsonb", "array", "_text", "text[]", "_varchar", "varchar[]", "_bpchar", "bpchar[]", "_int2", "int2[]", "_int4", "int4[]", "_int8", "int8[]", "_uuid", "uuid[]":
 		return "JSON", nil
@@ -683,13 +690,21 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 		return "CHAR(36)", nil
 	case "varbinary", "binary", "bytea":
 		// Unbounded sources (pg bytea reports 0, mssql varbinary(max) -1)
-		// must not truncate to a sized VARBINARY.
-		if col.MaxLength <= 0 || col.MaxLength > 65535 {
-			return "BLOB", nil
+		// hold up to 1-2GB — only LONGBLOB doesn't lose capacity. Sized
+		// sources past VARBINARY's 65535-byte ceiling fit MEDIUMBLOB.
+		if col.MaxLength <= 0 {
+			return "LONGBLOB", nil
+		}
+		if col.MaxLength > 65535 {
+			return "MEDIUMBLOB", nil
 		}
 		return fmt.Sprintf("VARBINARY(%d)", col.MaxLength), nil
-	case "image", "blob", "tinyblob", "mediumblob", "longblob":
-		return "BLOB", nil
+	case "image":
+		// MSSQL IMAGE holds 2GB; BLOB (64KiB) would silently truncate.
+		return "LONGBLOB", nil
+	case "blob", "tinyblob", "mediumblob", "longblob":
+		// MySQL-only names: preserve the tier verbatim.
+		return strings.ToUpper(dt), nil
 	case "enum":
 		return r.enumSetType("ENUM", col)
 	case "set":
@@ -877,16 +892,21 @@ func mysqlUnsignedType(base string, col driver.Column) string {
 }
 
 func mysqlVarcharType(length int) string {
-	if length == -1 {
+	// Unbounded sources (mssql MAX = -1, pg unconstrained varchar = 0)
+	// hold up to 1-2GB — only LONGTEXT doesn't lose capacity.
+	if length <= 0 {
 		return "LONGTEXT"
 	}
-	if length <= 0 {
-		return "TEXT"
-	}
 	// 16383 is the longest VARCHAR that fits MySQL's 65535-byte row limit
-	// under utf8mb4 (the charset our CREATE TABLE emits).
+	// under utf8mb4 (the charset our CREATE TABLE emits). Past it, pick the
+	// smallest text tier whose BYTE capacity covers the worst case of 4
+	// bytes per character: TEXT (64KiB) can hold only 16383 such chars, so
+	// the next safe tier is MEDIUMTEXT (16MiB, ~4.19M chars).
+	if length > 16777215/4 {
+		return "LONGTEXT"
+	}
 	if length > 16383 {
-		return "TEXT"
+		return "MEDIUMTEXT"
 	}
 	return fmt.Sprintf("VARCHAR(%d)", length)
 }

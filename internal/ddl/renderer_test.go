@@ -265,7 +265,8 @@ func TestRenderer_MySQLTargetPreservesLargeTextAndOnUpdate(t *testing.T) {
 		want string
 	}{
 		{name: "nvarchar max", col: driver.Column{Name: "Notes", DataType: "nvarchar", MaxLength: -1}, want: "LONGTEXT"},
-		{name: "unbounded varchar", col: driver.Column{Name: "Notes", DataType: "varchar", MaxLength: 0}, want: "TEXT"},
+		// Unbounded pg varchar holds 1GB; LONGTEXT is the only tier that keeps that capacity (#108).
+		{name: "unbounded varchar", col: driver.Column{Name: "Notes", DataType: "varchar", MaxLength: 0}, want: "LONGTEXT"},
 		{name: "mediumtext", col: driver.Column{Name: "Notes", DataType: "mediumtext"}, want: "MEDIUMTEXT"},
 		{name: "longtext", col: driver.Column{Name: "Notes", DataType: "longtext"}, want: "LONGTEXT"},
 	} {

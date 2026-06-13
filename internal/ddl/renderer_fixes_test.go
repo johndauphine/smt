@@ -160,14 +160,14 @@ func TestColumnType_LengthClamping(t *testing.T) {
 		{mssql, driver.Column{DataType: "char", MaxLength: 9000}, "VARCHAR(MAX)"},
 		{mssql, driver.Column{DataType: "nchar", MaxLength: 5000}, "NVARCHAR(MAX)"},
 		{mssql, driver.Column{DataType: "varbinary", MaxLength: 9000}, "VARBINARY(MAX)"},
-		{mysql, driver.Column{DataType: "varchar", MaxLength: 20000}, "TEXT"},
+		{mysql, driver.Column{DataType: "varchar", MaxLength: 20000}, "MEDIUMTEXT"},
 		{mysql, driver.Column{DataType: "varchar", MaxLength: 16383}, "VARCHAR(16383)"},
 		{mysql, driver.Column{DataType: "char", MaxLength: 300}, "VARCHAR(300)"},
-		{mysql, driver.Column{DataType: "varbinary", MaxLength: 70000}, "BLOB"},
+		{mysql, driver.Column{DataType: "varbinary", MaxLength: 70000}, "MEDIUMBLOB"},
 		// Unbounded binary sources (pg bytea = 0, mssql varbinary(max) = -1)
-		// must not truncate to VARBINARY(255).
-		{mysql, driver.Column{DataType: "bytea", MaxLength: 0}, "BLOB"},
-		{mysql, driver.Column{DataType: "varbinary", MaxLength: -1}, "BLOB"},
+		// hold 1-2GB; only LONGBLOB keeps that capacity (#108).
+		{mysql, driver.Column{DataType: "bytea", MaxLength: 0}, "LONGBLOB"},
+		{mysql, driver.Column{DataType: "varbinary", MaxLength: -1}, "LONGBLOB"},
 	}
 	for _, tc := range cases {
 		got, err := tc.r.ColumnType(tc.col)
