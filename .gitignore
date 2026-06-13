@@ -40,3 +40,6 @@ migrations/
 *.sql
 !testdata/**/*.sql
 !internal/**/testdata/**/*.sql
+
+# SO2010 acceptance-test artifact (make test-so2010)
+so2010_verification.json

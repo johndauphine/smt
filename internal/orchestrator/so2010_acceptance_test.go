@@ -14,6 +14,7 @@ package orchestrator
 //	SO2010_MSSQL_HOST/PORT/USER/PASS/DB   (default localhost:1433 sa StackOverflow2010)
 //	SO2010_PG_HOST/PORT/USER/PASS/DB      (default localhost:5432 postgres postgres)
 //	SO2010_PG_SCHEMA                       (default so2010_accept; dropped + recreated)
+//	SO2010_REPORT_DIR                      durable dir for the JSON report (default: ephemeral temp)
 
 import (
 	"context"
@@ -132,8 +133,14 @@ ai_review:
 	report := verifySO2010(t, srcTables, tgtTables, pgSchema)
 
 	// Save the verification report as a migration artifact (#65 requirement).
-	reportPath := dataDir + "/so2010_verification.json"
+	// t.TempDir() is removed on cleanup, so honor SO2010_REPORT_DIR for a
+	// durable copy callers (make test-so2010 / CI) can archive.
 	blob, _ := json.MarshalIndent(report, "", "  ")
+	reportDir := os.Getenv("SO2010_REPORT_DIR")
+	if reportDir == "" {
+		reportDir = dataDir // ephemeral fallback
+	}
+	reportPath := reportDir + "/so2010_verification.json"
 	if err := os.WriteFile(reportPath, blob, 0600); err != nil {
 		t.Fatalf("writing verification report: %v", err)
 	}

@@ -49,7 +49,8 @@ test-coverage:
 # (load StackOverflow2010 into the mssql container first). Override
 # SO2010_* env vars for non-default connection params.
 test-so2010:
-	SMT_E2E_SO2010=1 $(GOTEST) -count=1 -v -run TestSO2010 ./internal/orchestrator/
+	SMT_E2E_SO2010=1 SO2010_REPORT_DIR=$(CURDIR) $(GOTEST) -count=1 -v -run TestSO2010 ./internal/orchestrator/
+	@echo "Verification report: $(CURDIR)/so2010_verification.json"
 
 deps:
 	$(GOMOD) download
