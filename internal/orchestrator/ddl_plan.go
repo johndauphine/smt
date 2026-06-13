@@ -114,6 +114,13 @@ func (o *Orchestrator) renderDDLPlan(ctx context.Context, runID string) (schemad
 		plan.Statements = append(plan.Statements, stmts...)
 	}
 
+	// Record the deterministic inputs (versions + fingerprints) that produced
+	// this plan, next to schema.sql. Both the create-preview and apply paths
+	// render through here, so the manifest covers both (#64).
+	if err := o.writeRunManifest(ctx, runID, renderer, plan.SQL()); err != nil {
+		return schemadiff.Plan{}, fmt.Errorf("writing run manifest: %w", err)
+	}
+
 	return plan, nil
 }
 
