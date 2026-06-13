@@ -338,7 +338,7 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 		typ = "real"
 	case "uniqueidentifier", "uuid":
 		typ = "uuid"
-	case "varbinary", "binary", "image", "bytea":
+	case "varbinary", "binary", "image", "bytea", "blob", "tinyblob", "mediumblob", "longblob":
 		typ = "bytea"
 	case "xml":
 		typ = "xml"

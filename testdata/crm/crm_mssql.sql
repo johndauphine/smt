@@ -276,3 +276,47 @@ CREATE TABLE CustomerTags (
     CONSTRAINT FK_CT_Tag       FOREIGN KEY (tag_id)                REFERENCES Tags(id)      ON DELETE CASCADE,
     CONSTRAINT FK_CT_Employee  FOREIGN KEY (tagged_by_employee_id) REFERENCES Employees(id)
 );
+
+-- TypeSmoke is not part of the CRM domain: one column per type/length case
+-- the 14 CRM tables don't exercise (issue #46), so the column-diff harness
+-- can catch silent degradation at the boundaries. Length boundaries sit at
+-- MSSQL's inline ceilings (VARCHAR 8000 / NVARCHAR 4000); past those the
+-- only legal declaration is MAX, so there is no "8001" case to write.
+-- XML / hierarchyid / sql_variant / spatial stay out of scope (exotic, and
+-- spatial has its own SRID code path).
+CREATE TABLE TypeSmoke (
+    id              INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    -- character length boundaries
+    s_min           VARCHAR(1)        NOT NULL,
+    s_inline_max    VARCHAR(8000)     NULL,
+    s_lob           VARCHAR(MAX)      NULL,
+    n_inline_max    NVARCHAR(4000)    NULL,
+    n_lob           NVARCHAR(MAX)     NULL,
+    ch_min          CHAR(1)           NOT NULL CONSTRAINT DF_TS_ch DEFAULT 'Y',
+    -- deprecated LOB types still common in legacy schemas
+    legacy_text     TEXT              NULL,
+    legacy_ntext    NTEXT             NULL,
+    legacy_image    IMAGE             NULL,
+    -- datetime fractional-second precision spread + legacy datetime types
+    dt2_p0          DATETIME2(0)      NOT NULL,
+    dt2_p3          DATETIME2(3)      NULL,
+    dto_p2          DATETIMEOFFSET(2) NULL,
+    legacy_dt       DATETIME          NULL,
+    legacy_smalldt  SMALLDATETIME     NULL,
+    -- time-only (activates the harness naive_t class)
+    t_default       TIME              NULL,
+    t_p0            TIME(0)           NULL,
+    t_p3            TIME(3)           NULL,
+    -- binary length preservation
+    bin_fixed       BINARY(16)        NULL,
+    vbin_sized      VARBINARY(50)     NULL,
+    vbin_lob        VARBINARY(MAX)    NULL,
+    -- numeric precision boundaries
+    num_max_prec    NUMERIC(38,10)    NOT NULL CONSTRAINT DF_TS_num DEFAULT 0,
+    dec_min_prec    DECIMAL(1,0)      NULL,
+    money_col       MONEY             NULL,
+    smallmoney_col  SMALLMONEY        NULL,
+    float_col       FLOAT             NULL,
+    real_col        REAL              NULL,
+    tiny_col        TINYINT           NULL
+);

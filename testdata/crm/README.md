@@ -3,7 +3,15 @@
 Three native-dialect 3NF CRM source schemas for end-to-end SMT migration testing.
 Each script creates the same 14-table CRM domain (companies, employees, customers,
 products, orders, invoices, payments, tags, junctions, etc.) but uses idioms
-specific to the source engine.
+specific to the source engine, plus a 15th standalone `type_smoke` table (issue
+#46) with one column per type/length case the CRM domain doesn't exercise:
+length boundaries (`VARCHAR(1)`, the 8000/4000 MSSQL inline ceilings, MAX/LOB
+forms), legacy LOB types (`TEXT`/`NTEXT`/`IMAGE`), explicit datetime
+fractional-second precisions, time-only columns, sized binary vs blob tiers,
+and numeric precision boundaries (`NUMERIC(38,10)`, `DECIMAL(1,0)`, `MONEY`).
+`TIMETZ` is deliberately not covered — MSSQL/MySQL have no tz-aware
+time-of-day type, so it cannot round-trip without a by-design tz-class
+failure. XML / hierarchyid / sql_variant / spatial stay out of scope.
 
 | File                | Engine                     | Engine-specific features used                                       |
 |---------------------|----------------------------|---------------------------------------------------------------------|
@@ -13,7 +21,8 @@ specific to the source engine.
 
 ## Common shape
 
-All three are 14 tables with 22 FKs in the same logical shape:
+All three are 14 CRM tables (plus the standalone `type_smoke`) with 22 FKs in
+the same logical shape:
 
 ```
 companies → departments (self-ref)

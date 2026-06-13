@@ -606,7 +606,7 @@ func (r Renderer) mssqlColumnType(col driver.Column, dt string) (string, error) 
 		return "REAL", nil
 	case "uniqueidentifier", "uuid":
 		return "UNIQUEIDENTIFIER", nil
-	case "varbinary", "binary", "image", "bytea", "blob", "mediumblob", "longblob":
+	case "varbinary", "binary", "image", "bytea", "blob", "tinyblob", "mediumblob", "longblob":
 		return sizedTypeCapped("VARBINARY", col.MaxLength, 8000, "MAX"), nil
 	default:
 		return r.unknownType(dt)
@@ -665,7 +665,7 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 			return "BLOB", nil
 		}
 		return fmt.Sprintf("VARBINARY(%d)", col.MaxLength), nil
-	case "image", "blob", "mediumblob", "longblob":
+	case "image", "blob", "tinyblob", "mediumblob", "longblob":
 		return "BLOB", nil
 	case "enum":
 		return r.enumSetType("ENUM", col)

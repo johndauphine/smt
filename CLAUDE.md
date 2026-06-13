@@ -32,7 +32,7 @@ Go 1.25 required. CGO is off; SQLite uses the `modernc.org/sqlite` pure-Go drive
 
 ### End-to-end test fixtures
 
-`testdata/crm/` holds three native-dialect 3NF CRM source schemas (`crm_mssql.sql`, `crm_postgres.sql`, `crm_mysql.sql`) — same logical 14-table shape across all three but each in its own dialect (MSSQL: IDENTITY+DATETIMEOFFSET+UNIQUEIDENTIFIER+PERSISTED; PG: GENERATED IDENTITY+TIMESTAMPTZ+JSONB+arrays+STORED; MySQL: AUTO_INCREMENT+ENUM+SET+JSON+VIRTUAL/STORED). Use these to drive any source × target permutation; they're the canonical test surface for column-metadata fidelity (NOT NULL, defaults, computed columns, FK actions). See `testdata/crm/README.md` for load commands.
+`testdata/crm/` holds three native-dialect 3NF CRM source schemas (`crm_mssql.sql`, `crm_postgres.sql`, `crm_mysql.sql`) — same logical 14-table shape across all three but each in its own dialect (MSSQL: IDENTITY+DATETIMEOFFSET+UNIQUEIDENTIFIER+PERSISTED; PG: GENERATED IDENTITY+TIMESTAMPTZ+JSONB+arrays+STORED; MySQL: AUTO_INCREMENT+ENUM+SET+JSON+VIRTUAL/STORED), plus a standalone `type_smoke` table per fixture (#46) covering boundary lengths, legacy LOB types, explicit fsp, time-only, sized binary/blob tiers, and numeric precision extremes. Use these to drive any source × target permutation; they're the canonical test surface for column-metadata fidelity (NOT NULL, defaults, computed columns, FK actions). See `testdata/crm/README.md` for load commands.
 
 ## Architecture
 

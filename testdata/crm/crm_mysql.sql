@@ -329,3 +329,38 @@ CREATE TABLE customer_tags (
     CONSTRAINT fk_ct_tag      FOREIGN KEY (tag_id)                REFERENCES tags(id)      ON DELETE CASCADE,
     CONSTRAINT fk_ct_employee FOREIGN KEY (tagged_by_employee_id) REFERENCES employees(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- type_smoke is not part of the CRM domain: one column per type/length case
+-- the 14 CRM tables don't exercise (issue #46). VARCHAR(8000) is the
+-- largest length every target keeps inline (MSSQL's ceiling); it costs
+-- 32000 bytes of MySQL's 65535-byte row budget, so keep additions small.
+CREATE TABLE type_smoke (
+    id              INT UNSIGNED   NOT NULL AUTO_INCREMENT,
+    -- character length boundaries
+    s_min           VARCHAR(1)     NOT NULL,
+    s_inline_max    VARCHAR(8000),
+    ch_min          CHAR(1)        NOT NULL DEFAULT 'Y',
+    -- text size tiers
+    txt_tiny        TINYTEXT,
+    txt_medium      MEDIUMTEXT,
+    txt_long        LONGTEXT,
+    -- datetime fractional-second precision spread
+    dt_p0           DATETIME       NOT NULL,
+    dt_p3           DATETIME(3),
+    -- time-only (activates the harness naive_t class)
+    t_default       TIME,
+    t_p3            TIME(3),
+    -- binary length preservation + blob size tiers
+    bin_fixed       BINARY(16),
+    vbin_sized      VARBINARY(255),
+    blob_col        BLOB,
+    blob_medium     MEDIUMBLOB,
+    blob_long       LONGBLOB,
+    -- numeric precision boundaries
+    num_max_prec    DECIMAL(38,10) NOT NULL DEFAULT 0,
+    dec_min_prec    DECIMAL(1,0),
+    float_col       FLOAT,
+    double_col      DOUBLE,
+    tiny_signed     TINYINT,
+    PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
