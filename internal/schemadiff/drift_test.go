@@ -321,3 +321,67 @@ func TestComputeDrift_OptionsGateUnmanagedKinds(t *testing.T) {
 		t.Error("with comparison on, missing index/FK/check should drift")
 	}
 }
+
+// Computed-column presence and storage class are cross-dialect structural
+// facts drift must catch even when type/length/nullability are unchanged.
+func TestComputeDrift_ComputedColumn(t *testing.T) {
+	// Source column is generated; target made it a plain column.
+	desired := []driver.Table{{Name: "T", Columns: []driver.Column{
+		{Name: "total", DataType: "int", IsComputed: true, ComputedExpression: "a+b", ComputedPersisted: true},
+	}}}
+	existing := []driver.Table{{Name: "t", Columns: []driver.Column{
+		{Name: "total", DataType: "integer", IsComputed: false},
+	}}}
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].ColumnDeltas) == 0 {
+		t.Fatalf("computed→plain should drift, got %+v", d.ChangedTables)
+	}
+	if !strings.Contains(strings.Join(d.ChangedTables[0].ColumnDeltas, " "), "computed") {
+		t.Errorf("missing computed delta: %v", d.ChangedTables[0].ColumnDeltas)
+	}
+
+	// Both computed but storage class changed (persisted → virtual).
+	desired[0].Columns[0].IsComputed, existing[0].Columns[0].IsComputed = true, true
+	existing[0].Columns[0].ComputedPersisted = false
+	d = ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 || !strings.Contains(strings.Join(d.ChangedTables[0].ColumnDeltas, " "), "storage") {
+		t.Errorf("storage-class change should drift, got %+v", d.ChangedTables)
+	}
+
+	// Both computed, same storage → no drift.
+	existing[0].Columns[0].ComputedPersisted = true
+	if d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions()); !d.IsEmpty() {
+		t.Errorf("equivalent computed columns should not drift, got %+v", d.ChangedTables)
+	}
+}
+
+// A covering index that loses its INCLUDE columns, or an index that loses its
+// filter, must drift even though the key columns match.
+func TestComputeDrift_IndexIncludeAndFilter(t *testing.T) {
+	desired := []driver.Table{{
+		Name:    "T",
+		Columns: []driver.Column{dcol("a", "int"), dcol("b", "int")},
+		Indexes: []driver.Index{
+			{Name: "cover", Columns: []string{"a"}, IncludeCols: []string{"b"}},
+			{Name: "filt", Columns: []string{"a"}, Filter: "a > 0"},
+		},
+	}}
+	existing := []driver.Table{{
+		Name:    "t",
+		Columns: []driver.Column{dcol("a", "integer"), dcol("b", "integer")},
+		Indexes: []driver.Index{
+			{Name: "cover", Columns: []string{"a"}}, // lost INCLUDE
+			{Name: "filt", Columns: []string{"a"}},  // lost filter
+		},
+	}}
+	d := ComputeDrift(desired, existing, "mssql", "postgres", DefaultDriftOptions())
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected drift, got %+v", d.ChangedTables)
+	}
+	// Both desired index variants are "missing" (their keyed forms aren't on
+	// target) and both bare target indexes are "extra".
+	td := d.ChangedTables[0]
+	if len(td.MissingIndexes) != 2 || len(td.ExtraIndexes) != 2 {
+		t.Errorf("INCLUDE/filter loss should drift: missing=%v extra=%v", td.MissingIndexes, td.ExtraIndexes)
+	}
+}

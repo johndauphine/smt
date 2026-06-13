@@ -54,6 +54,12 @@ func runDrift(c *cli.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	// Canonicalize dialect aliases (sqlserver→mssql, pg→postgres, …) before
+	// they drive identifier normalization and cross-dialect column comparison,
+	// which both key off the canonical driver name.
+	sourceDialect := driver.Canonicalize(cfg.Source.Type)
+	targetDialect := driver.Canonicalize(cfg.Target.Type)
+
 	// Honor the same scope `create`/`sync` use: only the create_* object kinds
 	// that are managed participate in drift, so a config that intentionally
 	// leaves indexes/FKs/checks unmanaged doesn't report them as drift.
@@ -79,7 +85,7 @@ func runDrift(c *cli.Context) error {
 	// and referenced tables — to the target's on-disk convention so constraint
 	// comparisons line up with the introspected (already-normalized) target.
 	desired = schemadiff.NormalizeIdentifiers(desired, func(name string) string {
-		return driver.NormalizeIdentifier(cfg.Target.Type, name)
+		return driver.NormalizeIdentifier(targetDialect, name)
 	})
 
 	// Existing: introspect the live target through a reader on the target
@@ -101,7 +107,7 @@ func runDrift(c *cli.Context) error {
 		return err
 	}
 
-	drift := schemadiff.ComputeDrift(desired, existing, cfg.Source.Type, cfg.Target.Type, opts)
+	drift := schemadiff.ComputeDrift(desired, existing, sourceDialect, targetDialect, opts)
 	printDriftReport(drift)
 
 	if drift.IsEmpty() {

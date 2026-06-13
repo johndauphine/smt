@@ -228,12 +228,15 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 	// cross-dialect equivalences the comparator already understands
 	// (bit→boolean, uniqueidentifier→char(36), json→jsonb) don't false-flag.
 	//
-	// Known limitation: a SAME-family change the comparator also treats as
-	// equivalent — e.g. integer→bigint, or varchar(20)→char(20) — is NOT
-	// flagged. Distinguishing those from genuine cross-dialect equivalences
-	// needs a canonical concrete-type model (#62); until that lands, drift
-	// catches family-level and length/precision/nullability/identity/TZ/
-	// default changes but not same-family width promotions.
+	// Known limitations, all rooted in the lack of cross-dialect expression /
+	// concrete-type normalization (#62): a SAME-family type change the
+	// comparator treats as equivalent (integer→bigint, varchar(20)→char(20))
+	// is not flagged, and per-column EXPRESSION/value details whose text
+	// differs across dialects — a changed computed expression body, MySQL
+	// ENUM/SET value lists, ON UPDATE expressions, spatial SRID — are not
+	// compared either. Drift catches presence/structure (computed Y/N + storage
+	// class, type family, length/precision/nullability/identity/TZ/default)
+	// today; expression-level equivalence is follow-up work.
 	haveByName := make(map[string]driver.Column, len(have.Columns))
 	for _, c := range have.Columns {
 		haveByName[strings.ToLower(c.Name)] = c
@@ -243,10 +246,24 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 		if !ok {
 			continue
 		}
+		name := strings.ToLower(sc.Name)
 		sf, tf := strictTypeFamily(sc.DataType), strictTypeFamily(tc.DataType)
 		if sf != "" && tf != "" && sf != tf {
 			td.ColumnDeltas = append(td.ColumnDeltas,
-				strings.ToLower(sc.Name)+" type class: source="+sf+" target="+tf)
+				name+" type class: source="+sf+" target="+tf)
+		}
+		// Generated/computed status and storage class are cross-dialect
+		// structural facts CompareColumns doesn't cover: a column that's
+		// generated in the source must stay generated on the target, and a
+		// STORED/PERSISTED column must not become VIRTUAL (or vice versa).
+		// The expression TEXT itself differs cross-dialect (like CHECK
+		// predicates), so only presence + storage class are compared here.
+		if sc.IsComputed != tc.IsComputed {
+			td.ColumnDeltas = append(td.ColumnDeltas,
+				name+" computed: source="+boolStr(sc.IsComputed)+" target="+boolStr(tc.IsComputed))
+		} else if sc.IsComputed && sc.ComputedPersisted != tc.ComputedPersisted {
+			td.ColumnDeltas = append(td.ColumnDeltas,
+				name+" computed storage: source persisted="+boolStr(sc.ComputedPersisted)+" target persisted="+boolStr(tc.ComputedPersisted))
 		}
 	}
 
@@ -305,12 +322,33 @@ func indexKeys(idxs []driver.Index) []string {
 	out := make([]string, 0, len(idxs))
 	for _, ix := range idxs {
 		key := orderedCols(ix.Columns)
+		// Covering-index INCLUDE columns are part of the index's identity:
+		// dropping them changes what the index covers. Identifiers, so they
+		// normalize cleanly across dialects.
+		if len(ix.IncludeCols) > 0 {
+			key += "/include:" + orderedCols(ix.IncludeCols)
+		}
+		// A filtered/partial index differs from an unfiltered one on the same
+		// columns. The predicate text is cross-dialect-divergent (like CHECK
+		// predicates), so fold in only whether a filter is present — a coarse
+		// signal that still catches "filter added/removed" without
+		// false-flagging an equivalent predicate rewritten per dialect.
+		if strings.TrimSpace(ix.Filter) != "" {
+			key += "/filtered"
+		}
 		if ix.IsUnique {
 			key = "unique:" + key
 		}
 		out = append(out, key)
 	}
 	return out
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 // fkKeys returns a signature for each foreign key built from its ordered
