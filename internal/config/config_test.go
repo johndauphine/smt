@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"smt/internal/logging"
 	"smt/internal/secrets"
 )
 
@@ -1508,5 +1510,124 @@ func TestValidateRejectsPartialTargetConnection(t *testing.T) {
 	both.Target.Database = "targetdb"
 	if err := both.validate(); err != nil {
 		t.Fatalf("validate() rejected complete target connection: %v", err)
+	}
+}
+
+// #67 — migration.ai_verify / ai_verifier_model are deprecated aliases for
+// the ai_review block. Using them must warn (so users migrate off), an
+// omitted key must stay silent, and an explicit ai_review value must win
+// over the alias.
+func TestDeprecatedAIVerifyAliasWarns(t *testing.T) {
+	const base = `
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: source
+  user: user
+  password: pass
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: target
+  schema: public
+  user: user
+  password: pass
+`
+	cases := []struct {
+		name      string
+		extra     string
+		wantWarn  []string
+		wantNoLog []string
+	}{
+		{
+			name:      "no aliases stays silent",
+			extra:     "",
+			wantNoLog: []string{"ai_verify", "ai_verifier_model"},
+		},
+		{
+			name:     "ai_verify true warns",
+			extra:    "migration:\n  ai_verify: true\n",
+			wantWarn: []string{"migration.ai_verify is deprecated"},
+		},
+		{
+			name:     "ai_verify false still warns (explicit use)",
+			extra:    "migration:\n  ai_verify: false\n",
+			wantWarn: []string{"migration.ai_verify is deprecated"},
+		},
+		{
+			name:     "ai_verifier_model warns",
+			extra:    "migration:\n  ai_verifier_model: strong\n",
+			wantWarn: []string{"migration.ai_verifier_model is deprecated"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(secrets.SecretsFileEnvVar, filepath.Join(t.TempDir(), "missing.yaml"))
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte(base+tc.extra), 0600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			var buf bytes.Buffer
+			logging.SetOutput(&buf)
+			defer logging.SetOutput(nil)
+
+			if _, err := Load(configPath); err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			out := buf.String()
+			for _, want := range tc.wantWarn {
+				if !strings.Contains(out, want) {
+					t.Errorf("expected warning %q, log was:\n%s", want, out)
+				}
+			}
+			for _, no := range tc.wantNoLog {
+				if strings.Contains(out, no) {
+					t.Errorf("did not expect %q in log, log was:\n%s", no, out)
+				}
+			}
+		})
+	}
+}
+
+// #67 — an explicit ai_review.enabled must take precedence over the
+// deprecated ai_verify alias, regardless of the alias value.
+func TestAIReviewWinsOverDeprecatedAlias(t *testing.T) {
+	t.Setenv(secrets.SecretsFileEnvVar, filepath.Join(t.TempDir(), "missing.yaml"))
+	const cfgYAML = `
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: source
+  user: user
+  password: pass
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: target
+  schema: public
+  user: user
+  password: pass
+migration:
+  ai_verify: true
+ai_review:
+  enabled: false
+`
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(cfgYAML), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.AIReview.Enabled == nil || *cfg.AIReview.Enabled {
+		t.Errorf("explicit ai_review.enabled=false should win over ai_verify=true, got %v", cfg.AIReview.Enabled)
 	}
 }
