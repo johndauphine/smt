@@ -189,3 +189,19 @@ func TestJSONLogLevels(t *testing.T) {
 		})
 	}
 }
+
+// SetOutput(nil) must reset to the default rather than leave a nil writer
+// that panics on the next log call. Config loading relies on this when
+// tests restore output via defer SetOutput(nil).
+func TestSetOutputNilResetsToDefault(t *testing.T) {
+	var buf bytes.Buffer
+	SetOutput(&buf)
+	SetOutput(nil) // reset
+
+	// Must not panic — writes to the restored default, not a nil writer.
+	Warn("after reset %d", 1)
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output to the old buffer after reset, got %q", buf.String())
+	}
+}

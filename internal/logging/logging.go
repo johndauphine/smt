@@ -88,10 +88,16 @@ func SetLevel(level Level) {
 	defaultLogger.level = level
 }
 
-// SetOutput sets the output destination for logging
+// SetOutput sets the output destination for logging. Passing nil resets the
+// destination to the default (os.Stdout) rather than leaving a nil writer
+// that would panic on the next log call — callers (notably tests) use
+// SetOutput(nil) to mean "restore the default".
 func SetOutput(w io.Writer) {
 	defaultLogger.mu.Lock()
 	defer defaultLogger.mu.Unlock()
+	if w == nil {
+		w = os.Stdout
+	}
 	defaultLogger.output = w
 }
 

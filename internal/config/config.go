@@ -632,6 +632,16 @@ func (c *Config) applyDefaults() error {
 	if c.SchemaGeneration.UnknownTypePolicy == "" {
 		c.SchemaGeneration.UnknownTypePolicy = "fail"
 	}
+	// migration.ai_verify / ai_verifier_model are deprecated aliases for the
+	// ai_review block. They still resolve (below), but warn so users migrate
+	// off them. Gated on key presence so an omitted key never warns; an
+	// explicit ai_review value always wins over the alias.
+	if c.hasMigrationKey("ai_verify") {
+		logging.Warn("config: migration.ai_verify is deprecated; use ai_review.enabled instead")
+	}
+	if c.hasMigrationKey("ai_verifier_model") {
+		logging.Warn("config: migration.ai_verifier_model is deprecated; use ai_review.model instead")
+	}
 	if c.AIReview.Enabled == nil {
 		enabled := c.Migration.AIVerify
 		c.AIReview.Enabled = &enabled
