@@ -261,11 +261,14 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 	// Known limitations, all rooted in the lack of a canonical concrete-type /
 	// expression model (#62): a SAME-family type change (integer→bigint,
 	// varchar(20)→char(20)), a one-sided class change involving an unrecognized
-	// type (int→uuid, bit→integer), and per-column EXPRESSION/value details
-	// whose text differs across dialects — computed-expression bodies, MySQL
-	// ENUM/SET value lists, ON UPDATE expressions, spatial SRID — are not
-	// compared. Drift catches presence/structure (computed Y/N + storage class,
-	// type family, length/precision/nullability/identity/TZ/default) today.
+	// type (int→uuid, bit→integer), a datetime fractional-seconds change
+	// (DATETIME(6)→DATETIME(0)) — comparing it cleanly needs target-max-fsp
+	// awareness to not false-flag a legit clamp like mssql datetime2(7)→pg
+	// timestamp(6) — a same-dialect ENUM→TEXT change or ENUM value-list change,
+	// and per-column EXPRESSION/value details whose text differs across dialects
+	// (computed-expression bodies, ON UPDATE expressions, spatial SRID). Drift
+	// catches presence/structure (computed Y/N + storage class, type family,
+	// length/nullability/identity/TZ/default) today.
 	haveByName := make(map[string]driver.Column, len(have.Columns))
 	for _, c := range have.Columns {
 		haveByName[strings.ToLower(c.Name)] = c

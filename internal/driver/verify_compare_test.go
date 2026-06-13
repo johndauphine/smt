@@ -654,3 +654,29 @@ func TestDefaultExpressionClass_NowFspArgStripped(t *testing.T) {
 		}
 	}
 }
+
+// enum/set exemption is scoped to an unbounded target: ENUM→TEXT cross-dialect
+// doesn't flag length, but a same-dialect ENUM→ENUM still compares length.
+func TestCompareColumns_EnumExemptionScoped(t *testing.T) {
+	// enum → pg text: exempt, no length flag.
+	if d := CompareColumns(
+		[]Column{{Name: "s", DataType: "enum", MaxLength: 8}},
+		[]Column{{Name: "s", DataType: "text", MaxLength: 0}}, "mysql", "postgres"); hasCriterion(d, "max_length") {
+		t.Error("enum→text should not flag max_length")
+	}
+	// enum → enum (mysql→mysql) with different length still flags.
+	if d := CompareColumns(
+		[]Column{{Name: "s", DataType: "enum", MaxLength: 3}},
+		[]Column{{Name: "s", DataType: "enum", MaxLength: 8}}, "mysql", "mysql"); !hasCriterion(d, "max_length") {
+		t.Error("enum→enum length difference should flag (value-set proxy)")
+	}
+}
+
+func hasCriterion(ds []ColumnDelta, crit string) bool {
+	for _, d := range ds {
+		if d.Criterion == crit {
+			return true
+		}
+	}
+	return false
+}

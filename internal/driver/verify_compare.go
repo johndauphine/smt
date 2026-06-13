@@ -132,6 +132,15 @@ func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	if isBinaryFamilyType(src.DataType) && strings.EqualFold(strings.TrimSpace(tgt.DataType), "bytea") {
 		return nil
 	}
+	// A MySQL ENUM/SET maps to an unbounded target type (pg text) on a
+	// non-MySQL target; the enum's reported max_length is the longest member,
+	// not a user bound, so length must not flag there. Scoped to an unbounded
+	// target so a same-dialect ENUM→ENUM still compares length (and an
+	// ENUM→TEXT change on a MySQL target keeps its length signal). The enum
+	// VALUE list itself is a #62 follow-up, not compared here.
+	if isEnumSetType(src.DataType) && lobDataTypes[strings.ToLower(strings.TrimSpace(tgt.DataType))] {
+		return nil
+	}
 	// MySQL's LOB tiers ARE user-meaningful capacity choices when both
 	// sides speak them: LONGTEXT → TEXT silently rejects values above
 	// 64KiB, so a same-family tier change must flag even though both types
@@ -209,18 +218,11 @@ func normMaxLength(n int) int {
 // fixed capacity (65535, 16777215, ...), pg text/bytea report NULL → 0.
 // None of those numbers round-trip across dialects even when the mapping
 // is perfectly faithful, so they all collapse to the unbounded class.
-//
-// enum/set are included because their reported max_length is the longest
-// member value, not a user-chosen bound — and SMT maps a MySQL ENUM/SET to
-// an unbounded target type (pg text) on non-MySQL targets, so the length
-// must not flag. (The enum VALUE list, when both sides are MySQL, is a
-// separate concern not covered by length comparison.)
 var lobDataTypes = map[string]bool{
 	"text": true, "ntext": true, "image": true,
 	"tinytext": true, "mediumtext": true, "longtext": true,
 	"blob": true, "tinyblob": true, "mediumblob": true, "longblob": true,
 	"bytea": true, "xml": true,
-	"enum": true, "set": true,
 }
 
 // effectiveMaxLength is normMaxLength with LOB awareness: LOB types compare
@@ -230,6 +232,16 @@ func effectiveMaxLength(c Column) int {
 		return 0
 	}
 	return normMaxLength(c.MaxLength)
+}
+
+// isEnumSetType reports whether the type is a MySQL ENUM or SET.
+func isEnumSetType(dt string) bool {
+	switch strings.ToLower(strings.TrimSpace(dt)) {
+	case "enum", "set":
+		return true
+	default:
+		return false
+	}
 }
 
 // isBinaryFamilyType reports whether the type stores raw bytes (sized or
