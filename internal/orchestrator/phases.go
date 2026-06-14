@@ -164,6 +164,7 @@ func (o *Orchestrator) ExtractSchema(ctx context.Context, runID string) error {
 
 	tables, err := o.source.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
+		o.diagnoseSchemaFailure(ctx, "", o.config.Source.Schema, "extracting source schema", err)
 		return fmt.Errorf("extracting source schema: %w", err)
 	}
 

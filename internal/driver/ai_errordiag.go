@@ -112,6 +112,29 @@ func NewAIErrorDiagnoser(mapper *AITypeMapper) *AIErrorDiagnoser {
 	}
 }
 
+// NewErrorDiagnoserByName builds an error diagnoser backed by the named AI
+// provider (empty name uses the default provider). It mirrors how AI review
+// resolves its provider, so failure diagnosis and review can share one
+// ai_review.model entry. Returns an error if no usable provider is configured.
+func NewErrorDiagnoserByName(name string) (*AIErrorDiagnoser, error) {
+	if strings.TrimSpace(name) != "" {
+		mapper, err := NewAITypeMapperByName(name)
+		if err != nil {
+			return nil, err
+		}
+		return NewAIErrorDiagnoser(mapper), nil
+	}
+	tm, err := GetAITypeMapper()
+	if err != nil {
+		return nil, err
+	}
+	mapper, ok := tm.(*AITypeMapper)
+	if !ok || mapper == nil {
+		return nil, fmt.Errorf("configured AI provider cannot be used for diagnosis")
+	}
+	return NewAIErrorDiagnoser(mapper), nil
+}
+
 // Diagnose analyzes an error and returns actionable suggestions.
 func (d *AIErrorDiagnoser) Diagnose(ctx context.Context, errCtx *ErrorContext) (*ErrorDiagnosis, error) {
 	if d.aiMapper == nil {

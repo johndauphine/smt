@@ -17,9 +17,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"smt/internal/checkpoint"
 	"smt/internal/config"
+	"smt/internal/driver"
 	"smt/internal/notify"
 	"smt/internal/pool"
 	"smt/internal/source"
@@ -50,6 +52,11 @@ type Orchestrator struct {
 	runProfile string
 	runConfig  string
 	opts       Options
+
+	// diagnoser is the optional AI failure-diagnosis advisor
+	// (ai_review.diagnose_failures), resolved lazily on the first failure.
+	diagnoser     *driver.AIErrorDiagnoser
+	diagnoserOnce sync.Once
 }
 
 // New constructs an Orchestrator with default options.
