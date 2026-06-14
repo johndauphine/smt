@@ -466,6 +466,46 @@ func TestDeterministicMySQLRegexpLikeCheckToPostgres(t *testing.T) {
 	}
 }
 
+// MySQL tinyint(1) is the boolean convention. With the source dialect known,
+// the pg renderer maps it to boolean, translates its 0/1 default to a boolean
+// literal, and rewrites a redundant `IN (0,1)` domain check to boolean literals
+// so the predicate stays valid on the boolean column. Without a source dialect
+// the historical source-blind behavior (smallint) is preserved.
+func TestDeterministicMySQLBooleanToPostgres(t *testing.T) {
+	boolCol := driver.Column{Name: "is_active", DataType: "tinyint", DisplayWidth: 1, DefaultExpression: "1"}
+
+	typ, err := RenderColumnTypeWithSource(boolCol, "fail", "mysql")
+	if err != nil {
+		t.Fatalf("RenderColumnTypeWithSource: %v", err)
+	}
+	if typ != "boolean" {
+		t.Fatalf("mysql tinyint(1) -> pg: got %q, want boolean", typ)
+	}
+	if blind, _ := RenderColumnTypeWithPolicy(boolCol, "fail"); blind != "smallint" {
+		t.Fatalf("source-blind mysql tinyint(1) -> pg: got %q, want smallint (historical)", blind)
+	}
+
+	def, err := RenderColumnDefaultDDLWithSource(boolCol, "fail", "mysql")
+	if err != nil {
+		t.Fatalf("RenderColumnDefaultDDLWithSource: %v", err)
+	}
+	if def != "true" {
+		t.Fatalf("mysql tinyint(1) default 1 -> pg: got %q, want true", def)
+	}
+
+	ddl, err := RenderCreateCheckConstraintDDLWithSource(&driver.Table{
+		Name:    "companies",
+		Columns: []driver.Column{boolCol},
+	}, &driver.CheckConstraint{
+		Name:       "chk_companies_active",
+		Definition: "`is_active` in (0,1)",
+	}, "public", "mysql")
+	if err != nil {
+		t.Fatalf("RenderCreateCheckConstraintDDLWithSource: %v", err)
+	}
+	assertContains(t, ddl, "IN (false, true)")
+}
+
 func TestDeterministicMSSQLCheckBitComparison(t *testing.T) {
 	renderer := newDeterministicDDL()
 	ddl, err := renderer.createCheckConstraint(&driver.Table{

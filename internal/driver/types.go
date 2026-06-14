@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 	"unsafe"
+
+	"smt/internal/canonical"
 )
 
 // Table represents a database table with its metadata.
@@ -126,6 +128,22 @@ type Column struct {
 	EnumValues         []string `json:"enum_values,omitempty"`          // allowed values for MySQL ENUM/SET columns
 	SRID               int      `json:"srid,omitempty"`                 // Spatial Reference ID for geography/geometry columns (0 = default/unset)
 	SampleValues       []string `json:"sample_values,omitempty"`        // Sample data values for AI type mapping context
+}
+
+// MetaOf extracts the type-shaping metadata canonical.ToCanonical needs from a
+// column. It is the single Column -> canonical.TypeMeta mapping shared by the
+// deterministic renderer (both the internal/ddl layer and the postgres driver)
+// so the source-dialect-aware type fields are read identically everywhere.
+func MetaOf(col Column) canonical.TypeMeta {
+	return canonical.TypeMeta{
+		MaxLength:         col.MaxLength,
+		Precision:         col.Precision,
+		Scale:             col.Scale,
+		DatetimePrecision: col.DatetimePrecision,
+		IsUnsigned:        col.IsUnsigned,
+		DisplayWidth:      col.DisplayWidth,
+		EnumValues:        col.EnumValues,
+	}
 }
 
 // IsIntegerType returns true if the column is an integer type.

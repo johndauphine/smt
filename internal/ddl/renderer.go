@@ -77,7 +77,7 @@ func (r Renderer) CreateSchemaDDL() (string, error) {
 
 func (r Renderer) CreateTableDDL(t *driver.Table) (string, map[string]string, error) {
 	if r.target == "postgres" {
-		return pgddl.RenderCreateTableDDLWithPolicy(t, r.schema, false, r.unknownTypePolicy)
+		return pgddl.RenderCreateTableDDLWithSource(t, r.schema, false, r.unknownTypePolicy, r.source)
 	}
 
 	tableName := r.normalize(t.Name)
@@ -114,11 +114,11 @@ func (r Renderer) CreateTableDDL(t *driver.Table) (string, map[string]string, er
 
 func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.Column) (string, string, error) {
 	if r.target == "postgres" {
-		def, err := pgddl.RenderColumnDefinitionWithContextAndPolicy(col, firstColumns(tableColumns), r.unknownTypePolicy)
+		def, err := pgddl.RenderColumnDefinitionWithSource(col, firstColumns(tableColumns), r.unknownTypePolicy, r.source)
 		if err != nil {
 			return "", "", err
 		}
-		typ, err := pgddl.RenderColumnTypeWithPolicy(col, r.unknownTypePolicy)
+		typ, err := pgddl.RenderColumnTypeWithSource(col, r.unknownTypePolicy, r.source)
 		return def, typ, err
 	}
 
@@ -194,7 +194,7 @@ func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.C
 
 func (r Renderer) ColumnType(col driver.Column) (string, error) {
 	if r.target == "postgres" {
-		return pgddl.RenderColumnTypeWithPolicy(col, r.unknownTypePolicy)
+		return pgddl.RenderColumnTypeWithSource(col, r.unknownTypePolicy, r.source)
 	}
 
 	dt := normalizeTypeName(col.DataType)
@@ -210,7 +210,7 @@ func (r Renderer) ColumnType(col driver.Column) (string, error) {
 
 func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 	if r.target == "postgres" {
-		return pgddl.RenderColumnDefaultDDLWithPolicy(col, r.unknownTypePolicy)
+		return pgddl.RenderColumnDefaultDDLWithSource(col, r.unknownTypePolicy, r.source)
 	}
 	expr := unwrapDefaultParens(col.DefaultExpression)
 	if expr == "" {
@@ -348,7 +348,7 @@ func (r Renderer) mysqlRequiresExpressionDefault(col driver.Column) bool {
 
 func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, error) {
 	if r.target == "postgres" {
-		return pgddl.RenderCreateIndexDDL(t, idx, r.schema)
+		return pgddl.RenderCreateIndexDDLWithSource(t, idx, r.schema, r.source)
 	}
 	if len(idx.Columns) == 0 {
 		return "", fmt.Errorf("index %s has no columns", idx.Name)
@@ -419,7 +419,7 @@ func (r Renderer) CreateForeignKeyDDL(t *driver.Table, fk *driver.ForeignKey) (s
 
 func (r Renderer) CreateCheckConstraintDDL(t *driver.Table, chk *driver.CheckConstraint) (string, error) {
 	if r.target == "postgres" {
-		return pgddl.RenderCreateCheckConstraintDDL(t, chk, r.schema)
+		return pgddl.RenderCreateCheckConstraintDDLWithSource(t, chk, r.schema, r.source)
 	}
 	def := strings.TrimSpace(chk.Definition)
 	if def == "" {
@@ -577,7 +577,7 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 // CanonicalType for the source dialect, then rendered for the target dialect.
 // Non-portable (Raw) types fall through to the unknown-type policy.
 func (r Renderer) canonicalColumnType(col driver.Column, dt, target string) (string, error) {
-	ct := canonical.ToCanonical(dt, metaOf(col), r.source)
+	ct := canonical.ToCanonical(dt, driver.MetaOf(col), r.source)
 	typ, err := canonical.FromCanonical(ct, target, canonical.RenderOpts{IsIdentity: col.IsIdentity})
 	switch {
 	case errors.Is(err, canonical.ErrUnknownType):
@@ -592,19 +592,6 @@ func (r Renderer) canonicalColumnType(col driver.Column, dt, target string) (str
 		return "", fmt.Errorf("%s column %s is missing allowed values", strings.ToLower(dt), col.Name)
 	}
 	return typ, err
-}
-
-// metaOf extracts the type-shaping metadata canonical.ToCanonical needs.
-func metaOf(col driver.Column) canonical.TypeMeta {
-	return canonical.TypeMeta{
-		MaxLength:         col.MaxLength,
-		Precision:         col.Precision,
-		Scale:             col.Scale,
-		DatetimePrecision: col.DatetimePrecision,
-		IsUnsigned:        col.IsUnsigned,
-		DisplayWidth:      col.DisplayWidth,
-		EnumValues:        col.EnumValues,
-	}
 }
 
 func (r Renderer) Expression(expr string, tableColumns []driver.Column) (string, error) {
