@@ -211,6 +211,13 @@ type AIReviewConfig struct {
 	// above (or the default provider when Model is empty).
 	DiagnoseFailures bool `yaml:"diagnose_failures"`
 
+	// SuggestFixes, when true, writes an AI-proposed corrected DDL to a
+	// clearly-labeled schema.suggested.sql artifact on a render/extract failure
+	// (#134). It is a SUGGESTION for the user to review and apply — SMT never
+	// writes it to schema.sql and never applies it automatically (that requires
+	// the explicit --apply-suggested flag). Uses the Model provider above.
+	SuggestFixes bool `yaml:"suggest_fixes"`
+
 	// Scope is reserved for future chunking choices such as "table" or "plan".
 	Scope string `yaml:"scope"`
 

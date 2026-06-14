@@ -213,9 +213,15 @@ func (r deterministicDDL) columnDefinition(col driver.Column, tableColumns ...[]
 		b.WriteString(" NOT NULL")
 	}
 	if !col.IsIdentity && strings.TrimSpace(col.DefaultExpression) != "" {
-		def, err := r.defaultExpression(col)
-		if err != nil {
-			return "", "", err
+		def := strings.TrimSpace(col.DefaultExpressionOverride)
+		if def == "" {
+			var err error
+			def, err = r.defaultExpression(col)
+			if err != nil {
+				return "", "", &driver.ExpressionRenderError{
+					Column: col.Name, Kind: "default", SourceExpr: col.DefaultExpression, Err: err,
+				}
+			}
 		}
 		if def != "" {
 			b.WriteString(" DEFAULT ")
