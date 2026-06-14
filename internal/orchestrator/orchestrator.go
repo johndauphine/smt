@@ -112,6 +112,17 @@ func aiReviewEnabled(cfg *config.Config) bool {
 	return cfg.AIReview.Enabled != nil && *cfg.AIReview.Enabled
 }
 
+// aiSuggestFixesEnabled reports whether AI fix suggestions are on. It is
+// opt-out: a nil (omitted) value follows diagnose_failures, applied by config
+// normalization; this helper also treats nil as diagnose_failures so callers
+// that build a Config directly (tests) behave consistently.
+func aiSuggestFixesEnabled(cfg *config.Config) bool {
+	if cfg.AIReview.SuggestFixes != nil {
+		return *cfg.AIReview.SuggestFixes
+	}
+	return cfg.AIReview.DiagnoseFailures
+}
+
 // Close releases all underlying resources.
 func (o *Orchestrator) Close() {
 	if o.source != nil {

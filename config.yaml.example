@@ -35,10 +35,12 @@ ai_review:
   diagnose_failures: false             # advise the user on extract/render failures
                                        # (cause + suggestions only — never edits or
                                        #  retries DDL); uses the model above
-  suggest_fixes: false                 # on a failure, write an AI-proposed corrected
-                                       # DDL to schema.suggested.sql (labeled, UNVERIFIED,
-                                       #  never schema.sql; never applied without
-                                       #  --apply-suggested)
+  # suggest_fixes: true                # OPT-OUT (defaults to diagnose_failures): on a
+                                       # failure, splice one AI-translated expression into
+                                       # SMT's deterministic DDL and write it to
+                                       # schema.suggested.sql (labeled; never schema.sql;
+                                       # never applied without --apply-suggested). Set
+                                       # false to get diagnosis without suggestions.
   # Note: with review enabled the un-configured render fan-out drops from 8
   # to 2 so cold-cache runs stay under provider rate limits (#54). Set
   # migration.ai_concurrency explicitly to override.
