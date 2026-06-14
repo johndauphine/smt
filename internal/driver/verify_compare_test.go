@@ -174,6 +174,10 @@ func TestDefaultExpressionClass_DistinctNowFamilies(t *testing.T) {
 		{"CURRENT_TIME", "CURRENT_TIMESTAMP"},
 		{"CURRENT_TIME", "LOCALTIMESTAMP"},
 		{"CURRENT_TIME", "CURRENT_DATE"},
+		// A date-coerced now must stay distinct from the un-coerced datetime —
+		// CONVERT(date, GETDATE()) is a date default, not a current_timestamp one.
+		{"(CONVERT([date],getdate()))", "GETDATE()"},
+		{"(CURRENT_TIMESTAMP)::date", "CURRENT_TIMESTAMP"},
 	}
 	for _, p := range pairs {
 		t.Run(p.a+"_vs_"+p.b, func(t *testing.T) {
@@ -211,6 +215,13 @@ func TestDefaultExpressionClass_CrossDialectEquivalence(t *testing.T) {
 		// PG cast wrappings ≡ unwrapped equivalent on other dialects.
 		{"pg '{}'::jsonb ≡ mssql '{}' ", "'{}'::jsonb", "'{}'"},
 		{"pg gen_random_uuid()::char(36) ≡ mysql UUID()", "gen_random_uuid()::char(36)", "UUID()"},
+
+		// MSSQL "today's date" idiom CONVERT(date, <now>) ≡ PG CURRENT_DATE and
+		// the equivalent <now>::date cast (#127). The coercion classifies by the
+		// result (a date), not the inner now-function.
+		{"CONVERT(date,GETDATE()) ≡ CURRENT_DATE", "(CONVERT([date],getdate()))", "CURRENT_DATE"},
+		{"CONVERT(date,GETDATE()) ≡ CURRENT_TIMESTAMP::date", "(CONVERT([date],getdate()))", "(CURRENT_TIMESTAMP)::date"},
+		{"CONVERT(date,GETUTCDATE()) ≡ utc ::date", "(CONVERT([date],getutcdate()))", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date"},
 	}
 	for _, p := range pairs {
 		t.Run(p.name, func(t *testing.T) {

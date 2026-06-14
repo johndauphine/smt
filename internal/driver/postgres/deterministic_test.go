@@ -191,6 +191,53 @@ func TestDeterministicMSSQLDateTimeOffsetUTCDefault(t *testing.T) {
 	}
 }
 
+// The MSSQL "today's date" idiom CONVERT(date, <now>) is a valid, common date
+// column default that the Postgres renderer must map rather than reject (#127).
+func TestDeterministicMSSQLConvertDateDefault(t *testing.T) {
+	renderer := newDeterministicDDL()
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"(CONVERT(date, GETDATE()))", "CURRENT_DATE"},
+		{"(convert(date,getdate()))", "CURRENT_DATE"},
+		{"((CONVERT(date, GETDATE())))", "CURRENT_DATE"}, // extra metadata parens
+		{"(CONVERT([date], GETDATE()))", "CURRENT_DATE"}, // bracketed type name
+		{"(CONVERT(date, CURRENT_TIMESTAMP))", "CURRENT_DATE"},
+		{"(CONVERT(date, SYSDATETIME()))", "CURRENT_DATE"},
+		{"(CONVERT(date, GETUTCDATE()))", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date"},
+		{"(CONVERT(date, SYSUTCDATETIME()))", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date"},
+	}
+	for _, tc := range cases {
+		def, err := renderer.defaultExpression(driver.Column{
+			Name: "HireDate", DataType: "date", DefaultExpression: tc.raw,
+		})
+		if err != nil {
+			t.Fatalf("defaultExpression(%q): %v", tc.raw, err)
+		}
+		if def != tc.want {
+			t.Errorf("defaultExpression(%q) = %q, want %q", tc.raw, def, tc.want)
+		}
+	}
+}
+
+// A CONVERT to something other than a now-family date must still fail rather
+// than be silently reinterpreted (preserves the unknown-expression contract).
+func TestDeterministicMSSQLUnsupportedConvertStillFails(t *testing.T) {
+	renderer := newDeterministicDDL()
+	for _, raw := range []string{
+		"(CONVERT(int, [SomeColumn]))",
+		"(CONVERT(date, [SomeColumn]))", // date, but not a now-family argument
+		"(CONVERT(varchar(10), GETDATE()))",
+	} {
+		if _, err := renderer.defaultExpression(driver.Column{
+			Name: "X", DataType: "date", DefaultExpression: raw,
+		}); err == nil {
+			t.Errorf("defaultExpression(%q) succeeded, want unsupported-expression error", raw)
+		}
+	}
+}
+
 func TestDeterministicMSSQLComputedColumn(t *testing.T) {
 	renderer := newDeterministicDDL()
 	def, colType, err := renderer.columnDefinition(driver.Column{

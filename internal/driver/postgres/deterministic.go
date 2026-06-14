@@ -412,6 +412,9 @@ func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
 	if strings.HasPrefix(lower, "current_timestamp(") || strings.HasPrefix(lower, "now(") {
 		return "CURRENT_TIMESTAMP", nil
 	}
+	if pg, ok := convertDateDefault(expr); ok {
+		return pg, nil
+	}
 
 	// A column that maps to pg boolean needs boolean default literals: pg
 	// rejects DEFAULT 1 on a boolean. This covers MSSQL bit and MySQL tinyint(1)
@@ -466,6 +469,31 @@ func (r deterministicDDL) sqlServerExpression(expr string) (string, error) {
 }
 
 var expressionFunctionRE = regexp.MustCompile(`(?i)\b([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)\s*\(`)
+
+// convertDateDefaultRE matches the MSSQL idiom CONVERT(date, <now>) — a
+// "today's date" default — tolerating extra whitespace and an optionally
+// bracketed/quoted date type name (date / [date] / "date"). The argument is
+// captured loosely and classified by convertDateDefault, so only the now-family
+// argument is rewritten; any other CONVERT(...) form is left to fail.
+var convertDateDefaultRE = regexp.MustCompile(`(?i)^CONVERT\(\s*[\["]?\s*date\s*[\]"]?\s*,\s*(.+?)\s*\)$`)
+
+// convertDateDefault rewrites CONVERT(date, <now-family>) into the Postgres
+// equivalent for a date column default. It returns ok=false for any other
+// CONVERT argument so unsupported forms still fail rather than being silently
+// reinterpreted.
+func convertDateDefault(expr string) (string, bool) {
+	m := convertDateDefaultRE.FindStringSubmatch(expr)
+	if m == nil {
+		return "", false
+	}
+	switch strings.ReplaceAll(strings.ToLower(m[1]), " ", "") {
+	case "getdate()", "current_timestamp", "sysdatetime()", "sysdatetimeoffset()":
+		return "CURRENT_DATE", true
+	case "getutcdate()", "sysutcdatetime()":
+		return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date", true
+	}
+	return "", false
+}
 
 func rejectUnsupportedSQLServerExpression(expr string) error {
 	scan := stripSingleQuotedStrings(expr)
