@@ -60,11 +60,11 @@ type splicedFix struct {
 //
 // AI-authored content reaches the plan / schema.sql ONLY here, and only under
 // the explicit --apply-suggested flag — loudly logged and marked inline.
-func (o *Orchestrator) handleRenderFailure(ctx context.Context, runID string, renderer createDDLRenderer, t *driver.Table, cause error) (string, bool) {
+func (o *Orchestrator) handleRenderFailure(ctx context.Context, runID, operation string, renderer createDDLRenderer, t *driver.Table, cause error) (string, bool) {
 	if o.config == nil || t == nil {
 		return "", false
 	}
-	o.diagnoseSchemaFailure(ctx, t.Name, t.Schema, "rendering CREATE TABLE DDL", cause)
+	o.diagnoseSchemaFailure(ctx, t.Name, t.Schema, operation, cause)
 
 	// Only do the (one) AI splice call if a suggestion or apply is actually
 	// requested.
@@ -82,40 +82,59 @@ func (o *Orchestrator) handleRenderFailure(ctx context.Context, runID string, re
 		return "", false
 	}
 
-	verdict := "OK: default class matches source"
+	verdict := "OK: expression class matches source"
 	if !sf.classMatched {
 		verdict = "REVIEW: class NOT mechanically confirmed"
 	}
-	logging.Warn("APPLYING AI-ASSISTED FIX (--apply-suggested): table %s, column %s DEFAULT  %s -> %s  [%s]. This expression was authored by an AI model.",
-		oneLine(t.Name), oneLine(sf.exprErr.Column), oneLine(sf.exprErr.SourceExpr), oneLine(sf.fix.Expression), verdict)
-	marker := fmt.Sprintf("-- AI-ASSISTED FIX (--apply-suggested): %s DEFAULT  %s -> %s  [%s]\n",
-		oneLine(sf.exprErr.Column), oneLine(sf.exprErr.SourceExpr), oneLine(sf.fix.Expression), verdict)
+	logging.Warn("APPLYING AI-ASSISTED FIX (--apply-suggested): table %s, %s %s:  %s -> %s  [%s]. This expression was authored by an AI model.",
+		oneLine(t.Name), oneLine(sf.exprErr.Kind), oneLine(sf.exprErr.Column), oneLine(sf.exprErr.SourceExpr), oneLine(sf.fix.Expression), verdict)
+	marker := fmt.Sprintf("-- AI-ASSISTED FIX (--apply-suggested): %s %s  %s -> %s  [%s]\n",
+		oneLine(sf.exprErr.Kind), oneLine(sf.exprErr.Column), oneLine(sf.exprErr.SourceExpr), oneLine(sf.fix.Expression), verdict)
 	return marker + sf.ddl, true
 }
 
 // spliceFix attempts the AI splice for a single-expression render failure:
-// translate the one failing expression and re-render the table with it
-// overridden. ok=false (debug-logged) when the failure isn't a single
-// splice-able default, no provider is available, the AI expression is malformed,
-// or the re-render fails. Performs exactly one AI call.
+// translate the one failing expression (a column DEFAULT or a CHECK predicate)
+// and re-render that object with it overridden, so everything but the one
+// expression stays SMT's deterministic output. ok=false (debug-logged) when the
+// failure isn't a single splice-able expression, no provider is available, the
+// AI expression is malformed, or the re-render fails. Performs exactly one AI
+// call.
 func (o *Orchestrator) spliceFix(ctx context.Context, renderer createDDLRenderer, t *driver.Table, cause error) (*splicedFix, bool) {
 	if o.config == nil || cause == nil || t == nil {
 		return nil, false
 	}
 	var exprErr *driver.ExpressionRenderError
-	if !errors.As(cause, &exprErr) || exprErr.Kind != "default" {
+	if !errors.As(cause, &exprErr) || (exprErr.Kind != "default" && exprErr.Kind != "check") {
 		return nil, false // not a single splice-able expression — diagnosis-only
 	}
-	idx := -1
-	for i := range t.Columns {
-		if t.Columns[i].Name == exprErr.Column {
-			idx = i
-			break
+
+	// Locate the failing object and capture the source column type (default only).
+	colIdx, chkIdx, colType := -1, -1, ""
+	switch exprErr.Kind {
+	case "default":
+		for i := range t.Columns {
+			if t.Columns[i].Name == exprErr.Column {
+				colIdx = i
+				colType = t.Columns[i].DataType
+				break
+			}
+		}
+		if colIdx < 0 {
+			return nil, false
+		}
+	case "check":
+		for i := range t.CheckConstraints {
+			if t.CheckConstraints[i].Name == exprErr.Column {
+				chkIdx = i
+				break
+			}
+		}
+		if chkIdx < 0 {
+			return nil, false
 		}
 	}
-	if idx < 0 {
-		return nil, false
-	}
+
 	suggester := o.errorDiagnoser()
 	if suggester == nil {
 		return nil, false
@@ -124,7 +143,7 @@ func (o *Orchestrator) spliceFix(ctx context.Context, renderer createDDLRenderer
 		Kind:          exprErr.Kind,
 		SourceExpr:    exprErr.SourceExpr,
 		ColumnName:    exprErr.Column,
-		ColumnType:    t.Columns[idx].DataType,
+		ColumnType:    colType,
 		SourceDialect: canonicalDBType(o.config.Source.Type),
 		TargetDialect: canonicalDBType(o.config.Target.Type),
 	})
@@ -139,22 +158,30 @@ func (o *Orchestrator) spliceFix(ctx context.Context, renderer createDDLRenderer
 		return nil, false
 	}
 
-	// Re-render the whole table deterministically with ONLY the failing
+	// Re-render the affected object deterministically with ONLY the failing
 	// expression overridden by the AI translation.
-	spliced := *t
-	spliced.Columns = append([]driver.Column(nil), t.Columns...)
-	spliced.Columns[idx].DefaultExpressionOverride = fix.Expression
-	ddl, rerr := renderer.renderTable(ctx, &spliced)
+	var ddl string
+	var rerr error
+	classMatched := false
+	switch exprErr.Kind {
+	case "default":
+		spliced := *t
+		spliced.Columns = append([]driver.Column(nil), t.Columns...)
+		spliced.Columns[colIdx].DefaultExpressionOverride = fix.Expression
+		ddl, rerr = renderer.renderTable(ctx, &spliced)
+		classMatched = driver.DefaultExpressionsEquivalent(exprErr.SourceExpr, fix.Expression)
+	case "check":
+		chk := t.CheckConstraints[chkIdx]
+		chk.DefinitionOverride = fix.Expression
+		ddl, rerr = renderer.renderCheck(ctx, t, &chk)
+		// No deterministic class check for a boolean CHECK predicate — always
+		// flagged for review.
+	}
 	if rerr != nil {
 		logging.Debug("re-render with AI expression failed: %v", rerr)
 		return nil, false
 	}
-	return &splicedFix{
-		exprErr:      exprErr,
-		fix:          fix,
-		ddl:          ddl,
-		classMatched: driver.DefaultExpressionsEquivalent(exprErr.SourceExpr, fix.Expression),
-	}, true
+	return &splicedFix{exprErr: exprErr, fix: fix, ddl: ddl, classMatched: classMatched}, true
 }
 
 // writeSuggestion writes the AI-assisted suggestion to schema.suggested.sql,
@@ -169,7 +196,7 @@ func (o *Orchestrator) writeSuggestion(runID, table string, sf *splicedFix) {
 		}
 		verdict := "review the translated expression (class not mechanically confirmed)"
 		if sf.classMatched {
-			verdict = "translated default matches the source default class"
+			verdict = "translated expression matches the source class"
 		}
 		logging.Warn("AI-assisted fix written to %s — %s. Review before applying; SMT did NOT apply it (use --apply-suggested to apply).",
 			filepath.Join(o.ddlArtifactDir(runID), "schema.suggested.sql"), verdict)
@@ -187,7 +214,7 @@ func renderSuggestionFile(table string, exprErr *driver.ExpressionRenderError, f
 	b.WriteString("-- This is SMT's deterministic DDL with ONE expression translated by\n")
 	b.WriteString("-- an AI model. SMT did not and will not apply it automatically.\n")
 	b.WriteString(fmt.Sprintf("-- Table:  %s\n", oneLine(table)))
-	b.WriteString(fmt.Sprintf("-- Column: %s (%s)\n", oneLine(exprErr.Column), oneLine(exprErr.Kind)))
+	b.WriteString(fmt.Sprintf("-- Object: %s (%s)\n", oneLine(exprErr.Column), oneLine(exprErr.Kind)))
 	b.WriteString(fmt.Sprintf("-- AI-translated: %s  ->  %s\n", oneLine(exprErr.SourceExpr), oneLine(fix.Expression)))
 	if strings.TrimSpace(fix.Explanation) != "" {
 		b.WriteString("-- Note: " + oneLine(fix.Explanation) + "\n")
@@ -195,13 +222,13 @@ func renderSuggestionFile(table string, exprErr *driver.ExpressionRenderError, f
 	b.WriteString(fmt.Sprintf("-- Confidence: %s (AI)\n", fix.Confidence))
 	b.WriteString("--\n")
 	b.WriteString("-- Verification (deterministic): every column type, length, nullability,\n")
-	b.WriteString("-- identity, and all other defaults are SMT's deterministic output — only\n")
-	b.WriteString("-- the one DEFAULT above is AI-authored.\n")
+	b.WriteString("-- identity, and all other defaults/constraints are SMT's deterministic\n")
+	b.WriteString("-- output — only the one expression above is AI-authored.\n")
 	if classMatched {
-		b.WriteString("--   [OK] the translated default matches the source's default class.\n")
+		b.WriteString("--   [OK] the translated expression matches the source class.\n")
 	} else {
-		b.WriteString("--   [REVIEW] SMT could not mechanically confirm the translated default\n")
-		b.WriteString("--   is equivalent to the source — review it before applying.\n")
+		b.WriteString("--   [REVIEW] SMT could not mechanically confirm the translated\n")
+		b.WriteString("--   expression is equivalent to the source — review it before applying.\n")
 	}
 	b.WriteString("-- ============================================================\n\n")
 	b.WriteString(strings.TrimSpace(ddl))

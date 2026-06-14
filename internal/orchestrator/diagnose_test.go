@@ -133,7 +133,7 @@ func TestAISuggestFixesEnabled_OptOutFollowsDiagnose(t *testing.T) {
 // no-op: no AI splice attempted, the table is not "applied", nothing written.
 func TestHandleRenderFailure_DisabledIsNoOp(t *testing.T) {
 	o := &Orchestrator{config: &config.Config{}} // SuggestFixes nil/false, ApplySuggested false
-	ddl, applied := o.handleRenderFailure(context.Background(), "run1", createDDLRenderer{},
+	ddl, applied := o.handleRenderFailure(context.Background(), "run1", "rendering CREATE TABLE DDL", createDDLRenderer{},
 		&driver.Table{Name: "T", Schema: "dbo"}, errors.New("boom"))
 	if applied || ddl != "" {
 		t.Errorf("expected no fix applied, got applied=%v ddl=%q", applied, ddl)
@@ -148,7 +148,7 @@ func TestHandleRenderFailure_DisabledIsNoOp(t *testing.T) {
 func TestHandleRenderFailure_NonExpressionFailureNotApplied(t *testing.T) {
 	o := &Orchestrator{config: &config.Config{}, opts: Options{ApplySuggested: true}}
 	// A plain error (not *driver.ExpressionRenderError) can't be spliced.
-	ddl, applied := o.handleRenderFailure(context.Background(), "run1", createDDLRenderer{},
+	ddl, applied := o.handleRenderFailure(context.Background(), "run1", "rendering CREATE TABLE DDL", createDDLRenderer{},
 		&driver.Table{Name: "T", Schema: "dbo"}, errors.New("unsupported source type \"geography\""))
 	if applied || ddl != "" {
 		t.Errorf("non-expression failure must not be applied, got applied=%v", applied)

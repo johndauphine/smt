@@ -53,3 +53,37 @@ func TestCreateTable_DefaultOverrideEmittedVerbatim(t *testing.T) {
 		t.Errorf("override not emitted verbatim:\n%s", ddl)
 	}
 }
+
+// An unsupported CHECK predicate must surface as a structured *ExpressionRenderError
+// (kind=check), so the AI fix-suggestion path can translate just that predicate (#134).
+func TestCreateCheck_UnsupportedIsStructured(t *testing.T) {
+	tbl := &driver.Table{Schema: "dbo", Name: "T", Columns: []driver.Column{{Name: "code", DataType: "varchar", MaxLength: 20}}}
+	chk := &driver.CheckConstraint{Name: "CK_T_code", Definition: "([code] like '[0-9]%' AND patindex('%abc%',[code])=0)"}
+	_, err := RenderCreateCheckConstraintDDLWithSource(tbl, chk, "public", "mssql")
+	if err == nil {
+		t.Skip("renderer accepted this predicate; pick a harder one if this starts passing")
+	}
+	var ex *driver.ExpressionRenderError
+	if !errors.As(err, &ex) {
+		t.Fatalf("check error is not *ExpressionRenderError: %v", err)
+	}
+	if ex.Kind != "check" || ex.Column != "CK_T_code" {
+		t.Errorf("unexpected structured error: kind=%q column=%q", ex.Kind, ex.Column)
+	}
+}
+
+// With the override set, the CHECK predicate is emitted verbatim (the splice point).
+func TestCreateCheck_DefinitionOverrideEmittedVerbatim(t *testing.T) {
+	tbl := &driver.Table{Schema: "dbo", Name: "T", Columns: []driver.Column{{Name: "code", DataType: "varchar", MaxLength: 20}}}
+	chk := &driver.CheckConstraint{
+		Name: "CK_T_code", Definition: "([code] like '[0-9]%')",
+		DefinitionOverride: "code ~ '^[0-9]'",
+	}
+	ddl, err := RenderCreateCheckConstraintDDLWithSource(tbl, chk, "public", "mssql")
+	if err != nil {
+		t.Fatalf("render check with override failed: %v", err)
+	}
+	if !strings.Contains(ddl, "CHECK (code ~ '^[0-9]')") {
+		t.Errorf("override not emitted verbatim:\n%s", ddl)
+	}
+}

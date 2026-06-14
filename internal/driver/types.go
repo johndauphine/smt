@@ -360,6 +360,11 @@ type ForeignKey struct {
 type CheckConstraint struct {
 	Name       string `json:"name"`
 	Definition string `json:"definition"`
+	// DefinitionOverride, when set, is emitted verbatim as the CHECK predicate
+	// instead of translating Definition. Transient, runtime-only (not
+	// persisted) — the AI fix-suggestion splice point for a CHECK (#134),
+	// analogous to Column.DefaultExpressionOverride. Must be valid target DDL.
+	DefinitionOverride string `json:"-"`
 }
 
 // ValidateIdentifier checks if a database identifier (schema, table, column name)

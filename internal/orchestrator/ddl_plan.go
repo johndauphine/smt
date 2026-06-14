@@ -203,7 +203,7 @@ func (o *Orchestrator) renderCreateTableStatements(ctx context.Context, runID st
 	if err := runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
 		ddl, err := renderer.renderTable(ctx, &t)
 		if err != nil {
-			fixedDDL, applied := o.handleRenderFailure(ctx, runID, renderer, &t, err)
+			fixedDDL, applied := o.handleRenderFailure(ctx, runID, "rendering CREATE TABLE DDL", renderer, &t, err)
 			if !applied {
 				return fmt.Errorf("rendering table %s: %w", t.Name, err)
 			}
@@ -310,7 +310,11 @@ func (o *Orchestrator) renderCreateCheckStatements(ctx context.Context, runID st
 			chk := t.CheckConstraints[j]
 			ddl, err := renderer.renderCheck(ctx, &t, &chk)
 			if err != nil {
-				return fmt.Errorf("rendering check %s: %w", chk.Name, err)
+				fixedDDL, applied := o.handleRenderFailure(ctx, runID, "rendering CHECK constraint DDL", renderer, &t, err)
+				if !applied {
+					return fmt.Errorf("rendering check %s: %w", chk.Name, err)
+				}
+				ddl = fixedDDL
 			}
 			stmts = append(stmts, schemadiff.Statement{
 				Table:       driver.NormalizeIdentifier(renderer.targetType, t.Name),

@@ -72,10 +72,16 @@ func buildExpressionFixPrompt(req FixRequest) string {
 
 // ValidateTargetExpression rejects an AI-proposed expression that isn't a single
 // self-contained value expression, so splicing it verbatim into a column's
-// DEFAULT clause can't break out and inject extra columns or statements into the
-// CREATE TABLE. It checks: non-empty, balanced parens/quotes, and no top-level
-// (unquoted, unparenthesized) comma or semicolon. It is a structural guard, not
-// a semantic or dialect validator.
+// DEFAULT clause (or a CHECK predicate) can't break out and inject extra
+// columns or statements. It checks: non-empty, balanced parens/quotes, no SQL
+// comment, and no top-level (unquoted, unparenthesized) comma or semicolon. It
+// is a structural guard, not a semantic validator.
+//
+// It assumes a target where backslashes are literal inside string literals
+// (PostgreSQL with standard_conforming_strings — the splice is pg-only today),
+// so `'^\d+$'` is a safe string and quote integrity rests on balanced `'`
+// alone. A backslash-escaping target (MySQL/E-strings) would need a stricter
+// check before splicing there.
 func ValidateTargetExpression(expr string) error {
 	s := strings.TrimSpace(expr)
 	if s == "" {
@@ -87,13 +93,6 @@ func ValidateTargetExpression(expr string) error {
 		c := s[i]
 		switch {
 		case inSingle:
-			// Backslash escaping is dialect-dependent (off in PG with
-			// standard_conforming_strings, on in MySQL/E-strings), so a string
-			// containing one could terminate early on some targets and break
-			// out of the literal — reject rather than guess.
-			if c == '\\' {
-				return fmt.Errorf("backslash escape in string literal (dialect-dependent)")
-			}
 			if c == '\'' {
 				if i+1 < len(s) && s[i+1] == '\'' { // escaped ''
 					i++
