@@ -1,10 +1,12 @@
 package postgres
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
+	"smt/internal/canonical"
 	"smt/internal/driver"
 	"smt/internal/logging"
 )
@@ -12,6 +14,10 @@ import (
 type deterministicDDL struct {
 	dialect           Dialect
 	unknownTypePolicy string
+	// sourceDialect is the canonical source driver name ("mysql", "mssql",
+	// "postgres"). Empty means unknown — the canonical type mapping then falls
+	// back to dialect-blind defaults (the historical source-agnostic behavior).
+	sourceDialect string
 }
 
 func newDeterministicDDL(policy ...string) deterministicDDL {
@@ -22,12 +28,28 @@ func newDeterministicDDL(policy ...string) deterministicDDL {
 	return deterministicDDL{dialect: Dialect{}, unknownTypePolicy: unknownTypePolicy}
 }
 
+// withSource returns a copy that knows the source dialect, so the canonical
+// type mapping can resolve dialect-dependent source types (e.g. MySQL FLOAT is
+// single-precision while MSSQL FLOAT is double; MySQL tinyint(1) is boolean).
+func (r deterministicDDL) withSource(sourceDialect string) deterministicDDL {
+	r.sourceDialect = strings.ToLower(strings.TrimSpace(sourceDialect))
+	return r
+}
+
 func RenderCreateTableDDL(t *driver.Table, targetSchema string, unlogged bool) (string, map[string]string, error) {
 	return RenderCreateTableDDLWithPolicy(t, targetSchema, unlogged, "")
 }
 
 func RenderCreateTableDDLWithPolicy(t *driver.Table, targetSchema string, unlogged bool, unknownTypePolicy string) (string, map[string]string, error) {
 	return newDeterministicDDL(unknownTypePolicy).createTable(t, targetSchema, unlogged)
+}
+
+// RenderCreateTableDDLWithSource is RenderCreateTableDDLWithPolicy that also
+// knows the source dialect, so the canonical type mapping can resolve
+// dialect-dependent source types. sourceDialect "" reproduces the source-blind
+// behavior.
+func RenderCreateTableDDLWithSource(t *driver.Table, targetSchema string, unlogged bool, unknownTypePolicy, sourceDialect string) (string, map[string]string, error) {
+	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).createTable(t, targetSchema, unlogged)
 }
 
 func RenderColumnDefinition(col driver.Column) (string, error) {
@@ -44,12 +66,25 @@ func RenderColumnDefinitionWithContextAndPolicy(col driver.Column, tableColumns 
 	return def, err
 }
 
+// RenderColumnDefinitionWithSource is the source-dialect-aware variant of
+// RenderColumnDefinitionWithContextAndPolicy.
+func RenderColumnDefinitionWithSource(col driver.Column, tableColumns []driver.Column, unknownTypePolicy, sourceDialect string) (string, error) {
+	def, _, err := newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).columnDefinition(col, tableColumns)
+	return def, err
+}
+
 func RenderColumnType(col driver.Column) (string, error) {
 	return RenderColumnTypeWithPolicy(col, "")
 }
 
 func RenderColumnTypeWithPolicy(col driver.Column, unknownTypePolicy string) (string, error) {
 	return newDeterministicDDL(unknownTypePolicy).columnType(col)
+}
+
+// RenderColumnTypeWithSource is the source-dialect-aware variant of
+// RenderColumnTypeWithPolicy.
+func RenderColumnTypeWithSource(col driver.Column, unknownTypePolicy, sourceDialect string) (string, error) {
+	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).columnType(col)
 }
 
 func RenderColumnDefaultDDL(col driver.Column) (string, error) {
@@ -60,8 +95,22 @@ func RenderColumnDefaultDDLWithPolicy(col driver.Column, unknownTypePolicy strin
 	return newDeterministicDDL(unknownTypePolicy).defaultExpression(col)
 }
 
+// RenderColumnDefaultDDLWithSource is the source-dialect-aware variant of
+// RenderColumnDefaultDDLWithPolicy, so boolean defaults are translated for the
+// source's boolean convention (MSSQL bit and MySQL tinyint(1) alike).
+func RenderColumnDefaultDDLWithSource(col driver.Column, unknownTypePolicy, sourceDialect string) (string, error) {
+	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).defaultExpression(col)
+}
+
 func RenderCreateIndexDDL(t *driver.Table, idx *driver.Index, targetSchema string) (string, error) {
 	return newDeterministicDDL().createIndex(t, idx, targetSchema)
+}
+
+// RenderCreateIndexDDLWithSource is the source-dialect-aware variant of
+// RenderCreateIndexDDL, so a filtered-index predicate over a boolean-convention
+// column (MSSQL bit / MySQL tinyint(1)) is rewritten to boolean literals.
+func RenderCreateIndexDDLWithSource(t *driver.Table, idx *driver.Index, targetSchema, sourceDialect string) (string, error) {
+	return newDeterministicDDL().withSource(sourceDialect).createIndex(t, idx, targetSchema)
 }
 
 func RenderCreateForeignKeyDDL(t *driver.Table, fk *driver.ForeignKey, targetSchema string) (string, error) {
@@ -70,6 +119,14 @@ func RenderCreateForeignKeyDDL(t *driver.Table, fk *driver.ForeignKey, targetSch
 
 func RenderCreateCheckConstraintDDL(t *driver.Table, chk *driver.CheckConstraint, targetSchema string) (string, error) {
 	return newDeterministicDDL().createCheckConstraint(t, chk, targetSchema)
+}
+
+// RenderCreateCheckConstraintDDLWithSource is the source-dialect-aware variant
+// of RenderCreateCheckConstraintDDL, so a CHECK predicate over a
+// boolean-convention column (MSSQL bit / MySQL tinyint(1)) is rewritten to
+// boolean literals.
+func RenderCreateCheckConstraintDDLWithSource(t *driver.Table, chk *driver.CheckConstraint, targetSchema, sourceDialect string) (string, error) {
+	return newDeterministicDDL().withSource(sourceDialect).createCheckConstraint(t, chk, targetSchema)
 }
 
 func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlogged bool) (string, map[string]string, error) {
@@ -130,7 +187,7 @@ func (r deterministicDDL) columnDefinition(col driver.Column, tableColumns ...[]
 		if isTextualPGType(colType) {
 			expr = rewriteSQLServerStringConcat(expr)
 		}
-		expr = rewriteSQLServerBitComparisons(expr, contextColumns)
+		expr = r.rewriteBooleanComparisons(expr, contextColumns)
 		if strings.EqualFold(strings.TrimSpace(col.DataType), "bit") {
 			expr = rewriteSQLServerBooleanResultLiterals(expr)
 		}
@@ -203,7 +260,7 @@ func (r deterministicDDL) createIndex(t *driver.Table, idx *driver.Index, target
 		if err != nil {
 			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
 		}
-		expr = rewriteSQLServerBitComparisons(expr, t.Columns)
+		expr = r.rewriteBooleanComparisons(expr, t.Columns)
 		b.WriteString(" WHERE ")
 		b.WriteString(expr)
 	}
@@ -262,7 +319,7 @@ func (r deterministicDDL) createCheckConstraint(t *driver.Table, chk *driver.Che
 	if err != nil {
 		return "", fmt.Errorf("mapping check constraint %s: %w", chk.Name, err)
 	}
-	expr = rewriteSQLServerBitComparisons(expr, t.Columns)
+	expr = r.rewriteBooleanComparisons(expr, t.Columns)
 
 	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
 		r.dialect.QualifyTable(targetSchema, tableName),
@@ -299,97 +356,21 @@ func ensureOuterParens(expr string) string {
 
 func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 	dt := strings.ToLower(strings.TrimSpace(col.DataType))
-	var typ string
-	switch dt {
-	case "int", "integer", "int4", "serial":
-		if col.IsUnsigned {
-			typ = "bigint"
-			break
+
+	ct := canonical.ToCanonical(dt, driver.MetaOf(col), r.sourceDialect)
+	typ, err := canonical.FromCanonical(ct, "postgres", canonical.RenderOpts{IsIdentity: col.IsIdentity})
+	if err != nil {
+		if errors.Is(err, canonical.ErrUnknownType) {
+			switch r.unknownTypePolicy {
+			case "warn":
+				logging.Warn("deterministic PostgreSQL type mapper: unsupported source type %q for column %s; using text because unknown_type_policy=warn", col.DataType, col.Name)
+				return "text", nil
+			case "text_fallback":
+				return "text", nil
+			}
+			return "", fmt.Errorf("unsupported source type %q", col.DataType)
 		}
-		typ = "integer"
-	case "bigint", "int8", "bigserial":
-		if col.IsUnsigned && !col.IsIdentity {
-			typ = "numeric(20,0)"
-			break
-		}
-		typ = "bigint"
-	case "smallint", "int2", "smallserial":
-		if col.IsUnsigned {
-			typ = "integer"
-			break
-		}
-		typ = "smallint"
-	case "tinyint":
-		typ = "smallint"
-	case "bit", "bool", "boolean":
-		typ = "boolean"
-	case "varchar", "nvarchar", "character varying":
-		if col.MaxLength <= 0 || col.MaxLength == -1 {
-			typ = "text"
-		} else {
-			typ = fmt.Sprintf("character varying(%d)", col.MaxLength)
-		}
-	case "char", "nchar", "character", "bpchar":
-		if col.MaxLength <= 0 || col.MaxLength == -1 {
-			typ = "text"
-		} else {
-			typ = fmt.Sprintf("character(%d)", col.MaxLength)
-		}
-	case "text", "ntext", "tinytext", "mediumtext", "longtext":
-		typ = "text"
-	case "datetime", "datetime2", "smalldatetime", "timestamp":
-		typ = pgFspType("timestamp", col, "without time zone")
-	case "rowversion":
-		// SQL Server's rowversion (reported by old snapshots as "timestamp")
-		// is an opaque 8-byte binary counter.
-		typ = "bytea"
-	case "datetimeoffset", "timestamptz", "timestamp with time zone":
-		typ = pgFspType("timestamp", col, "with time zone")
-	case "date":
-		typ = "date"
-	case "time":
-		typ = pgFspType("time", col, "")
-	case "decimal", "numeric", "number":
-		if col.Precision > 0 {
-			typ = fmt.Sprintf("numeric(%d,%d)", col.Precision, col.Scale)
-		} else {
-			typ = "numeric"
-		}
-	case "money":
-		typ = "numeric(19,4)"
-	case "smallmoney":
-		typ = "numeric(10,4)"
-	case "float", "double", "double precision":
-		typ = "double precision"
-	case "real":
-		typ = "real"
-	case "uniqueidentifier", "uuid":
-		typ = "uuid"
-	case "varbinary", "binary", "image", "bytea", "blob", "tinyblob", "mediumblob", "longblob":
-		typ = "bytea"
-	case "xml":
-		typ = "xml"
-	case "json", "jsonb":
-		typ = "jsonb"
-	case "enum", "set":
-		typ = "text"
-	case "_text", "text[]":
-		typ = "text[]"
-	case "_varchar", "varchar[]", "_bpchar", "bpchar[]":
-		typ = "text[]"
-	case "_int2", "int2[]", "_int4", "int4[]", "_int8", "int8[]":
-		typ = "integer[]"
-	case "_uuid", "uuid[]":
-		typ = "uuid[]"
-	default:
-		switch r.unknownTypePolicy {
-		case "warn":
-			logging.Warn("deterministic PostgreSQL type mapper: unsupported source type %q for column %s; using text because unknown_type_policy=warn", col.DataType, col.Name)
-			return "text", nil
-		case "text_fallback":
-			return "text", nil
-		}
-		return "", fmt.Errorf("unsupported source type %q", col.DataType)
+		return "", err
 	}
 
 	if col.IsIdentity {
@@ -432,7 +413,11 @@ func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
 		return "CURRENT_TIMESTAMP", nil
 	}
 
-	if strings.EqualFold(col.DataType, "bit") {
+	// A column that maps to pg boolean needs boolean default literals: pg
+	// rejects DEFAULT 1 on a boolean. This covers MSSQL bit and MySQL tinyint(1)
+	// (the boolean convention) alike, via the same source-aware canonical
+	// classification the type mapping uses.
+	if canonical.ToCanonical(strings.ToLower(strings.TrimSpace(col.DataType)), driver.MetaOf(col), r.sourceDialect).Kind == canonical.Boolean {
 		switch expr {
 		case "0":
 			return "false", nil
@@ -769,24 +754,6 @@ func isTextualPGType(colType string) bool {
 		colType == "text"
 }
 
-// pgFspType renders a timestamp/time type with the source's
-// fractional-seconds precision when known (#88), clamped to PostgreSQL's
-// maximum of 6; unknown precision keeps the bare type.
-func pgFspType(base string, col driver.Column, suffix string) string {
-	out := base
-	if col.DatetimePrecision != nil && *col.DatetimePrecision >= 0 {
-		p := *col.DatetimePrecision
-		if p > 6 {
-			p = 6
-		}
-		out = fmt.Sprintf("%s(%d)", base, p)
-	}
-	if suffix != "" {
-		out += " " + suffix
-	}
-	return out
-}
-
 func isTextualSourceType(dataType string) bool {
 	switch strings.ToLower(strings.TrimSpace(dataType)) {
 	case "varchar", "nvarchar", "character varying", "char", "nchar", "character", "bpchar", "text", "ntext", "enum", "set":
@@ -859,10 +826,18 @@ func rewriteSQLServerBooleanResultLiterals(expr string) string {
 	})
 }
 
-func rewriteSQLServerBitComparisons(expr string, cols []driver.Column) string {
+// rewriteBooleanComparisons rewrites integer 0/1 comparisons and IN-lists made
+// against columns that map to pg boolean into boolean literals, so predicates
+// from a source whose boolean convention is integer (MSSQL bit, MySQL
+// tinyint(1)) stay valid on the boolean target column. It covers `col = 1`,
+// `col <> 0`, and the redundant-domain `col IN (0,1)` form. Column boolean-ness
+// is decided by the same source-aware canonical classification the type mapping
+// uses, so it tracks the bit↔tinyint(1)↔boolean mapping automatically.
+func (r deterministicDDL) rewriteBooleanComparisons(expr string, cols []driver.Column) string {
 	out := expr
 	for _, col := range cols {
-		if !strings.EqualFold(strings.TrimSpace(col.DataType), "bit") {
+		dt := strings.ToLower(strings.TrimSpace(col.DataType))
+		if canonical.ToCanonical(dt, driver.MetaOf(col), r.sourceDialect).Kind != canonical.Boolean {
 			continue
 		}
 		quoted := `"` + sanitizePGIdentifier(col.Name) + `"`
@@ -882,6 +857,26 @@ func rewriteSQLServerBitComparisons(expr string, cols []driver.Column) string {
 				return match
 			}
 			return bitLiteral(firstNonEmpty(parts[1], parts[2])) + " " + parts[3] + " " + parts[4]
+		})
+		inRE := regexp.MustCompile(`(?i)(` + ident + `)\s+(NOT\s+)?IN\s*\(([^)]*)\)`)
+		out = inRE.ReplaceAllStringFunc(out, func(match string) string {
+			parts := inRE.FindStringSubmatch(match)
+			if len(parts) != 4 {
+				return match
+			}
+			items := strings.Split(parts[3], ",")
+			conv := make([]string, 0, len(items))
+			for _, item := range items {
+				switch strings.TrimSpace(item) {
+				case "0":
+					conv = append(conv, "false")
+				case "1":
+					conv = append(conv, "true")
+				default:
+					return match // not a pure 0/1 domain list — leave untouched
+				}
+			}
+			return parts[1] + " " + parts[2] + "IN (" + strings.Join(conv, ", ") + ")"
 		})
 	}
 	return out
