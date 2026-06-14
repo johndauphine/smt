@@ -321,11 +321,17 @@ func (r deterministicDDL) createCheckConstraint(t *driver.Table, chk *driver.Che
 		return "", fmt.Errorf("check constraint %s has no definition", chk.Name)
 	}
 
-	expr, err := r.sqlServerExpression(def)
-	if err != nil {
-		return "", fmt.Errorf("mapping check constraint %s: %w", chk.Name, err)
+	expr := strings.TrimSpace(chk.DefinitionOverride)
+	if expr == "" {
+		var err error
+		expr, err = r.sqlServerExpression(def)
+		if err != nil {
+			return "", &driver.ExpressionRenderError{
+				Column: chk.Name, Kind: "check", SourceExpr: chk.Definition, Err: err,
+			}
+		}
+		expr = r.rewriteBooleanComparisons(expr, t.Columns)
 	}
-	expr = r.rewriteBooleanComparisons(expr, t.Columns)
 
 	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
 		r.dialect.QualifyTable(targetSchema, tableName),

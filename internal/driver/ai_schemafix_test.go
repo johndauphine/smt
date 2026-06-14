@@ -60,7 +60,9 @@ func TestValidateTargetExpression(t *testing.T) {
 		"NOW() + INTERVAL '1 year'",
 		"(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date",
 		"gen_random_uuid()",
-		"'a, b; c'", // commas/semicolons inside a string literal are fine
+		"'a, b; c'",      // commas/semicolons inside a string literal are fine
+		`code ~ '^\d+$'`, // pg regex CHECK — backslashes are literal on pg
+		`'a\'`,           // a backslash is a literal char in a pg string (= a\)
 	}
 	for _, e := range ok {
 		if err := ValidateTargetExpression(e); err != nil {
@@ -76,7 +78,7 @@ func TestValidateTargetExpression(t *testing.T) {
 		"1, 2",                            // top-level comma
 		"NOW() --",                        // line comment hides the separating comma
 		"NOW() /* x",                      // block comment swallows the rest
-		`'a\'`,                            // backslash escape can break out on some dialects
+		"foo(',",                          // unterminated string (the ' opens a literal that never closes)
 	}
 	for _, e := range bad {
 		if err := ValidateTargetExpression(e); err == nil {
