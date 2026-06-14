@@ -520,6 +520,17 @@ func dataTypeClass(dialect string, c Column) string {
 // matches (e.g. current_date ≠ current_dt — that would be a real fidelity
 // loss). "other:..." results compare equal iff the normalized expressions
 // match exactly — safety floor for unknown defaults.
+// DefaultExpressionsEquivalent reports whether two default expressions resolve
+// to the same semantic class — the deterministic equivalence check the drift /
+// AI-review comparator uses (defaultExpressionClass). It is used to verify that
+// an AI-translated default preserves the source's default class. A "review"
+// (false) result does not mean the translation is wrong, only that SMT cannot
+// mechanically prove it equivalent (the comparator can't equate, say,
+// DATEADD(year,1,GETDATE()) with NOW() + INTERVAL '1 year').
+func DefaultExpressionsEquivalent(source, target string) bool {
+	return defaultExpressionClass(source) == defaultExpressionClass(target)
+}
+
 func defaultExpressionClass(expr string) string {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {

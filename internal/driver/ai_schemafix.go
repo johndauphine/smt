@@ -70,6 +70,73 @@ func buildExpressionFixPrompt(req FixRequest) string {
 	return sb.String()
 }
 
+// ValidateTargetExpression rejects an AI-proposed expression that isn't a single
+// self-contained value expression, so splicing it verbatim into a column's
+// DEFAULT clause can't break out and inject extra columns or statements into the
+// CREATE TABLE. It checks: non-empty, balanced parens/quotes, and no top-level
+// (unquoted, unparenthesized) comma or semicolon. It is a structural guard, not
+// a semantic or dialect validator.
+func ValidateTargetExpression(expr string) error {
+	s := strings.TrimSpace(expr)
+	if s == "" {
+		return fmt.Errorf("empty expression")
+	}
+	depth := 0
+	inSingle, inDouble := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inSingle:
+			// Backslash escaping is dialect-dependent (off in PG with
+			// standard_conforming_strings, on in MySQL/E-strings), so a string
+			// containing one could terminate early on some targets and break
+			// out of the literal — reject rather than guess.
+			if c == '\\' {
+				return fmt.Errorf("backslash escape in string literal (dialect-dependent)")
+			}
+			if c == '\'' {
+				if i+1 < len(s) && s[i+1] == '\'' { // escaped ''
+					i++
+					continue
+				}
+				inSingle = false
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			}
+		case c == '\'':
+			inSingle = true
+		case c == '"':
+			inDouble = true
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth < 0 {
+				return fmt.Errorf("unbalanced parentheses")
+			}
+		case c == ';':
+			return fmt.Errorf("contains a statement separator %q", ";")
+		case c == ',' && depth == 0:
+			return fmt.Errorf("contains a top-level comma (would inject a column)")
+		case c == '-' && i+1 < len(s) && s[i+1] == '-':
+			// A line comment would comment out the rest of the DDL line (the
+			// separating comma or closing paren).
+			return fmt.Errorf("contains a line comment %q", "--")
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
+			return fmt.Errorf("contains a block comment %q", "/*")
+		}
+	}
+	if depth != 0 {
+		return fmt.Errorf("unbalanced parentheses")
+	}
+	if inSingle || inDouble {
+		return fmt.Errorf("unterminated quoted string")
+	}
+	return nil
+}
+
 func parseExpressionFix(response string) (*ExpressionFix, error) {
 	response = strings.TrimSpace(response)
 	response = strings.TrimPrefix(response, "```json")

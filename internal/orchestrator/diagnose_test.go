@@ -59,16 +59,29 @@ func TestRenderSuggestionFile_LabeledAndProvenanced(t *testing.T) {
 		&driver.ExpressionRenderError{Column: "ExpiresAt", Kind: "default", SourceExpr: "dateadd(year,1,getdate())"},
 		&driver.ExpressionFix{Expression: "CURRENT_TIMESTAMP + INTERVAL '1 year'", Explanation: "interval arithmetic", Confidence: "high"},
 		`CREATE TABLE "subscriptions" ("expiresat" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP + INTERVAL '1 year')`,
+		false, // class not confirmed
 	)
 	for _, want := range []string{
-		"AI-ASSISTED", "UNVERIFIED", "did not and will not apply it",
+		"AI-ASSISTED", "review before applying", "did not and will not apply it",
 		"dbo.Subscriptions", "ExpiresAt (default)",
 		"dateadd(year,1,getdate())  ->  CURRENT_TIMESTAMP + INTERVAL '1 year'",
 		"Confidence: high", `CREATE TABLE "subscriptions"`,
+		"[REVIEW]", // verification verdict for an unconfirmed class
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("suggestion file missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// A class-confirmed translation stamps [OK] rather than [REVIEW].
+func TestRenderSuggestionFile_ClassMatchedStampsOK(t *testing.T) {
+	out := renderSuggestionFile("T",
+		&driver.ExpressionRenderError{Column: "d", Kind: "default", SourceExpr: "(convert(date,getdate()))"},
+		&driver.ExpressionFix{Expression: "CURRENT_DATE", Confidence: "high"},
+		"CREATE TABLE t (d date)", true)
+	if !strings.Contains(out, "[OK]") || strings.Contains(out, "[REVIEW]") {
+		t.Errorf("expected [OK] verdict, got:\n%s", out)
 	}
 }
 
@@ -80,12 +93,39 @@ func TestRenderSuggestionFile_SanitizesMultilineBannerFields(t *testing.T) {
 		&driver.ExpressionRenderError{Column: "c", Kind: "default", SourceExpr: "x\nDROP TABLE users; --"},
 		&driver.ExpressionFix{Expression: "1\nDELETE FROM secrets;", Explanation: "ok\nrm -rf /", Confidence: "low"},
 		"CREATE TABLE t (c int)",
+		false,
 	)
 	header := strings.SplitN(out, "\n\nCREATE TABLE", 2)[0]
 	for _, line := range strings.Split(header, "\n") {
 		if line != "" && !strings.HasPrefix(line, "--") {
 			t.Errorf("non-comment line escaped into the banner: %q", line)
 		}
+	}
+}
+
+// suggest_fixes is opt-out: an omitted value follows diagnose_failures.
+func TestAISuggestFixesEnabled_OptOutFollowsDiagnose(t *testing.T) {
+	on, off := true, false
+	cases := []struct {
+		name      string
+		diagnose  bool
+		suggest   *bool
+		wantEnabl bool
+	}{
+		{"omitted follows diagnose on", true, nil, true},
+		{"omitted follows diagnose off", false, nil, false},
+		{"explicit false overrides diagnose on", true, &off, false},
+		{"explicit true overrides diagnose off", false, &on, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.AIReview.DiagnoseFailures = tc.diagnose
+			cfg.AIReview.SuggestFixes = tc.suggest
+			if got := aiSuggestFixesEnabled(cfg); got != tc.wantEnabl {
+				t.Errorf("aiSuggestFixesEnabled = %v, want %v", got, tc.wantEnabl)
+			}
+		})
 	}
 }
 
@@ -103,7 +143,8 @@ func TestSuggestSchemaFix_DisabledIsNoOp(t *testing.T) {
 // suggestion (no whole-table rewrite) — even with suggest_fixes on.
 func TestSuggestSchemaFix_NonExpressionFailureNoSuggestion(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.AIReview.SuggestFixes = true
+	on := true
+	cfg.AIReview.SuggestFixes = &on
 	o := &Orchestrator{config: cfg}
 	// A plain error (not *driver.ExpressionRenderError) must short-circuit
 	// before resolving a provider.

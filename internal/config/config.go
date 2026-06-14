@@ -211,12 +211,16 @@ type AIReviewConfig struct {
 	// above (or the default provider when Model is empty).
 	DiagnoseFailures bool `yaml:"diagnose_failures"`
 
-	// SuggestFixes, when true, writes an AI-proposed corrected DDL to a
-	// clearly-labeled schema.suggested.sql artifact on a render/extract failure
-	// (#134). It is a SUGGESTION for the user to review and apply — SMT never
-	// writes it to schema.sql and never applies it automatically (that requires
-	// the explicit --apply-suggested flag). Uses the Model provider above.
-	SuggestFixes bool `yaml:"suggest_fixes"`
+	// SuggestFixes writes an AI-proposed corrected DDL to a clearly-labeled
+	// schema.suggested.sql artifact on a render failure (#134) — SMT splices one
+	// AI-translated expression into its own deterministic DDL. It is a
+	// SUGGESTION: never written to schema.sql, never applied automatically (that
+	// needs --apply-suggested). Uses the Model provider above.
+	//
+	// Opt-OUT: it is a pointer so an omitted value defaults to DiagnoseFailures
+	// — if you've asked the AI for help on failures, you get fix suggestions
+	// too. Set it explicitly false to get diagnosis without suggestions.
+	SuggestFixes *bool `yaml:"suggest_fixes"`
 
 	// Scope is reserved for future chunking choices such as "table" or "plan".
 	Scope string `yaml:"scope"`
@@ -660,6 +664,13 @@ func (c *Config) applyDefaults() error {
 	if c.AIReview.Enabled == nil {
 		enabled := c.Migration.AIVerify
 		c.AIReview.Enabled = &enabled
+	}
+	// suggest_fixes is opt-OUT: when omitted it follows diagnose_failures, so
+	// asking the AI for help on failures also yields fix suggestions. An
+	// explicit value (true/false) always wins.
+	if c.AIReview.SuggestFixes == nil {
+		suggest := c.AIReview.DiagnoseFailures
+		c.AIReview.SuggestFixes = &suggest
 	}
 	if c.AIReview.Model == "" {
 		c.AIReview.Model = c.Migration.AIVerifierModel

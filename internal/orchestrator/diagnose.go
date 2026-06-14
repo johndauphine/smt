@@ -61,7 +61,7 @@ func (o *Orchestrator) diagnoseSchemaFailure(ctx context.Context, table, schema,
 // any provider/parse/re-render failure here is swallowed (debug-logged) so it
 // can never mask the real error.
 func (o *Orchestrator) suggestSchemaFix(ctx context.Context, runID string, renderer createDDLRenderer, t *driver.Table, cause error) {
-	if o.config == nil || !o.config.AIReview.SuggestFixes || cause == nil || t == nil {
+	if o.config == nil || !aiSuggestFixesEnabled(o.config) || cause == nil || t == nil {
 		return
 	}
 	var exprErr *driver.ExpressionRenderError
@@ -94,6 +94,12 @@ func (o *Orchestrator) suggestSchemaFix(ctx context.Context, runID string, rende
 		logging.Debug("AI expression fix unavailable: %v", err)
 		return
 	}
+	// Structural guard: a malformed expression must not be spliced verbatim
+	// (it could inject extra columns/statements into the DDL).
+	if err := driver.ValidateTargetExpression(fix.Expression); err != nil {
+		logging.Debug("AI expression fix rejected (not a single value expression): %v", err)
+		return
+	}
 
 	// Re-render the whole table deterministically with ONLY the failing
 	// expression overridden by the AI translation.
@@ -106,24 +112,33 @@ func (o *Orchestrator) suggestSchemaFix(ctx context.Context, runID string, rende
 		return
 	}
 
+	// Deterministic verification: does the AI translation resolve to the same
+	// default class as the source? A "review" result is honest, not a failure —
+	// SMT just can't mechanically prove novel expressions equivalent.
+	classMatched := driver.DefaultExpressionsEquivalent(exprErr.SourceExpr, fix.Expression)
+
 	o.suggestOnce.Do(func() {
-		content := renderSuggestionFile(t.Name, exprErr, fix, ddl)
+		content := renderSuggestionFile(t.Name, exprErr, fix, ddl, classMatched)
 		if werr := o.writeSQLArtifact(runID, "schema.suggested.sql", content); werr != nil {
 			logging.Debug("writing schema.suggested.sql: %v", werr)
 			return
 		}
-		logging.Warn("AI-suggested fix written to %s — UNVERIFIED; review before applying. SMT did NOT apply it.",
-			filepath.Join(o.ddlArtifactDir(runID), "schema.suggested.sql"))
+		verdict := "review the translated expression (class not mechanically confirmed)"
+		if classMatched {
+			verdict = "translated default matches the source default class"
+		}
+		logging.Warn("AI-assisted fix written to %s — %s. Review before applying; SMT did NOT apply it.",
+			filepath.Join(o.ddlArtifactDir(runID), "schema.suggested.sql"), verdict)
 	})
 }
 
 // renderSuggestionFile wraps SMT's deterministic DDL (with one AI-translated
 // expression spliced in) in a banner that makes the provenance — which single
 // expression came from the AI — unmistakable.
-func renderSuggestionFile(table string, exprErr *driver.ExpressionRenderError, fix *driver.ExpressionFix, ddl string) string {
+func renderSuggestionFile(table string, exprErr *driver.ExpressionRenderError, fix *driver.ExpressionFix, ddl string, classMatched bool) string {
 	var b strings.Builder
 	b.WriteString("-- ============================================================\n")
-	b.WriteString("-- AI-ASSISTED FIX · UNVERIFIED · review before applying\n")
+	b.WriteString("-- AI-ASSISTED FIX · review before applying\n")
 	b.WriteString("--\n")
 	b.WriteString("-- This is SMT's deterministic DDL with ONE expression translated by\n")
 	b.WriteString("-- an AI model. SMT did not and will not apply it automatically.\n")
@@ -133,7 +148,17 @@ func renderSuggestionFile(table string, exprErr *driver.ExpressionRenderError, f
 	if strings.TrimSpace(fix.Explanation) != "" {
 		b.WriteString("-- Note: " + oneLine(fix.Explanation) + "\n")
 	}
-	b.WriteString(fmt.Sprintf("-- Confidence: %s\n", fix.Confidence))
+	b.WriteString(fmt.Sprintf("-- Confidence: %s (AI)\n", fix.Confidence))
+	b.WriteString("--\n")
+	b.WriteString("-- Verification (deterministic): every column type, length, nullability,\n")
+	b.WriteString("-- identity, and all other defaults are SMT's deterministic output — only\n")
+	b.WriteString("-- the one DEFAULT above is AI-authored.\n")
+	if classMatched {
+		b.WriteString("--   [OK] the translated default matches the source's default class.\n")
+	} else {
+		b.WriteString("--   [REVIEW] SMT could not mechanically confirm the translated default\n")
+		b.WriteString("--   is equivalent to the source — review it before applying.\n")
+	}
 	b.WriteString("-- ============================================================\n\n")
 	b.WriteString(strings.TrimSpace(ddl))
 	b.WriteString(";\n")
