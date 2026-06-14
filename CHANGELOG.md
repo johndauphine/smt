@@ -4,6 +4,37 @@ All notable changes to SMT are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-06-14
+
+Headline: **optional AI failure assistance** — when SMT's deterministic renderer
+hits something it can't translate, the AI can now help, while never authoring
+the DDL SMT applies. All features are opt-in and advisory; executable DDL stays
+deterministic.
+
+### Added
+
+- **AI failure diagnosis** ([#131]) — `ai_review.diagnose_failures`. On a schema
+  extraction or DDL-render failure (which aborts before any DDL exists, so the
+  verifier never sees it), the AI prints user-facing guidance (cause +
+  suggestions). Strictly advisory: it never generates, patches, or retries DDL,
+  and never changes the run's outcome.
+- **AI-assisted fix suggestions** ([#134]) — `ai_review.suggest_fixes` (opt-out;
+  defaults to `diagnose_failures`). On a render failure caused by one
+  unsupported expression (a column `DEFAULT` or a `CHECK` predicate), the AI
+  translates *only that expression* and SMT splices it into its own
+  deterministic DDL — the AI never authors a whole table. Written to a clearly
+  labeled `schema.suggested.sql` for review; never to `schema.sql`.
+  - Deterministic verification: a structural injection guard plus a
+    default-class equivalence check stamp each suggestion `[OK]` or `[REVIEW]`.
+  - `--apply-suggested` (loud, off by default) splices the fix into the plan and
+    continues instead of aborting — the only path by which AI-authored content
+    reaches `schema.sql` / the applied DDL, and it is marked inline.
+
+### Changed
+
+- AI diagnosis box output wraps instead of truncating, so long guidance is
+  readable ([#133]).
+
 ## [0.10.1] - 2026-06-14
 
 ### Fixed
@@ -65,8 +96,12 @@ Releases before 0.10.0 are listed on the
 history since v0.9.0:
 [`v0.9.0...v0.10.0`](https://github.com/johndauphine/smt/compare/v0.9.0...v0.10.0).
 
+[0.11.0]: https://github.com/johndauphine/smt/releases/tag/v0.11.0
 [0.10.1]: https://github.com/johndauphine/smt/releases/tag/v0.10.1
 [0.10.0]: https://github.com/johndauphine/smt/releases/tag/v0.10.0
+[#131]: https://github.com/johndauphine/smt/issues/131
+[#133]: https://github.com/johndauphine/smt/pull/133
+[#134]: https://github.com/johndauphine/smt/issues/134
 [#46]: https://github.com/johndauphine/smt/issues/46
 [#57]: https://github.com/johndauphine/smt/issues/57
 [#58]: https://github.com/johndauphine/smt/issues/58
