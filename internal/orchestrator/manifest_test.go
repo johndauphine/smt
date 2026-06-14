@@ -77,7 +77,9 @@ func TestFingerprintBytes(t *testing.T) {
 	if fingerprintBytes([]byte("x")) == fingerprintBytes([]byte("y")) {
 		t.Error("distinct bytes hashed to the same fingerprint")
 	}
-	if fingerprintBytes([]byte("same")) != fingerprintBytes([]byte("same")) {
+	first := fingerprintBytes([]byte("same"))
+	second := fingerprintBytes([]byte("same"))
+	if first != second {
 		t.Error("identical bytes hashed to different fingerprints")
 	}
 }
