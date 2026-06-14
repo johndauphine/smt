@@ -44,29 +44,67 @@ func (o *Orchestrator) diagnoseSchemaFailure(ctx context.Context, table, schema,
 	driver.EmitDiagnosis(diagnosis)
 }
 
-// suggestSchemaFix is the opt-in AI fix-suggestion hook (ai_review.
-// suggest_fixes). On a render failure caused by ONE unsupported expression, it
-// asks the AI to translate just that expression, splices it into SMT's own
-// deterministic DDL (re-rendering the whole table through the deterministic
-// renderer with the one expression overridden), and writes the result to a
-// clearly-labeled schema.suggested.sql.
+// splicedFix is the outcome of translating one failing expression and
+// re-rendering the table with it overridden.
+type splicedFix struct {
+	exprErr      *driver.ExpressionRenderError
+	fix          *driver.ExpressionFix
+	ddl          string // SMT's deterministic DDL with the one expression spliced
+	classMatched bool   // deterministic class-equivalence verdict
+}
+
+// handleRenderFailure runs the failure advisories for a single-table render
+// error and, when --apply-suggested is set, splices the AI fix into the plan.
+// It returns the (marked) spliced DDL and true when the table was fixed
+// in-place; false means the caller must return the original error.
 //
-// The AI never authors a whole table: only the one failing expression comes
-// from the model; everything else is SMT's deterministic output. If the failure
-// isn't a single splice-able expression, no suggestion is written (the diagnosis
-// still advises).
-//
-// SUGGESTION only: never written to schema.sql, never applied (that needs the
-// explicit --apply-suggested flag). The caller still returns the original error;
-// any provider/parse/re-render failure here is swallowed (debug-logged) so it
-// can never mask the real error.
-func (o *Orchestrator) suggestSchemaFix(ctx context.Context, runID string, renderer createDDLRenderer, t *driver.Table, cause error) {
-	if o.config == nil || !aiSuggestFixesEnabled(o.config) || cause == nil || t == nil {
-		return
+// AI-authored content reaches the plan / schema.sql ONLY here, and only under
+// the explicit --apply-suggested flag — loudly logged and marked inline.
+func (o *Orchestrator) handleRenderFailure(ctx context.Context, runID string, renderer createDDLRenderer, t *driver.Table, cause error) (string, bool) {
+	if o.config == nil || t == nil {
+		return "", false
+	}
+	o.diagnoseSchemaFailure(ctx, t.Name, t.Schema, "rendering CREATE TABLE DDL", cause)
+
+	// Only do the (one) AI splice call if a suggestion or apply is actually
+	// requested.
+	if !aiSuggestFixesEnabled(o.config) && !o.opts.ApplySuggested {
+		return "", false
+	}
+	sf, ok := o.spliceFix(ctx, renderer, t, cause)
+	if !ok {
+		return "", false
+	}
+	if aiSuggestFixesEnabled(o.config) {
+		o.writeSuggestion(runID, t.Name, sf)
+	}
+	if !o.opts.ApplySuggested {
+		return "", false
+	}
+
+	verdict := "OK: default class matches source"
+	if !sf.classMatched {
+		verdict = "REVIEW: class NOT mechanically confirmed"
+	}
+	logging.Warn("APPLYING AI-ASSISTED FIX (--apply-suggested): table %s, column %s DEFAULT  %s -> %s  [%s]. This expression was authored by an AI model.",
+		oneLine(t.Name), oneLine(sf.exprErr.Column), oneLine(sf.exprErr.SourceExpr), oneLine(sf.fix.Expression), verdict)
+	marker := fmt.Sprintf("-- AI-ASSISTED FIX (--apply-suggested): %s DEFAULT  %s -> %s  [%s]\n",
+		oneLine(sf.exprErr.Column), oneLine(sf.exprErr.SourceExpr), oneLine(sf.fix.Expression), verdict)
+	return marker + sf.ddl, true
+}
+
+// spliceFix attempts the AI splice for a single-expression render failure:
+// translate the one failing expression and re-render the table with it
+// overridden. ok=false (debug-logged) when the failure isn't a single
+// splice-able default, no provider is available, the AI expression is malformed,
+// or the re-render fails. Performs exactly one AI call.
+func (o *Orchestrator) spliceFix(ctx context.Context, renderer createDDLRenderer, t *driver.Table, cause error) (*splicedFix, bool) {
+	if o.config == nil || cause == nil || t == nil {
+		return nil, false
 	}
 	var exprErr *driver.ExpressionRenderError
 	if !errors.As(cause, &exprErr) || exprErr.Kind != "default" {
-		return // not a single splice-able expression — diagnosis-only
+		return nil, false // not a single splice-able expression — diagnosis-only
 	}
 	idx := -1
 	for i := range t.Columns {
@@ -76,11 +114,11 @@ func (o *Orchestrator) suggestSchemaFix(ctx context.Context, runID string, rende
 		}
 	}
 	if idx < 0 {
-		return
+		return nil, false
 	}
 	suggester := o.errorDiagnoser()
 	if suggester == nil {
-		return
+		return nil, false
 	}
 	fix, err := suggester.SuggestExpressionFix(ctx, driver.FixRequest{
 		Kind:          exprErr.Kind,
@@ -92,13 +130,13 @@ func (o *Orchestrator) suggestSchemaFix(ctx context.Context, runID string, rende
 	})
 	if err != nil {
 		logging.Debug("AI expression fix unavailable: %v", err)
-		return
+		return nil, false
 	}
 	// Structural guard: a malformed expression must not be spliced verbatim
 	// (it could inject extra columns/statements into the DDL).
 	if err := driver.ValidateTargetExpression(fix.Expression); err != nil {
 		logging.Debug("AI expression fix rejected (not a single value expression): %v", err)
-		return
+		return nil, false
 	}
 
 	// Re-render the whole table deterministically with ONLY the failing
@@ -109,25 +147,31 @@ func (o *Orchestrator) suggestSchemaFix(ctx context.Context, runID string, rende
 	ddl, rerr := renderer.renderTable(ctx, &spliced)
 	if rerr != nil {
 		logging.Debug("re-render with AI expression failed: %v", rerr)
-		return
+		return nil, false
 	}
+	return &splicedFix{
+		exprErr:      exprErr,
+		fix:          fix,
+		ddl:          ddl,
+		classMatched: driver.DefaultExpressionsEquivalent(exprErr.SourceExpr, fix.Expression),
+	}, true
+}
 
-	// Deterministic verification: does the AI translation resolve to the same
-	// default class as the source? A "review" result is honest, not a failure —
-	// SMT just can't mechanically prove novel expressions equivalent.
-	classMatched := driver.DefaultExpressionsEquivalent(exprErr.SourceExpr, fix.Expression)
-
+// writeSuggestion writes the AI-assisted suggestion to schema.suggested.sql,
+// once even under concurrent failures (suggest_fixes path). It never writes to
+// schema.sql and the run still fails — review-only.
+func (o *Orchestrator) writeSuggestion(runID, table string, sf *splicedFix) {
 	o.suggestOnce.Do(func() {
-		content := renderSuggestionFile(t.Name, exprErr, fix, ddl, classMatched)
+		content := renderSuggestionFile(table, sf.exprErr, sf.fix, sf.ddl, sf.classMatched)
 		if werr := o.writeSQLArtifact(runID, "schema.suggested.sql", content); werr != nil {
 			logging.Debug("writing schema.suggested.sql: %v", werr)
 			return
 		}
 		verdict := "review the translated expression (class not mechanically confirmed)"
-		if classMatched {
+		if sf.classMatched {
 			verdict = "translated default matches the source default class"
 		}
-		logging.Warn("AI-assisted fix written to %s — %s. Review before applying; SMT did NOT apply it.",
+		logging.Warn("AI-assisted fix written to %s — %s. Review before applying; SMT did NOT apply it (use --apply-suggested to apply).",
 			filepath.Join(o.ddlArtifactDir(runID), "schema.suggested.sql"), verdict)
 	})
 }
