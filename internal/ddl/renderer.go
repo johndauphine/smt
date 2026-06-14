@@ -579,8 +579,17 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 func (r Renderer) canonicalColumnType(col driver.Column, dt, target string) (string, error) {
 	ct := canonical.ToCanonical(dt, metaOf(col), r.source)
 	typ, err := canonical.FromCanonical(ct, target, canonical.RenderOpts{IsIdentity: col.IsIdentity})
-	if errors.Is(err, canonical.ErrUnknownType) {
+	switch {
+	case errors.Is(err, canonical.ErrUnknownType):
 		return r.unknownType(dt)
+	case errors.Is(err, canonical.ErrMissingEnumValues):
+		// A native ENUM/SET target (MySQL) needs the member list. Preserve the
+		// pre-canonical renderer's contract: warn/text_fallback degrade to a
+		// sized string instead of failing the whole render; fail surfaces it.
+		if r.unknownTypePolicy == "warn" || r.unknownTypePolicy == "text_fallback" {
+			return "VARCHAR(255)", nil
+		}
+		return "", fmt.Errorf("%s column %s is missing allowed values", strings.ToLower(dt), col.Name)
 	}
 	return typ, err
 }

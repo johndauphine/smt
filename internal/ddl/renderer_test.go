@@ -179,6 +179,34 @@ func TestRenderer_MySQLEnumSetTypesPreserveValues(t *testing.T) {
 	assertEqualSQL(t, setType, "SET('vip','wholesale')")
 }
 
+// A MySQL ENUM/SET source whose member list is empty cannot render a native
+// ENUM(...)/SET(...). The unknown-type policy decides the outcome: fail surfaces
+// an error, while warn/text_fallback degrade to a sized VARCHAR rather than
+// failing the whole render (parity with the pre-canonical renderer).
+func TestRenderer_MySQLEnumMissingValuesHonorsPolicy(t *testing.T) {
+	missing := driver.Column{Name: "Kind", DataType: "enum"}
+
+	failRenderer, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer fail: %v", err)
+	}
+	if _, err := failRenderer.ColumnType(missing); err == nil {
+		t.Fatalf("expected error for enum with no values under fail policy, got nil")
+	}
+
+	for _, policy := range []string{"warn", "text_fallback"} {
+		r, err := NewRenderer("mysql", "crm", policy)
+		if err != nil {
+			t.Fatalf("NewRenderer %s: %v", policy, err)
+		}
+		got, err := r.ColumnType(missing)
+		if err != nil {
+			t.Fatalf("ColumnType under %s policy: %v", policy, err)
+		}
+		assertEqualSQL(t, got, "VARCHAR(255)")
+	}
+}
+
 func TestRenderer_EnumSetTypesMapTextForOtherTargets(t *testing.T) {
 	mssqlRenderer, err := NewRenderer("mssql", "dbo", "fail")
 	if err != nil {

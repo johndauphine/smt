@@ -10,6 +10,14 @@ import (
 // type. The caller applies its unknown-type policy (fail / warn / text_fallback).
 var ErrUnknownType = errors.New("non-portable source type")
 
+// ErrMissingEnumValues is returned by FromCanonical when an Enum/Set canonical
+// type reaches a target that renders a native member list (MySQL ENUM/SET) but
+// carries no values. The caller applies its unknown-type policy the same way it
+// would for an unmappable type (warn / text_fallback degrade to a sized VARCHAR;
+// fail surfaces the error). Targets that render enum/set as a plain sized string
+// (MSSQL NVARCHAR) never hit this.
+var ErrMissingEnumValues = errors.New("enum/set is missing allowed values")
+
 // RenderOpts carries the few column-level facts that affect the rendered TYPE
 // (as opposed to separate column clauses). IsIdentity matters because some
 // targets pick a different physical type for an identity column (pg keeps an
@@ -418,7 +426,7 @@ func setStringLen(ct CanonicalType) int {
 
 func enumDDL(name string, ct CanonicalType) (string, error) {
 	if len(ct.EnumValues) == 0 {
-		return "", fmt.Errorf("%s is missing allowed values", strings.ToLower(name))
+		return "", ErrMissingEnumValues
 	}
 	quoted := make([]string, len(ct.EnumValues))
 	for i, v := range ct.EnumValues {
