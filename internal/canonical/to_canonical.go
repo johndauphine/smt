@@ -27,6 +27,9 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	case "tinyint":
 		// MySQL's tinyint(1) is the boolean convention (the reader captures
 		// DisplayWidth==1 only for it). Plain tinyint is an 8-bit integer.
+		// tinyint(1) is MySQL's boolean (BOOL/BOOLEAN are aliases for it). The
+		// boolean class has no sign, so a tinyint(1) UNSIGNED canonicalizes to
+		// Boolean too — the (meaningless) UNSIGNED is dropped on round-trip.
 		if mysql && m.DisplayWidth == 1 {
 			return CanonicalType{Kind: Boolean}
 		}
@@ -105,10 +108,9 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	case "image":
 		return CanonicalType{Kind: Blob} // MSSQL ~2GB
 	case "blob":
-		if mysql {
-			return CanonicalType{Kind: Blob, Length: baseCap}
-		}
-		return CanonicalType{Kind: Blob}
+		// "blob" is a MySQL-only type name — inherently the 64KiB tier
+		// regardless of how the source dialect is labeled.
+		return CanonicalType{Kind: Blob, Length: baseCap}
 	case "tinyblob":
 		return CanonicalType{Kind: Blob, Length: tinyCap}
 	case "mediumblob":

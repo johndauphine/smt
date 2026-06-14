@@ -28,7 +28,7 @@ func TestColumnType_MySQLSameDialectPassthrough(t *testing.T) {
 		{"pg naive ts stays datetime", fromPG, driver.Column{DataType: "timestamp", DatetimePrecision: intp(3)}, "DATETIME(3)"},
 		{"unknown source ts stays datetime", base, driver.Column{DataType: "timestamp", DatetimePrecision: intp(3)}, "DATETIME(3)"},
 		{"mysql tinyint(1)", fromMySQL, driver.Column{DataType: "tinyint", DisplayWidth: 1}, "TINYINT(1)"},
-		{"mysql tinyint(1) unsigned", fromMySQL, driver.Column{DataType: "tinyint", DisplayWidth: 1, IsUnsigned: true}, "TINYINT(1) UNSIGNED"},
+		{"mysql tinyint(1) unsigned -> boolean drops sign", fromMySQL, driver.Column{DataType: "tinyint", DisplayWidth: 1, IsUnsigned: true}, "TINYINT(1)"},
 		{"mysql tinyint plain", fromMySQL, driver.Column{DataType: "tinyint"}, "TINYINT"},
 		{"unknown source ignores width", base, driver.Column{DataType: "tinyint", DisplayWidth: 1}, "TINYINT"},
 	}
