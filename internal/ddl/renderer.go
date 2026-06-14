@@ -19,7 +19,12 @@ import (
 // run manifests distinguish artifacts produced by different renderer logic.
 // It is the single "renderer + type-mapper version" token #64 fingerprints
 // on — type mapping and DDL rendering are one deterministic unit here.
-const RendererVersion = "1"
+//
+// "2": type mapping moved onto the canonical type IR (#62). The mapper is now
+// source-dialect-aware, so the rendered DDL changed for some inputs vs "1"
+// (e.g. MySQL tinyint(1) -> BIT/boolean, dialect-correct float/real precision,
+// MySQL mediumint and time-with-tz no longer rejected on a pg target).
+const RendererVersion = "2"
 
 type Renderer struct {
 	target            string
