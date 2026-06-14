@@ -2,11 +2,13 @@
 package ddl
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 
+	"smt/internal/canonical"
 	"smt/internal/driver"
 	pgddl "smt/internal/driver/postgres"
 )
@@ -563,162 +565,45 @@ func (r Renderer) SetColumnDefaultDDL(tableName string, col driver.Column) (stri
 }
 
 func (r Renderer) mssqlColumnType(col driver.Column, dt string) (string, error) {
-	switch dt {
-	case "tinyint":
-		return "TINYINT", nil
-	case "smallint", "int2":
-		if col.IsUnsigned {
-			return "INT", nil
-		}
-		return "SMALLINT", nil
-	case "int", "integer", "int4", "serial", "mediumint":
-		if col.IsUnsigned {
-			return "BIGINT", nil
-		}
-		return "INT", nil
-	case "bigint", "int8", "bigserial":
-		if col.IsUnsigned {
-			return "DECIMAL(20,0)", nil
-		}
-		return "BIGINT", nil
-	case "bit", "bool", "boolean":
-		return "BIT", nil
-	case "varchar", "character varying":
-		return sizedTypeCapped("VARCHAR", col.MaxLength, 8000, "MAX"), nil
-	case "nvarchar":
-		return sizedTypeCapped("NVARCHAR", col.MaxLength, 4000, "MAX"), nil
-	case "char", "character", "bpchar":
-		if col.MaxLength > 8000 {
-			return "VARCHAR(MAX)", nil
-		}
-		return sizedType("CHAR", col.MaxLength, "1"), nil
-	case "nchar":
-		if col.MaxLength > 4000 {
-			return "NVARCHAR(MAX)", nil
-		}
-		return sizedType("NCHAR", col.MaxLength, "1"), nil
-	case "text", "ntext", "tinytext", "mediumtext", "longtext", "json", "jsonb", "xml", "array", "_text", "text[]", "_varchar", "varchar[]", "_bpchar", "bpchar[]", "_int2", "int2[]", "_int4", "int4[]", "_int8", "int8[]", "_uuid", "uuid[]":
-		return "NVARCHAR(MAX)", nil
-	case "enum":
-		return sizedType("NVARCHAR", enumStringLength(col), "255"), nil
-	case "set":
-		return sizedType("NVARCHAR", setStringLength(col), "255"), nil
-	case "rowversion":
-		return "ROWVERSION", nil
-	case "datetime", "datetime2", "smalldatetime", "timestamp", "timestamp without time zone":
-		return fspType("DATETIME2", col, 7), nil
-	case "datetimeoffset", "timestamptz", "timestamp with time zone":
-		return fspType("DATETIMEOFFSET", col, 7), nil
-	case "date":
-		return "DATE", nil
-	case "time", "time without time zone", "time with time zone":
-		return fspType("TIME", col, 7), nil
-	case "decimal", "numeric", "number":
-		return decimalType("DECIMAL", col), nil
-	case "money":
-		return "DECIMAL(19,4)", nil
-	case "smallmoney":
-		return "DECIMAL(10,4)", nil
-	case "float", "double", "double precision", "float8":
-		return "FLOAT", nil
-	case "real", "float4":
-		return "REAL", nil
-	case "uniqueidentifier", "uuid":
-		return "UNIQUEIDENTIFIER", nil
-	case "varbinary", "binary", "image", "bytea", "blob", "tinyblob", "mediumblob", "longblob":
-		return sizedTypeCapped("VARBINARY", col.MaxLength, 8000, "MAX"), nil
-	default:
-		return r.unknownType(dt)
-	}
+	return r.canonicalColumnType(col, dt, "mssql")
 }
 
 func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) {
-	switch dt {
-	case "tinyint":
-		if r.source == "mysql" && col.DisplayWidth == 1 {
-			return mysqlUnsignedType("TINYINT(1)", col), nil
-		}
-		return mysqlUnsignedType("TINYINT", col), nil
-	case "smallint", "int2":
-		return mysqlUnsignedType("SMALLINT", col), nil
-	case "mediumint":
-		return mysqlUnsignedType("MEDIUMINT", col), nil
-	case "int", "integer", "int4", "serial":
-		return mysqlUnsignedType("INT", col), nil
-	case "bigint", "int8", "bigserial":
-		return mysqlUnsignedType("BIGINT", col), nil
-	case "bit", "bool", "boolean":
-		return "TINYINT(1)", nil
-	case "varchar", "nvarchar", "character varying":
-		return mysqlVarcharType(col.MaxLength), nil
-	case "char", "nchar", "character", "bpchar":
-		if col.MaxLength > 255 {
-			return mysqlVarcharType(col.MaxLength), nil
-		}
-		return sizedType("CHAR", col.MaxLength, "1"), nil
-	case "text", "ntext", "tinytext", "mediumtext", "longtext":
-		// "text" is dialect-ambiguous: MySQL's 64KiB tier vs the unbounded
-		// LOB of pg (1GB) and legacy mssql (2GB). Same-dialect keeps the
-		// tier verbatim; foreign unbounded sources need LONGTEXT to avoid
-		// a silent capacity downgrade (#108).
-		if dt == "text" && r.source != "mysql" {
-			return "LONGTEXT", nil
-		}
-		return mysqlTextType(dt), nil
-	case "json", "jsonb", "array", "_text", "text[]", "_varchar", "varchar[]", "_bpchar", "bpchar[]", "_int2", "int2[]", "_int4", "int4[]", "_int8", "int8[]", "_uuid", "uuid[]":
-		return "JSON", nil
-	case "rowversion":
-		return "BINARY(8)", nil
-	case "timestamp":
-		// MySQL TIMESTAMP is UTC-normalized with session-tz conversion; a
-		// same-dialect run must keep it. For foreign sources "timestamp" is
-		// pg's naive datetime, where TIMESTAMP's 1970–2038 range and UTC
-		// normalization make DATETIME the right target.
-		if r.source == "mysql" {
-			return mysqlFspType("TIMESTAMP", col, 6), nil
-		}
-		return mysqlFspType("DATETIME", col, 6), nil
-	case "datetime", "datetime2", "smalldatetime", "timestamp without time zone", "timestamptz", "datetimeoffset", "timestamp with time zone":
-		return mysqlFspType("DATETIME", col, 6), nil
-	case "date":
-		return "DATE", nil
-	case "time", "time without time zone", "time with time zone":
-		return mysqlFspType("TIME", col, 0), nil
-	case "decimal", "numeric", "number":
-		return mysqlUnsignedType(decimalType("DECIMAL", col), col), nil
-	case "money":
-		return "DECIMAL(19,4)", nil
-	case "smallmoney":
-		return "DECIMAL(10,4)", nil
-	case "float", "float4":
-		return "FLOAT", nil
-	case "double", "double precision", "real", "float8":
-		return "DOUBLE", nil
-	case "uniqueidentifier", "uuid":
-		return "CHAR(36)", nil
-	case "varbinary", "binary", "bytea":
-		// Unbounded sources (pg bytea reports 0, mssql varbinary(max) -1)
-		// hold up to 1-2GB — only LONGBLOB doesn't lose capacity. Sized
-		// sources past VARBINARY's 65535-byte ceiling fit MEDIUMBLOB.
-		if col.MaxLength <= 0 {
-			return "LONGBLOB", nil
-		}
-		if col.MaxLength > 65535 {
-			return "MEDIUMBLOB", nil
-		}
-		return fmt.Sprintf("VARBINARY(%d)", col.MaxLength), nil
-	case "image":
-		// MSSQL IMAGE holds 2GB; BLOB (64KiB) would silently truncate.
-		return "LONGBLOB", nil
-	case "blob", "tinyblob", "mediumblob", "longblob":
-		// MySQL-only names: preserve the tier verbatim.
-		return strings.ToUpper(dt), nil
-	case "enum":
-		return r.enumSetType("ENUM", col)
-	case "set":
-		return r.enumSetType("SET", col)
-	default:
+	return r.canonicalColumnType(col, dt, "mysql")
+}
+
+// canonicalColumnType maps a source type to the target dialect's DDL type
+// through the canonical type IR (#62): the source column is normalized to a
+// CanonicalType for the source dialect, then rendered for the target dialect.
+// Non-portable (Raw) types fall through to the unknown-type policy.
+func (r Renderer) canonicalColumnType(col driver.Column, dt, target string) (string, error) {
+	ct := canonical.ToCanonical(dt, metaOf(col), r.source)
+	typ, err := canonical.FromCanonical(ct, target, canonical.RenderOpts{IsIdentity: col.IsIdentity})
+	switch {
+	case errors.Is(err, canonical.ErrUnknownType):
 		return r.unknownType(dt)
+	case errors.Is(err, canonical.ErrMissingEnumValues):
+		// A native ENUM/SET target (MySQL) needs the member list. Preserve the
+		// pre-canonical renderer's contract: warn/text_fallback degrade to a
+		// sized string instead of failing the whole render; fail surfaces it.
+		if r.unknownTypePolicy == "warn" || r.unknownTypePolicy == "text_fallback" {
+			return "VARCHAR(255)", nil
+		}
+		return "", fmt.Errorf("%s column %s is missing allowed values", strings.ToLower(dt), col.Name)
+	}
+	return typ, err
+}
+
+// metaOf extracts the type-shaping metadata canonical.ToCanonical needs.
+func metaOf(col driver.Column) canonical.TypeMeta {
+	return canonical.TypeMeta{
+		MaxLength:         col.MaxLength,
+		Precision:         col.Precision,
+		Scale:             col.Scale,
+		DatetimePrecision: col.DatetimePrecision,
+		IsUnsigned:        col.IsUnsigned,
+		DisplayWidth:      col.DisplayWidth,
+		EnumValues:        col.EnumValues,
 	}
 }
 
@@ -821,53 +706,6 @@ func normalizeTypeName(dt string) string {
 	return dt
 }
 
-func sizedType(name string, length int, unbounded string) string {
-	if length <= 0 || length == -1 {
-		return fmt.Sprintf("%s(%s)", name, unbounded)
-	}
-	return fmt.Sprintf("%s(%d)", name, length)
-}
-
-// sizedTypeCapped degrades lengths above the target dialect's maximum for the
-// type to the unbounded form instead of emitting DDL the target rejects.
-func sizedTypeCapped(name string, length, max int, unbounded string) string {
-	if length > max {
-		return fmt.Sprintf("%s(%s)", name, unbounded)
-	}
-	return sizedType(name, length, unbounded)
-}
-
-// fspType renders a datetime/time type with the source's fractional-seconds
-// precision when known (#88), clamped to the target's maximum; unknown
-// precision keeps the bare type (target default).
-func fspType(name string, col driver.Column, max int) string {
-	if col.DatetimePrecision == nil || *col.DatetimePrecision < 0 {
-		return name
-	}
-	p := *col.DatetimePrecision
-	if p > max {
-		p = max
-	}
-	return fmt.Sprintf("%s(%d)", name, p)
-}
-
-// mysqlFspType is fspType for MySQL (max fsp 6), with a default precision for
-// unknown sources — 6 for DATETIME (the pre-#88 behavior), 0 for TIME. fsp 0
-// renders bare (DATETIME == DATETIME(0)).
-func mysqlFspType(name string, col driver.Column, def int) string {
-	p := def
-	if col.DatetimePrecision != nil && *col.DatetimePrecision >= 0 {
-		p = *col.DatetimePrecision
-		if p > 6 {
-			p = 6
-		}
-	}
-	if p == 0 {
-		return name
-	}
-	return fmt.Sprintf("%s(%d)", name, p)
-}
-
 // mysqlNowDefault renders the CURRENT_TIMESTAMP default with the same fsp the
 // column type will carry — MySQL rejects a default whose fsp differs from the
 // column's.
@@ -883,107 +721,6 @@ func mysqlNowDefault(col driver.Column) string {
 		return "CURRENT_TIMESTAMP"
 	}
 	return fmt.Sprintf("CURRENT_TIMESTAMP(%d)", p)
-}
-
-func decimalType(name string, col driver.Column) string {
-	if col.Precision > 0 {
-		return fmt.Sprintf("%s(%d,%d)", name, col.Precision, col.Scale)
-	}
-	return name
-}
-
-func mysqlUnsignedType(base string, col driver.Column) string {
-	if col.IsUnsigned {
-		return base + " UNSIGNED"
-	}
-	return base
-}
-
-func mysqlVarcharType(length int) string {
-	// Unbounded sources (mssql MAX = -1, pg unconstrained varchar = 0)
-	// hold up to 1-2GB — only LONGTEXT doesn't lose capacity.
-	if length <= 0 {
-		return "LONGTEXT"
-	}
-	// 16383 is the longest VARCHAR that fits MySQL's 65535-byte row limit
-	// under utf8mb4 (the charset our CREATE TABLE emits). Past it, pick the
-	// smallest text tier whose BYTE capacity covers the worst case of 4
-	// bytes per character: TEXT (64KiB) can hold only 16383 such chars, so
-	// the next safe tier is MEDIUMTEXT (16MiB, ~4.19M chars).
-	if length > 16777215/4 {
-		return "LONGTEXT"
-	}
-	if length > 16383 {
-		return "MEDIUMTEXT"
-	}
-	return fmt.Sprintf("VARCHAR(%d)", length)
-}
-
-func mysqlTextType(dt string) string {
-	switch dt {
-	case "tinytext":
-		return "TINYTEXT"
-	case "mediumtext":
-		return "MEDIUMTEXT"
-	case "longtext", "ntext":
-		return "LONGTEXT"
-	default:
-		return "TEXT"
-	}
-}
-
-func enumStringLength(col driver.Column) int {
-	length := col.MaxLength
-	for _, v := range enumValues(col) {
-		if len(v) > length {
-			length = len(v)
-		}
-	}
-	return length
-}
-
-func setStringLength(col driver.Column) int {
-	if col.MaxLength > 0 {
-		return col.MaxLength
-	}
-	values := enumValues(col)
-	if len(values) == 0 {
-		return 0
-	}
-	length := 0
-	for i, v := range values {
-		if i > 0 {
-			length++
-		}
-		length += len(v)
-	}
-	return length
-}
-
-func (r Renderer) enumSetType(name string, col driver.Column) (string, error) {
-	values := enumValues(col)
-	if len(values) == 0 {
-		if r.unknownTypePolicy == "warn" || r.unknownTypePolicy == "text_fallback" {
-			return "VARCHAR(255)", nil
-		}
-		return "", fmt.Errorf("%s column %s is missing allowed values", strings.ToLower(name), col.Name)
-	}
-	quoted := make([]string, len(values))
-	for i, v := range values {
-		quoted[i] = "'" + strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), "'", "''") + "'"
-	}
-	return name + "(" + strings.Join(quoted, ",") + ")", nil
-}
-
-func enumValues(col driver.Column) []string {
-	if len(col.EnumValues) > 0 {
-		return col.EnumValues
-	}
-	values, ok := parseInlineEnumSetValues(col.DataType)
-	if ok {
-		return values
-	}
-	return nil
 }
 
 func isBooleanColumn(col driver.Column) bool {
@@ -1623,68 +1360,6 @@ func unquoteSQLString(quoted string) (string, bool) {
 		b.WriteByte(body[i])
 	}
 	return b.String(), true
-}
-
-func parseInlineEnumSetValues(columnType string) ([]string, bool) {
-	columnType = strings.TrimSpace(columnType)
-	open := strings.IndexByte(columnType, '(')
-	if open < 0 || !strings.HasSuffix(columnType, ")") {
-		return nil, false
-	}
-	kind := strings.ToLower(strings.TrimSpace(columnType[:open]))
-	if kind != "enum" && kind != "set" {
-		return nil, false
-	}
-	body := columnType[open+1 : len(columnType)-1]
-	values := []string{}
-	for i := 0; i < len(body); {
-		for i < len(body) && strings.ContainsRune(" \t\n\r", rune(body[i])) {
-			i++
-		}
-		if i >= len(body) {
-			break
-		}
-		if body[i] != '\'' {
-			return nil, false
-		}
-		i++
-		var b strings.Builder
-		for i < len(body) {
-			switch body[i] {
-			case '\\':
-				if i+1 >= len(body) {
-					return nil, false
-				}
-				i++
-				b.WriteByte(body[i])
-			case '\'':
-				if i+1 < len(body) && body[i+1] == '\'' {
-					b.WriteByte('\'')
-					i += 2
-					continue
-				}
-				i++
-				values = append(values, b.String())
-				goto literalDone
-			default:
-				b.WriteByte(body[i])
-			}
-			i++
-		}
-		return nil, false
-
-	literalDone:
-		for i < len(body) && strings.ContainsRune(" \t\n\r", rune(body[i])) {
-			i++
-		}
-		if i < len(body) {
-			if body[i] != ',' {
-				return nil, false
-			}
-			i++
-		}
-	}
-	return values, true
 }
 
 func rewriteSQLServerStringConcatToConcat(expr string) string {
