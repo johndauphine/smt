@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"smt/internal/logging"
 )
@@ -105,6 +106,43 @@ func getGlobalDiagnoser() *AIErrorDiagnoser {
 }
 
 // NewAIErrorDiagnoser creates a new AI-powered error diagnoser.
+// wrapText word-wraps s to at most width runes per line, breaking at spaces and
+// hard-splitting any single word longer than width. Returns at least one line.
+func wrapText(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	var lines []string
+	cur := ""
+	flush := func() {
+		lines = append(lines, cur)
+		cur = ""
+	}
+	for _, word := range strings.Fields(s) {
+		for utf8.RuneCountInString(word) > width {
+			if cur != "" {
+				flush()
+			}
+			r := []rune(word)
+			lines = append(lines, string(r[:width]))
+			word = string(r[width:])
+		}
+		switch {
+		case cur == "":
+			cur = word
+		case utf8.RuneCountInString(cur)+1+utf8.RuneCountInString(word) <= width:
+			cur += " " + word
+		default:
+			flush()
+			cur = word
+		}
+	}
+	if cur != "" || len(lines) == 0 {
+		flush()
+	}
+	return lines
+}
+
 func NewAIErrorDiagnoser(mapper *AITypeMapper) *AIErrorDiagnoser {
 	return &AIErrorDiagnoser{
 		aiMapper: mapper,
@@ -358,18 +396,25 @@ func (diag *ErrorDiagnosis) FormatBox() string {
 
 	// Fixed width for the box
 	width := 72
+	inner := width - 4 // content columns between the "│ " and " │"
 
-	// Helper to write a padded line
+	// Helper to write one already-fit line, padded to the inner width. Rune-
+	// aware so multibyte content (and the box borders) line up.
 	writePadded := func(content string) {
-		// Truncate if too long
-		if len(content) > width-4 {
-			content = content[:width-7] + "..."
+		n := utf8.RuneCountInString(content)
+		if n > inner { // safety net; wrapText keeps lines within inner
+			content = string([]rune(content)[:inner])
+			n = inner
 		}
-		padding := width - 4 - len(content)
-		if padding < 0 {
-			padding = 0
+		sb.WriteString(vertical + " " + content + strings.Repeat(" ", inner-n) + " " + vertical + "\n")
+	}
+
+	// Write content wrapped across as many lines as needed — guidance is only
+	// useful if it isn't clipped.
+	writeWrapped := func(content string) {
+		for _, line := range wrapText(content, inner) {
+			writePadded(line)
 		}
-		sb.WriteString(vertical + " " + content + strings.Repeat(" ", padding) + " " + vertical + "\n")
 	}
 
 	// Top border with title
@@ -382,7 +427,7 @@ func (diag *ErrorDiagnosis) FormatBox() string {
 	writePadded("")
 
 	// Cause
-	writePadded("Cause: " + diag.Cause)
+	writeWrapped("Cause: " + diag.Cause)
 
 	// Empty line
 	writePadded("")
@@ -390,7 +435,7 @@ func (diag *ErrorDiagnosis) FormatBox() string {
 	// Suggestions
 	writePadded("Suggestions:")
 	for i, s := range diag.Suggestions {
-		writePadded(fmt.Sprintf("  %d. %s", i+1, s))
+		writeWrapped(fmt.Sprintf("  %d. %s", i+1, s))
 	}
 
 	// Empty line
@@ -398,7 +443,7 @@ func (diag *ErrorDiagnosis) FormatBox() string {
 
 	// Confidence and category
 	meta := fmt.Sprintf("Confidence: %s  |  Category: %s", diag.Confidence, diag.Category)
-	writePadded(meta)
+	writeWrapped(meta)
 
 	// Bottom border
 	sb.WriteString(bottomLeft + strings.Repeat(horizontal, width-2) + bottomRight)
