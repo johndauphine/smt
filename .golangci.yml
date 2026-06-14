@@ -1,0 +1,54 @@
+# golangci-lint v2 config (migrated from v1 for golangci-lint >= 2.x).
+# Enforcement scope is kept equivalent to the previous v1 setup: govet +
+# staticcheck (SA/S analyzers) + ineffassign, with errcheck and unused off.
+version: "2"
+
+run:
+  go: "1.25"
+
+linters:
+  # v2 enables a default set (errcheck, govet, ineffassign, staticcheck,
+  # unused). Disable the two the project intentionally did not run under v1.
+  disable:
+    - errcheck # noisy for non-critical error returns (logging, notifications)
+    - unused # false positives with conditional compilation
+  settings:
+    staticcheck:
+      # In v2, staticcheck absorbed gosimple (S*), stylecheck (ST*) and the
+      # quickfix refactors (QF*). v1 only ran staticcheck's SA* and gosimple's
+      # S* analyzers — stylecheck and QF were never enabled — so scope ST*/QF*
+      # out to preserve the prior enforcement level rather than impose new
+      # stylistic rewrites across pre-existing code.
+      checks:
+        - all
+        - -ST1* # stylecheck — not enabled under v1
+        - -QF* # quickfix refactors — not enabled under v1
+        - -S1009 # nil check before len() — sometimes clearer explicit
+        - -SA9003 # empty branch — sometimes intentional for clarity
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Unchecked errors on best-effort/cosmetic calls (parity with v1 rules).
+      - linters: [errcheck]
+        text: notifier\.
+      - linters: [errcheck]
+        text: bar\.
+      - linters: [errcheck]
+        text: CompleteRun|MarkTaskComplete
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

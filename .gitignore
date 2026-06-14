@@ -7,6 +7,7 @@
 *.yaml
 *.yml
 !config.yaml.example
+!.golangci.yml
 
 # State database
 *.db

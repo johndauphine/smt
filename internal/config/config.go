@@ -1394,7 +1394,7 @@ func (c *Config) DebugDump() string {
 				b.WriteString(fmt.Sprintf("  Model: %s (default)\n", provider.GetEffectiveModel(providerName)))
 			}
 			// AI features status - check each feature separately
-			if typeMapper, err := driver.GetAITypeMapper(); err == nil && typeMapper != nil {
+			if _, err := driver.GetAITypeMapper(); err == nil {
 				b.WriteString("  Type Mapping: enabled\n")
 			} else {
 				b.WriteString("  Type Mapping: disabled\n")
