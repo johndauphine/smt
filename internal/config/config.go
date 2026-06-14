@@ -203,6 +203,14 @@ type AIReviewConfig struct {
 	// before applying DDL with reviewer issues.
 	Mode string `yaml:"mode"`
 
+	// DiagnoseFailures, when true, lets the AI advise the user on how to resolve
+	// a schema extraction or DDL-render failure — a bug that aborts before any
+	// DDL exists, which the verifier never sees. It is strictly advisory: it
+	// surfaces guidance (cause + suggestions), never generates, patches, or
+	// retries DDL, and never changes the run's outcome. Uses the Model provider
+	// above (or the default provider when Model is empty).
+	DiagnoseFailures bool `yaml:"diagnose_failures"`
+
 	// Scope is reserved for future chunking choices such as "table" or "plan".
 	Scope string `yaml:"scope"`
 
@@ -1399,10 +1407,10 @@ func (c *Config) DebugDump() string {
 			} else {
 				b.WriteString("  Type Mapping: disabled\n")
 			}
-			if diagnoser := driver.GetAIErrorDiagnoser(); diagnoser != nil {
-				b.WriteString("  Error Diagnosis: enabled\n")
+			if c.AIReview.DiagnoseFailures {
+				b.WriteString("  Failure Diagnosis: enabled (ai_review.diagnose_failures)\n")
 			} else {
-				b.WriteString("  Error Diagnosis: disabled\n")
+				b.WriteString("  Failure Diagnosis: disabled\n")
 			}
 		} else {
 			b.WriteString("  Disabled (no provider configured in ~/.secrets/smt-config.yaml)\n")

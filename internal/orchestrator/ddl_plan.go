@@ -203,6 +203,7 @@ func (o *Orchestrator) renderCreateTableStatements(ctx context.Context, runID st
 	if err := runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
 		ddl, err := renderer.renderTable(ctx, &t)
 		if err != nil {
+			o.diagnoseSchemaFailure(ctx, t.Name, t.Schema, "rendering CREATE TABLE DDL", err)
 			return fmt.Errorf("rendering table %s: %w", t.Name, err)
 		}
 		ddl = stripTrailingSemicolons(ddl)
