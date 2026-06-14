@@ -26,6 +26,13 @@ import (
 // default-class comparison.
 var fspNowArgPattern = regexp.MustCompile(`^([a-z_]+)\([0-9]+\)$`)
 
+// convertTemporalRE matches the MSSQL CONVERT(date|time, <expr>) coercion,
+// capturing the target temporal type and the inner expression. The date/time
+// type name may be bracketed or quoted (date / [date] / "date"). This lets a
+// CONVERT(date, GETDATE()) default classify by its result (a date) rather than
+// the inner now-function, mirroring a PG <expr>::date cast.
+var convertTemporalRE = regexp.MustCompile(`(?i)^convert\(\s*[\["]?\s*(date|time)\s*[\]"]?\s*,\s*(.+?)\s*\)$`)
+
 // ColumnDelta records a single per-(column, criterion) mismatch from
 // CompareColumns. Format() renders it in the same wire shape #53's prompt
 // produced, so PreviousAttempt feedback to the generator is unchanged from
@@ -534,12 +541,26 @@ func defaultExpressionClass(expr string) string {
 	norm = strings.TrimSpace(norm)
 	// Strip PG cast suffixes: 'foo'::text → 'foo', gen_random_uuid()::char(36)
 	// → gen_random_uuid(), '{}'::jsonb → '{}'. PG's introspection returns
-	// defaults with explicit casts; the cast doesn't change semantic class.
+	// defaults with explicit casts; most casts don't change semantic class.
 	// The cast type can itself contain parens (`char(36)`) so consume the
-	// whole tail after the last `::` rather than stopping at the first
-	// non-identifier char.
+	// whole tail after the last `::`. A ::date / ::time cast IS class-relevant
+	// (it coerces a datetime to a date/time, e.g. (CURRENT_TIMESTAMP)::date is a
+	// today's-date default) — remember it and apply it after classifying the
+	// inner expression.
+	coerceDate, coerceTime := false, false
 	if i := strings.LastIndex(norm, "::"); i >= 0 {
+		switch strings.TrimSpace(norm[i+2:]) {
+		case "date":
+			coerceDate = true
+		case "time", "time without time zone", "timetz", "time with time zone":
+			coerceTime = true
+		}
 		norm = strings.TrimSpace(norm[:i])
+	}
+	// Removing a cast can expose parens the first pass left behind, e.g.
+	// (CURRENT_TIMESTAMP)::date → (current_timestamp). Strip them again.
+	for len(norm) >= 2 && norm[0] == '(' && norm[len(norm)-1] == ')' {
+		norm = strings.TrimSpace(norm[1 : len(norm)-1])
 	}
 	// Strip MSSQL N-prefix on string literals: N'foo' ≡ 'foo'
 	if strings.HasPrefix(norm, "n'") && strings.HasSuffix(norm, "'") {
@@ -553,7 +574,12 @@ func defaultExpressionClass(expr string) string {
 	// value, so it must stay part of the class and not collapse to a bare
 	// current_timestamp.
 	if i := strings.Index(norm, " at time zone "); i >= 0 {
-		if zone := strings.TrimSpace(norm[i+len(" at time zone "):]); zone == "'utc'" {
+		zone := strings.TrimSpace(norm[i+len(" at time zone "):])
+		// PG may render the zone literal with a cast, e.g. 'utc'::text.
+		if j := strings.LastIndex(zone, "::"); j >= 0 {
+			zone = strings.TrimSpace(zone[:j])
+		}
+		if zone == "'utc'" {
 			norm = strings.TrimSpace(norm[:i])
 		}
 	}
@@ -565,6 +591,23 @@ func defaultExpressionClass(expr string) string {
 	// reduced, so literals and multi-arg calls are untouched.
 	if m := fspNowArgPattern.FindStringSubmatch(norm); m != nil {
 		norm = m[1]
+	}
+
+	// MSSQL CONVERT(date|time, <expr>) coerces <expr> to a date/time, exactly
+	// like a PG ::date / ::time cast. Reduce to the inner expression and flag
+	// the coercion so the class reflects the result type, not the inner
+	// now-function — so CONVERT(date, GETDATE()) ≡ CURRENT_DATE.
+	if m := convertTemporalRE.FindStringSubmatch(norm); m != nil {
+		switch strings.ToLower(m[1]) {
+		case "date":
+			coerceDate = true
+		case "time":
+			coerceTime = true
+		}
+		norm = strings.TrimSpace(m[2])
+		for len(norm) >= 2 && norm[0] == '(' && norm[len(norm)-1] == ')' {
+			norm = strings.TrimSpace(norm[1 : len(norm)-1])
+		}
 	}
 
 	// "Now-style" function families. Split into three classes by what the
@@ -587,6 +630,12 @@ func defaultExpressionClass(expr string) string {
 		"sysdatetimeoffset()", "sysdatetimeoffset",
 		"systimestamp",
 		"localtimestamp", "localtimestamp()":
+		if coerceDate {
+			return "current_date"
+		}
+		if coerceTime {
+			return "current_t"
+		}
 		return "current_dt"
 	case "current_date", "current_date()":
 		return "current_date"
