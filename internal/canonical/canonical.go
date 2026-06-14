@@ -87,6 +87,12 @@ type CanonicalType struct {
 	// can't represent it (everything except MySQL) can widen deterministically.
 	Unsigned bool
 
+	// National marks a Unicode character type (MSSQL nvarchar/nchar/ntext).
+	// MSSQL's plain varchar/char are NON-Unicode, so this distinction is a
+	// real fidelity fact for a MSSQL target; pg/mysql are Unicode by default
+	// and ignore it.
+	National bool
+
 	// EnumValues holds the member list for Enum/Set.
 	EnumValues []string
 

@@ -49,16 +49,35 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 		return CanonicalType{Kind: Decimal, Precision: 19, Scale: 4}
 	case "smallmoney":
 		return CanonicalType{Kind: Decimal, Precision: 10, Scale: 4}
-	case "float", "double", "double precision", "float8":
+	case "float":
+		// Dialect-dependent precision: MySQL FLOAT is 32-bit single; MSSQL
+		// FLOAT (no precision) is 64-bit double. (PostgreSQL never reports a
+		// bare "float" — it uses real / double precision / float4 / float8.)
+		if mysql {
+			return CanonicalType{Kind: Real}
+		}
 		return CanonicalType{Kind: Double}
-	case "real", "float4":
+	case "double", "double precision", "float8":
+		return CanonicalType{Kind: Double}
+	case "real":
+		// MySQL REAL is a synonym for DOUBLE (8-byte); MSSQL/PG REAL is 4-byte
+		// single. (MySQL's REAL_AS_FLOAT sql_mode is non-default and ignored.)
+		if mysql {
+			return CanonicalType{Kind: Double}
+		}
+		return CanonicalType{Kind: Real}
+	case "float4":
 		return CanonicalType{Kind: Real}
 
 	// ---- character ------------------------------------------------------
-	case "varchar", "nvarchar", "character varying":
+	case "varchar", "character varying":
 		return CanonicalType{Kind: Varchar, Length: m.MaxLength}
-	case "char", "nchar", "character", "bpchar":
+	case "nvarchar":
+		return CanonicalType{Kind: Varchar, Length: m.MaxLength, National: true}
+	case "char", "character", "bpchar":
 		return CanonicalType{Kind: Char, Length: m.MaxLength}
+	case "nchar":
+		return CanonicalType{Kind: Char, Length: m.MaxLength, National: true}
 	case "text":
 		// Dialect-ambiguous: MySQL's 64KiB tier vs the unbounded LOB of pg
 		// (~1GB) / legacy MSSQL (~2GB). Carry the tier capacity so a MySQL
@@ -123,9 +142,9 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	case "xml":
 		return CanonicalType{Kind: Xml}
 	case "enum":
-		return CanonicalType{Kind: Enum, EnumValues: m.EnumValues}
+		return CanonicalType{Kind: Enum, Length: m.MaxLength, EnumValues: m.EnumValues}
 	case "set":
-		return CanonicalType{Kind: Set, EnumValues: m.EnumValues}
+		return CanonicalType{Kind: Set, Length: m.MaxLength, EnumValues: m.EnumValues}
 
 	// ---- pg arrays ------------------------------------------------------
 	case "_text", "text[]", "_varchar", "varchar[]", "_bpchar", "bpchar[]":
