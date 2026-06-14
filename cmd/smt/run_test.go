@@ -77,7 +77,9 @@ func TestCLIFlagInfoCoversGlobals(t *testing.T) {
 			t.Errorf("command flag %s wrongly marked global", name)
 		}
 	}
-	if info.TakesValue["--apply"] {
-		t.Error("bool flag --apply wrongly marked as value-taking")
+	for _, name := range []string{"--apply", "--apply-suggested"} {
+		if info.TakesValue[name] {
+			t.Errorf("bool flag %s wrongly marked as value-taking", name)
+		}
 	}
 }

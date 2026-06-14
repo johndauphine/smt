@@ -28,6 +28,7 @@ func createCommand() *cli.Command {
 			&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Value: "schema.sql", Usage: "Output file when not applying"},
 			&cli.StringFlag{Name: "source-schema", Usage: "Override source schema from config"},
 			&cli.StringFlag{Name: "target-schema", Usage: "Override target schema from config"},
+			&cli.BoolFlag{Name: "apply-suggested", Usage: "On a single-expression render failure, splice the AI-translated fix into the plan and continue instead of aborting (requires an AI provider; AI-authored content is included and clearly marked)"},
 		},
 		Action: runCreate,
 	}
@@ -50,8 +51,9 @@ func runCreate(c *cli.Context) error {
 			return err
 		}
 		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
-			StateFile:  c.String("state-file"),
-			SourceOnly: true,
+			StateFile:      c.String("state-file"),
+			SourceOnly:     true,
+			ApplySuggested: c.Bool("apply-suggested"),
 		})
 		if err != nil {
 			return err
@@ -77,7 +79,8 @@ func runCreate(c *cli.Context) error {
 		return err
 	}
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
-		StateFile: c.String("state-file"),
+		StateFile:      c.String("state-file"),
+		ApplySuggested: c.Bool("apply-suggested"),
 	})
 	if err != nil {
 		return err

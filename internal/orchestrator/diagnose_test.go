@@ -129,29 +129,32 @@ func TestAISuggestFixesEnabled_OptOutFollowsDiagnose(t *testing.T) {
 	}
 }
 
-// suggest_fixes off is a no-op: no provider resolved, nothing written.
-func TestSuggestSchemaFix_DisabledIsNoOp(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{}} // SuggestFixes defaults false
-	o.suggestSchemaFix(context.Background(), "run1", createDDLRenderer{},
+// With both suggest_fixes and --apply-suggested off, the render failure is a
+// no-op: no AI splice attempted, the table is not "applied", nothing written.
+func TestHandleRenderFailure_DisabledIsNoOp(t *testing.T) {
+	o := &Orchestrator{config: &config.Config{}} // SuggestFixes nil/false, ApplySuggested false
+	ddl, applied := o.handleRenderFailure(context.Background(), "run1", createDDLRenderer{},
 		&driver.Table{Name: "T", Schema: "dbo"}, errors.New("boom"))
+	if applied || ddl != "" {
+		t.Errorf("expected no fix applied, got applied=%v ddl=%q", applied, ddl)
+	}
 	if o.diagnoser != nil {
-		t.Error("provider resolved while suggest_fixes is disabled")
+		t.Error("provider resolved while both features are disabled")
 	}
 }
 
-// A failure that isn't a single splice-able expression must not produce a
-// suggestion (no whole-table rewrite) — even with suggest_fixes on.
-func TestSuggestSchemaFix_NonExpressionFailureNoSuggestion(t *testing.T) {
-	cfg := &config.Config{}
-	on := true
-	cfg.AIReview.SuggestFixes = &on
-	o := &Orchestrator{config: cfg}
-	// A plain error (not *driver.ExpressionRenderError) must short-circuit
-	// before resolving a provider.
-	o.suggestSchemaFix(context.Background(), "run1", createDDLRenderer{},
+// A failure that isn't a single splice-able expression must not be fixed (no
+// whole-table rewrite) — even with --apply-suggested on it must abort.
+func TestHandleRenderFailure_NonExpressionFailureNotApplied(t *testing.T) {
+	o := &Orchestrator{config: &config.Config{}, opts: Options{ApplySuggested: true}}
+	// A plain error (not *driver.ExpressionRenderError) can't be spliced.
+	ddl, applied := o.handleRenderFailure(context.Background(), "run1", createDDLRenderer{},
 		&driver.Table{Name: "T", Schema: "dbo"}, errors.New("unsupported source type \"geography\""))
+	if applied || ddl != "" {
+		t.Errorf("non-expression failure must not be applied, got applied=%v", applied)
+	}
 	if o.diagnoser != nil {
-		t.Error("provider resolved for a non-expression failure; should be diagnosis-only")
+		t.Error("provider resolved for a non-expression failure; should abort")
 	}
 }
 
