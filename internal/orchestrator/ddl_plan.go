@@ -204,6 +204,7 @@ func (o *Orchestrator) renderCreateTableStatements(ctx context.Context, runID st
 		ddl, err := renderer.renderTable(ctx, &t)
 		if err != nil {
 			o.diagnoseSchemaFailure(ctx, t.Name, t.Schema, "rendering CREATE TABLE DDL", err)
+			o.suggestSchemaFix(ctx, runID, renderer, &t, err)
 			return fmt.Errorf("rendering table %s: %w", t.Name, err)
 		}
 		ddl = stripTrailingSemicolons(ddl)

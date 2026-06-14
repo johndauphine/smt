@@ -57,6 +57,10 @@ type Orchestrator struct {
 	// (ai_review.diagnose_failures), resolved lazily on the first failure.
 	diagnoser     *driver.AIErrorDiagnoser
 	diagnoserOnce sync.Once
+
+	// suggestOnce guards writing schema.suggested.sql so concurrent table
+	// failures produce a single suggestion artifact.
+	suggestOnce sync.Once
 }
 
 // New constructs an Orchestrator with default options.

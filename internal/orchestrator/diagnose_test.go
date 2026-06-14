@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"smt/internal/config"
@@ -46,6 +47,70 @@ func TestDiagnoseSchemaFailure_NilCauseIsNoOp(t *testing.T) {
 
 	if *emitted {
 		t.Error("diagnosis emitted for a nil cause")
+	}
+}
+
+// The suggestion file must be unmistakably labeled as AI-assisted/unverified,
+// show exactly which one expression came from the AI, and contain SMT's
+// deterministic DDL — so a user can never confuse it with schema.sql.
+func TestRenderSuggestionFile_LabeledAndProvenanced(t *testing.T) {
+	out := renderSuggestionFile(
+		"dbo.Subscriptions",
+		&driver.ExpressionRenderError{Column: "ExpiresAt", Kind: "default", SourceExpr: "dateadd(year,1,getdate())"},
+		&driver.ExpressionFix{Expression: "CURRENT_TIMESTAMP + INTERVAL '1 year'", Explanation: "interval arithmetic", Confidence: "high"},
+		`CREATE TABLE "subscriptions" ("expiresat" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP + INTERVAL '1 year')`,
+	)
+	for _, want := range []string{
+		"AI-ASSISTED", "UNVERIFIED", "did not and will not apply it",
+		"dbo.Subscriptions", "ExpiresAt (default)",
+		"dateadd(year,1,getdate())  ->  CURRENT_TIMESTAMP + INTERVAL '1 year'",
+		"Confidence: high", `CREATE TABLE "subscriptions"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("suggestion file missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A multi-line AI/source string must not break out of the single-line "-- "
+// banner comments — every line above the DDL body stays a comment.
+func TestRenderSuggestionFile_SanitizesMultilineBannerFields(t *testing.T) {
+	out := renderSuggestionFile(
+		"T",
+		&driver.ExpressionRenderError{Column: "c", Kind: "default", SourceExpr: "x\nDROP TABLE users; --"},
+		&driver.ExpressionFix{Expression: "1\nDELETE FROM secrets;", Explanation: "ok\nrm -rf /", Confidence: "low"},
+		"CREATE TABLE t (c int)",
+	)
+	header := strings.SplitN(out, "\n\nCREATE TABLE", 2)[0]
+	for _, line := range strings.Split(header, "\n") {
+		if line != "" && !strings.HasPrefix(line, "--") {
+			t.Errorf("non-comment line escaped into the banner: %q", line)
+		}
+	}
+}
+
+// suggest_fixes off is a no-op: no provider resolved, nothing written.
+func TestSuggestSchemaFix_DisabledIsNoOp(t *testing.T) {
+	o := &Orchestrator{config: &config.Config{}} // SuggestFixes defaults false
+	o.suggestSchemaFix(context.Background(), "run1", createDDLRenderer{},
+		&driver.Table{Name: "T", Schema: "dbo"}, errors.New("boom"))
+	if o.diagnoser != nil {
+		t.Error("provider resolved while suggest_fixes is disabled")
+	}
+}
+
+// A failure that isn't a single splice-able expression must not produce a
+// suggestion (no whole-table rewrite) — even with suggest_fixes on.
+func TestSuggestSchemaFix_NonExpressionFailureNoSuggestion(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AIReview.SuggestFixes = true
+	o := &Orchestrator{config: cfg}
+	// A plain error (not *driver.ExpressionRenderError) must short-circuit
+	// before resolving a provider.
+	o.suggestSchemaFix(context.Background(), "run1", createDDLRenderer{},
+		&driver.Table{Name: "T", Schema: "dbo"}, errors.New("unsupported source type \"geography\""))
+	if o.diagnoser != nil {
+		t.Error("provider resolved for a non-expression failure; should be diagnosis-only")
 	}
 }
 

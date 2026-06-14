@@ -2,7 +2,10 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"smt/internal/driver"
 	"smt/internal/logging"
@@ -39,6 +42,108 @@ func (o *Orchestrator) diagnoseSchemaFailure(ctx context.Context, table, schema,
 		return
 	}
 	driver.EmitDiagnosis(diagnosis)
+}
+
+// suggestSchemaFix is the opt-in AI fix-suggestion hook (ai_review.
+// suggest_fixes). On a render failure caused by ONE unsupported expression, it
+// asks the AI to translate just that expression, splices it into SMT's own
+// deterministic DDL (re-rendering the whole table through the deterministic
+// renderer with the one expression overridden), and writes the result to a
+// clearly-labeled schema.suggested.sql.
+//
+// The AI never authors a whole table: only the one failing expression comes
+// from the model; everything else is SMT's deterministic output. If the failure
+// isn't a single splice-able expression, no suggestion is written (the diagnosis
+// still advises).
+//
+// SUGGESTION only: never written to schema.sql, never applied (that needs the
+// explicit --apply-suggested flag). The caller still returns the original error;
+// any provider/parse/re-render failure here is swallowed (debug-logged) so it
+// can never mask the real error.
+func (o *Orchestrator) suggestSchemaFix(ctx context.Context, runID string, renderer createDDLRenderer, t *driver.Table, cause error) {
+	if o.config == nil || !o.config.AIReview.SuggestFixes || cause == nil || t == nil {
+		return
+	}
+	var exprErr *driver.ExpressionRenderError
+	if !errors.As(cause, &exprErr) || exprErr.Kind != "default" {
+		return // not a single splice-able expression — diagnosis-only
+	}
+	idx := -1
+	for i := range t.Columns {
+		if t.Columns[i].Name == exprErr.Column {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	suggester := o.errorDiagnoser()
+	if suggester == nil {
+		return
+	}
+	fix, err := suggester.SuggestExpressionFix(ctx, driver.FixRequest{
+		Kind:          exprErr.Kind,
+		SourceExpr:    exprErr.SourceExpr,
+		ColumnName:    exprErr.Column,
+		ColumnType:    t.Columns[idx].DataType,
+		SourceDialect: canonicalDBType(o.config.Source.Type),
+		TargetDialect: canonicalDBType(o.config.Target.Type),
+	})
+	if err != nil {
+		logging.Debug("AI expression fix unavailable: %v", err)
+		return
+	}
+
+	// Re-render the whole table deterministically with ONLY the failing
+	// expression overridden by the AI translation.
+	spliced := *t
+	spliced.Columns = append([]driver.Column(nil), t.Columns...)
+	spliced.Columns[idx].DefaultExpressionOverride = fix.Expression
+	ddl, rerr := renderer.renderTable(ctx, &spliced)
+	if rerr != nil {
+		logging.Debug("re-render with AI expression failed: %v", rerr)
+		return
+	}
+
+	o.suggestOnce.Do(func() {
+		content := renderSuggestionFile(t.Name, exprErr, fix, ddl)
+		if werr := o.writeSQLArtifact(runID, "schema.suggested.sql", content); werr != nil {
+			logging.Debug("writing schema.suggested.sql: %v", werr)
+			return
+		}
+		logging.Warn("AI-suggested fix written to %s — UNVERIFIED; review before applying. SMT did NOT apply it.",
+			filepath.Join(o.ddlArtifactDir(runID), "schema.suggested.sql"))
+	})
+}
+
+// renderSuggestionFile wraps SMT's deterministic DDL (with one AI-translated
+// expression spliced in) in a banner that makes the provenance — which single
+// expression came from the AI — unmistakable.
+func renderSuggestionFile(table string, exprErr *driver.ExpressionRenderError, fix *driver.ExpressionFix, ddl string) string {
+	var b strings.Builder
+	b.WriteString("-- ============================================================\n")
+	b.WriteString("-- AI-ASSISTED FIX · UNVERIFIED · review before applying\n")
+	b.WriteString("--\n")
+	b.WriteString("-- This is SMT's deterministic DDL with ONE expression translated by\n")
+	b.WriteString("-- an AI model. SMT did not and will not apply it automatically.\n")
+	b.WriteString(fmt.Sprintf("-- Table:  %s\n", oneLine(table)))
+	b.WriteString(fmt.Sprintf("-- Column: %s (%s)\n", oneLine(exprErr.Column), oneLine(exprErr.Kind)))
+	b.WriteString(fmt.Sprintf("-- AI-translated: %s  ->  %s\n", oneLine(exprErr.SourceExpr), oneLine(fix.Expression)))
+	if strings.TrimSpace(fix.Explanation) != "" {
+		b.WriteString("-- Note: " + oneLine(fix.Explanation) + "\n")
+	}
+	b.WriteString(fmt.Sprintf("-- Confidence: %s\n", fix.Confidence))
+	b.WriteString("-- ============================================================\n\n")
+	b.WriteString(strings.TrimSpace(ddl))
+	b.WriteString(";\n")
+	return b.String()
+}
+
+// oneLine collapses all whitespace (including newlines) to single spaces so an
+// AI/source string can't break out of a single-line "-- " banner comment.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // errorDiagnoser lazily resolves the AI failure-diagnosis advisor from the

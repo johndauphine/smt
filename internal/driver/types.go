@@ -109,26 +109,49 @@ func (t *Table) GetColumnNames() []string {
 
 // Column represents a table column.
 type Column struct {
-	Name               string   `json:"name"`
-	DataType           string   `json:"data_type"`
-	MaxLength          int      `json:"max_length"`
-	Precision          int      `json:"precision"`
-	Scale              int      `json:"scale"`
-	DatetimePrecision  *int     `json:"datetime_precision,omitempty"` // fractional-seconds precision for datetime/time-class columns; nil = unknown (pre-v3 snapshots)
-	IsNullable         bool     `json:"is_nullable"`
-	IsIdentity         bool     `json:"is_identity"`
-	IsUnsigned         bool     `json:"is_unsigned,omitempty"`   // true for MySQL unsigned numeric columns
-	DisplayWidth       int      `json:"display_width,omitempty"` // MySQL integer display width, captured only for tinyint(1) (the boolean convention); other widths are deprecated and intentionally not captured
-	OrdinalPos         int      `json:"ordinal_position"`
-	DefaultExpression  string   `json:"default_expression,omitempty"`   // raw default clause from source dialect (e.g. "((0))", "getutcdate()", "'pending'") — empty if no default
-	OnUpdateExpression string   `json:"on_update_expression,omitempty"` // raw MySQL ON UPDATE expression (e.g. "CURRENT_TIMESTAMP")
-	IsComputed         bool     `json:"is_computed,omitempty"`          // true if this column is a generated/computed column
-	ComputedExpression string   `json:"computed_expression,omitempty"`  // generation expression for computed columns
-	ComputedPersisted  bool     `json:"computed_persisted,omitempty"`   // true if computed value is persisted/stored (vs virtual)
-	EnumValues         []string `json:"enum_values,omitempty"`          // allowed values for MySQL ENUM/SET columns
-	SRID               int      `json:"srid,omitempty"`                 // Spatial Reference ID for geography/geometry columns (0 = default/unset)
-	SampleValues       []string `json:"sample_values,omitempty"`        // Sample data values for AI type mapping context
+	Name              string `json:"name"`
+	DataType          string `json:"data_type"`
+	MaxLength         int    `json:"max_length"`
+	Precision         int    `json:"precision"`
+	Scale             int    `json:"scale"`
+	DatetimePrecision *int   `json:"datetime_precision,omitempty"` // fractional-seconds precision for datetime/time-class columns; nil = unknown (pre-v3 snapshots)
+	IsNullable        bool   `json:"is_nullable"`
+	IsIdentity        bool   `json:"is_identity"`
+	IsUnsigned        bool   `json:"is_unsigned,omitempty"`   // true for MySQL unsigned numeric columns
+	DisplayWidth      int    `json:"display_width,omitempty"` // MySQL integer display width, captured only for tinyint(1) (the boolean convention); other widths are deprecated and intentionally not captured
+	OrdinalPos        int    `json:"ordinal_position"`
+	DefaultExpression string `json:"default_expression,omitempty"` // raw default clause from source dialect (e.g. "((0))", "getutcdate()", "'pending'") — empty if no default
+	// DefaultExpressionOverride, when set, is emitted verbatim as the column's
+	// DEFAULT instead of translating DefaultExpression. It is a transient,
+	// runtime-only splice point (not persisted) used by the AI fix-suggestion
+	// path to substitute one AI-translated target-dialect expression into SMT's
+	// otherwise-deterministic DDL (#134). It must already be valid target DDL.
+	DefaultExpressionOverride string   `json:"-"`
+	OnUpdateExpression        string   `json:"on_update_expression,omitempty"` // raw MySQL ON UPDATE expression (e.g. "CURRENT_TIMESTAMP")
+	IsComputed                bool     `json:"is_computed,omitempty"`          // true if this column is a generated/computed column
+	ComputedExpression        string   `json:"computed_expression,omitempty"`  // generation expression for computed columns
+	ComputedPersisted         bool     `json:"computed_persisted,omitempty"`   // true if computed value is persisted/stored (vs virtual)
+	EnumValues                []string `json:"enum_values,omitempty"`          // allowed values for MySQL ENUM/SET columns
+	SRID                      int      `json:"srid,omitempty"`                 // Spatial Reference ID for geography/geometry columns (0 = default/unset)
+	SampleValues              []string `json:"sample_values,omitempty"`        // Sample data values for AI type mapping context
 }
+
+// ExpressionRenderError is returned by the deterministic renderer when a single
+// column/constraint expression can't be translated to the target dialect. It
+// carries enough structure for the AI fix-suggestion path to translate just
+// that expression and splice it back (#134), rather than guessing from a string.
+type ExpressionRenderError struct {
+	Column     string // column the expression belongs to
+	Kind       string // "default" | "check" | "computed"
+	SourceExpr string // the raw source-dialect expression that failed
+	Err        error  // underlying renderer error
+}
+
+func (e *ExpressionRenderError) Error() string {
+	return fmt.Sprintf("unsupported %s expression for column %q: %v", e.Kind, e.Column, e.Err)
+}
+
+func (e *ExpressionRenderError) Unwrap() error { return e.Err }
 
 // MetaOf extracts the type-shaping metadata canonical.ToCanonical needs from a
 // column. It is the single Column -> canonical.TypeMeta mapping shared by the
