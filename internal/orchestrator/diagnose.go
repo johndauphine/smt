@@ -44,13 +44,25 @@ func (o *Orchestrator) diagnoseSchemaFailure(ctx context.Context, table, schema,
 	driver.EmitDiagnosis(diagnosis)
 }
 
-// splicedFix is the outcome of translating one failing expression and
-// re-rendering the table with it overridden.
-type splicedFix struct {
+const maxAIExpressionFixesPerObject = 10
+
+type expressionFixSuggester interface {
+	SuggestExpressionFix(context.Context, driver.FixRequest) (*driver.ExpressionFix, error)
+}
+
+// splicedExpressionFix records one AI-authored expression that was validated
+// and spliced into an otherwise deterministic object render.
+type splicedExpressionFix struct {
 	exprErr      *driver.ExpressionRenderError
 	fix          *driver.ExpressionFix
-	ddl          string // SMT's deterministic DDL with the one expression spliced
-	classMatched bool   // deterministic class-equivalence verdict
+	classMatched bool // deterministic class-equivalence verdict
+}
+
+// splicedFix is the outcome of translating one or more failing expressions and
+// re-rendering the object with those expressions overridden.
+type splicedFix struct {
+	expressions []splicedExpressionFix
+	ddl         string // SMT's deterministic DDL with the expression overrides spliced
 }
 
 // handleRenderFailure runs the failure advisories for a single-table render
@@ -66,8 +78,7 @@ func (o *Orchestrator) handleRenderFailure(ctx context.Context, runID, operation
 	}
 	o.diagnoseSchemaFailure(ctx, t.Name, t.Schema, operation, cause)
 
-	// Only do the (one) AI splice call if a suggestion or apply is actually
-	// requested.
+	// Only do AI splice calls if a suggestion or apply is actually requested.
 	if !aiSuggestFixesEnabled(o.config) && !o.opts.ApplySuggested {
 		return "", false
 	}
@@ -82,24 +93,24 @@ func (o *Orchestrator) handleRenderFailure(ctx context.Context, runID, operation
 		return "", false
 	}
 
-	verdict := "OK: expression class matches source"
-	if !sf.classMatched {
-		verdict = "REVIEW: class NOT mechanically confirmed"
+	var markers strings.Builder
+	for _, expr := range sf.expressions {
+		verdict := expressionFixVerdict(expr.classMatched)
+		logging.Warn("APPLYING AI-ASSISTED FIX (--apply-suggested): table %s, %s %s:  %s -> %s  [%s]. This expression was authored by an AI model.",
+			oneLine(t.Name), oneLine(expr.exprErr.Kind), oneLine(expr.exprErr.Column), oneLine(expr.exprErr.SourceExpr), oneLine(expr.fix.Expression), verdict)
+		fmt.Fprintf(&markers, "-- AI-ASSISTED FIX (--apply-suggested): %s %s  %s -> %s  [%s]\n",
+			oneLine(expr.exprErr.Kind), oneLine(expr.exprErr.Column), oneLine(expr.exprErr.SourceExpr), oneLine(expr.fix.Expression), verdict)
 	}
-	logging.Warn("APPLYING AI-ASSISTED FIX (--apply-suggested): table %s, %s %s:  %s -> %s  [%s]. This expression was authored by an AI model.",
-		oneLine(t.Name), oneLine(sf.exprErr.Kind), oneLine(sf.exprErr.Column), oneLine(sf.exprErr.SourceExpr), oneLine(sf.fix.Expression), verdict)
-	marker := fmt.Sprintf("-- AI-ASSISTED FIX (--apply-suggested): %s %s  %s -> %s  [%s]\n",
-		oneLine(sf.exprErr.Kind), oneLine(sf.exprErr.Column), oneLine(sf.exprErr.SourceExpr), oneLine(sf.fix.Expression), verdict)
-	return marker + sf.ddl, true
+	return markers.String() + sf.ddl, true
 }
 
-// spliceFix attempts the AI splice for a single-expression render failure:
-// translate the one failing expression (a column DEFAULT or a CHECK predicate)
-// and re-render that object with it overridden, so everything but the one
-// expression stays SMT's deterministic output. ok=false (debug-logged) when the
-// failure isn't a single splice-able expression, no provider is available, the
-// AI expression is malformed, or the re-render fails. Performs exactly one AI
-// call.
+// spliceFix attempts the AI splice loop for structured expression render
+// failures: translate the failing expression (a column DEFAULT or a CHECK
+// predicate), re-render that object with the expression overridden, and repeat
+// while the same object exposes another spliceable expression failure. Everything
+// outside the overridden expressions stays SMT's deterministic output. The loop
+// is bounded by the number of expression-bearing objects on the table, capped at
+// maxAIExpressionFixesPerObject, and aborts if the same expression fails twice.
 func (o *Orchestrator) spliceFix(ctx context.Context, renderer createDDLRenderer, t *driver.Table, cause error) (*splicedFix, bool) {
 	if o.config == nil || cause == nil || t == nil {
 		return nil, false
@@ -109,79 +120,96 @@ func (o *Orchestrator) spliceFix(ctx context.Context, renderer createDDLRenderer
 		return nil, false // not a single splice-able expression — diagnosis-only
 	}
 
-	// Locate the failing object and capture the source column type (default only).
-	colIdx, chkIdx, colType := -1, -1, ""
-	switch exprErr.Kind {
-	case "default":
-		for i := range t.Columns {
-			if t.Columns[i].Name == exprErr.Column {
-				colIdx = i
-				colType = t.Columns[i].DataType
-				break
-			}
-		}
-		if colIdx < 0 {
-			return nil, false
-		}
-	case "check":
-		for i := range t.CheckConstraints {
-			if t.CheckConstraints[i].Name == exprErr.Column {
-				chkIdx = i
-				break
-			}
-		}
-		if chkIdx < 0 {
-			return nil, false
-		}
-	}
-
-	suggester := o.errorDiagnoser()
+	suggester := o.expressionFixSuggester()
 	if suggester == nil {
 		return nil, false
 	}
-	fix, err := suggester.SuggestExpressionFix(ctx, driver.FixRequest{
-		Kind:          exprErr.Kind,
-		SourceExpr:    exprErr.SourceExpr,
-		ColumnName:    exprErr.Column,
-		ColumnType:    colType,
-		SourceDialect: canonicalDBType(o.config.Source.Type),
-		TargetDialect: canonicalDBType(o.config.Target.Type),
-	})
-	if err != nil {
-		logging.Debug("AI expression fix unavailable: %v", err)
-		return nil, false
-	}
-	// Structural guard: a malformed expression must not be spliced verbatim
-	// (it could inject extra columns/statements into the DDL).
-	if err := driver.ValidateTargetExpression(fix.Expression); err != nil {
-		logging.Debug("AI expression fix rejected (not a single value expression): %v", err)
-		return nil, false
-	}
 
-	// Re-render the affected object deterministically with ONLY the failing
-	// expression overridden by the AI translation.
-	var ddl string
-	var rerr error
-	classMatched := false
-	switch exprErr.Kind {
-	case "default":
-		spliced := *t
-		spliced.Columns = append([]driver.Column(nil), t.Columns...)
-		spliced.Columns[colIdx].DefaultExpressionOverride = fix.Expression
-		ddl, rerr = renderer.renderTable(ctx, &spliced)
-		classMatched = driver.DefaultExpressionsEquivalent(exprErr.SourceExpr, fix.Expression)
-	case "check":
-		chk := t.CheckConstraints[chkIdx]
-		chk.DefinitionOverride = fix.Expression
-		ddl, rerr = renderer.renderCheck(ctx, t, &chk)
-		// No deterministic class check for a boolean CHECK predicate — always
-		// flagged for review.
+	spliced := cloneTableForExpressionSplice(t)
+	mode := exprErr.Kind
+	limit := expressionFixLimit(&spliced)
+	seen := map[string]bool{}
+	fixes := make([]splicedExpressionFix, 0, limit)
+
+	for {
+		if exprErr.Kind != "default" && exprErr.Kind != "check" {
+			logging.Warn("AI-assisted expression repair aborted for table %s: unsupported expression kind %q after %d fix(es)",
+				oneLine(t.Name), oneLine(exprErr.Kind), len(fixes))
+			return nil, false
+		}
+		if exprErr.Kind != mode {
+			logging.Warn("AI-assisted expression repair aborted for table %s: re-render switched from %s to %s after %d fix(es)",
+				oneLine(t.Name), oneLine(mode), oneLine(exprErr.Kind), len(fixes))
+			return nil, false
+		}
+		if len(fixes) >= limit {
+			logging.Warn("AI-assisted expression repair aborted for table %s: reached safety limit of %d expression fix(es)",
+				oneLine(t.Name), limit)
+			return nil, false
+		}
+		key := expressionFailureKey(exprErr)
+		if seen[key] {
+			logging.Warn("AI-assisted expression repair aborted for table %s: repeated %s expression failure for %s",
+				oneLine(t.Name), oneLine(exprErr.Kind), oneLine(exprErr.Column))
+			return nil, false
+		}
+		seen[key] = true
+
+		colIdx, chkIdx, colType, ok := expressionLocation(&spliced, exprErr)
+		if !ok {
+			logging.Debug("AI expression fix unavailable: failed %s %q not found on table %s",
+				exprErr.Kind, exprErr.Column, t.Name)
+			return nil, false
+		}
+
+		fix, err := suggester.SuggestExpressionFix(ctx, driver.FixRequest{
+			Kind:          exprErr.Kind,
+			SourceExpr:    exprErr.SourceExpr,
+			ColumnName:    exprErr.Column,
+			ColumnType:    colType,
+			SourceDialect: canonicalDBType(o.config.Source.Type),
+			TargetDialect: canonicalDBType(o.config.Target.Type),
+		})
+		if err != nil {
+			logging.Debug("AI expression fix unavailable: %v", err)
+			return nil, false
+		}
+		// Structural guard: a malformed expression must not be spliced verbatim
+		// (it could inject extra columns/statements into the DDL).
+		if err := driver.ValidateTargetExpression(fix.Expression); err != nil {
+			logging.Debug("AI expression fix rejected (not a single value expression): %v", err)
+			return nil, false
+		}
+
+		fixRecord := splicedExpressionFix{exprErr: exprErr, fix: fix}
+		var ddl string
+		var rerr error
+		switch exprErr.Kind {
+		case "default":
+			spliced.Columns[colIdx].DefaultExpressionOverride = strings.TrimSpace(fix.Expression)
+			ddl, rerr = renderer.renderTable(ctx, &spliced)
+			fixRecord.classMatched = driver.DefaultExpressionsEquivalent(exprErr.SourceExpr, fix.Expression)
+		case "check":
+			spliced.CheckConstraints[chkIdx].DefinitionOverride = strings.TrimSpace(fix.Expression)
+			chk := spliced.CheckConstraints[chkIdx]
+			ddl, rerr = renderer.renderCheck(ctx, &spliced, &chk)
+			// No deterministic class check for a boolean CHECK predicate — always
+			// flagged for review.
+		}
+
+		fixes = append(fixes, fixRecord)
+		if rerr == nil {
+			return &splicedFix{expressions: fixes, ddl: ddl}, true
+		}
+		var next *driver.ExpressionRenderError
+		if !errors.As(rerr, &next) {
+			logging.Warn("AI-assisted expression repair aborted for table %s: re-render failed after %d fix(es): %v",
+				oneLine(t.Name), len(fixes), rerr)
+			return nil, false
+		}
+		logging.Debug("re-render with %d AI expression fix(es) found another expression failure: %v", len(fixes), rerr)
+		exprErr = next
 	}
-	if rerr != nil {
-		logging.Debug("re-render with AI expression failed: %v", rerr)
-		return nil, false
-	}
-	return &splicedFix{exprErr: exprErr, fix: fix, ddl: ddl, classMatched: classMatched}, true
 }
 
 // writeSuggestion writes the AI-assisted suggestion to schema.suggested.sql,
@@ -189,49 +217,51 @@ func (o *Orchestrator) spliceFix(ctx context.Context, renderer createDDLRenderer
 // schema.sql and the run still fails — review-only.
 func (o *Orchestrator) writeSuggestion(runID, table string, sf *splicedFix) {
 	o.suggestOnce.Do(func() {
-		content := renderSuggestionFile(table, sf.exprErr, sf.fix, sf.ddl, sf.classMatched)
+		content := renderSuggestionFile(table, sf)
 		if werr := o.writeSQLArtifact(runID, "schema.suggested.sql", content); werr != nil {
 			logging.Debug("writing schema.suggested.sql: %v", werr)
 			return
 		}
-		verdict := "review the translated expression (class not mechanically confirmed)"
-		if sf.classMatched {
-			verdict = "translated expression matches the source class"
+		verdict := "review translated expression(s) that were not mechanically confirmed"
+		if allExpressionFixClassesMatched(sf) {
+			verdict = "translated expression(s) match the source class"
 		}
 		logging.Warn("AI-assisted fix written to %s — %s. Review before applying; SMT did NOT apply it (use --apply-suggested to apply).",
 			filepath.Join(o.ddlArtifactDir(runID), "schema.suggested.sql"), verdict)
 	})
 }
 
-// renderSuggestionFile wraps SMT's deterministic DDL (with one AI-translated
-// expression spliced in) in a banner that makes the provenance — which single
-// expression came from the AI — unmistakable.
-func renderSuggestionFile(table string, exprErr *driver.ExpressionRenderError, fix *driver.ExpressionFix, ddl string, classMatched bool) string {
+// renderSuggestionFile wraps SMT's deterministic DDL (with AI-translated
+// expression(s) spliced in) in a banner that makes provenance unmistakable.
+func renderSuggestionFile(table string, sf *splicedFix) string {
 	var b strings.Builder
 	b.WriteString("-- ============================================================\n")
 	b.WriteString("-- AI-ASSISTED FIX · review before applying\n")
 	b.WriteString("--\n")
-	b.WriteString("-- This is SMT's deterministic DDL with ONE expression translated by\n")
-	b.WriteString("-- an AI model. SMT did not and will not apply it automatically.\n")
+	b.WriteString("-- This is SMT's deterministic DDL with the expression(s) below\n")
+	b.WriteString("-- translated by an AI model. SMT did not and will not apply it\n")
+	b.WriteString("-- automatically.\n")
 	b.WriteString(fmt.Sprintf("-- Table:  %s\n", oneLine(table)))
-	b.WriteString(fmt.Sprintf("-- Object: %s (%s)\n", oneLine(exprErr.Column), oneLine(exprErr.Kind)))
-	b.WriteString(fmt.Sprintf("-- AI-translated: %s  ->  %s\n", oneLine(exprErr.SourceExpr), oneLine(fix.Expression)))
-	if strings.TrimSpace(fix.Explanation) != "" {
-		b.WriteString("-- Note: " + oneLine(fix.Explanation) + "\n")
+	for i, expr := range sf.expressions {
+		b.WriteString(fmt.Sprintf("-- Object %d: %s (%s)\n", i+1, oneLine(expr.exprErr.Column), oneLine(expr.exprErr.Kind)))
+		b.WriteString(fmt.Sprintf("-- AI-translated %d: %s  ->  %s\n", i+1, oneLine(expr.exprErr.SourceExpr), oneLine(expr.fix.Expression)))
+		if strings.TrimSpace(expr.fix.Explanation) != "" {
+			b.WriteString(fmt.Sprintf("-- Note %d: %s\n", i+1, oneLine(expr.fix.Explanation)))
+		}
+		b.WriteString(fmt.Sprintf("-- Confidence %d: %s (AI)\n", i+1, expr.fix.Confidence))
 	}
-	b.WriteString(fmt.Sprintf("-- Confidence: %s (AI)\n", fix.Confidence))
 	b.WriteString("--\n")
 	b.WriteString("-- Verification (deterministic): every column type, length, nullability,\n")
-	b.WriteString("-- identity, and all other defaults/constraints are SMT's deterministic\n")
-	b.WriteString("-- output — only the one expression above is AI-authored.\n")
-	if classMatched {
-		b.WriteString("--   [OK] the translated expression matches the source class.\n")
+	b.WriteString("-- identity, and all defaults/constraints not listed above are SMT's\n")
+	b.WriteString("-- deterministic output — only the expression(s) above are AI-authored.\n")
+	if allExpressionFixClassesMatched(sf) {
+		b.WriteString("--   [OK] the translated expression(s) match the source class.\n")
 	} else {
-		b.WriteString("--   [REVIEW] SMT could not mechanically confirm the translated\n")
-		b.WriteString("--   expression is equivalent to the source — review it before applying.\n")
+		b.WriteString("--   [REVIEW] SMT could not mechanically confirm every translated\n")
+		b.WriteString("--   expression is equivalent to the source — review before applying.\n")
 	}
 	b.WriteString("-- ============================================================\n\n")
-	b.WriteString(strings.TrimSpace(ddl))
+	b.WriteString(strings.TrimSpace(sf.ddl))
 	b.WriteString(";\n")
 	return b.String()
 }
@@ -240,6 +270,86 @@ func renderSuggestionFile(table string, exprErr *driver.ExpressionRenderError, f
 // AI/source string can't break out of a single-line "-- " banner comment.
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+func expressionFixVerdict(classMatched bool) string {
+	if classMatched {
+		return "OK: expression class matches source"
+	}
+	return "REVIEW: class NOT mechanically confirmed"
+}
+
+func allExpressionFixClassesMatched(sf *splicedFix) bool {
+	if sf == nil || len(sf.expressions) == 0 {
+		return false
+	}
+	for _, expr := range sf.expressions {
+		if !expr.classMatched {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneTableForExpressionSplice(t *driver.Table) driver.Table {
+	spliced := *t
+	spliced.Columns = append([]driver.Column(nil), t.Columns...)
+	spliced.CheckConstraints = append([]driver.CheckConstraint(nil), t.CheckConstraints...)
+	return spliced
+}
+
+func expressionFixLimit(t *driver.Table) int {
+	n := 0
+	for _, col := range t.Columns {
+		if strings.TrimSpace(col.DefaultExpression) != "" {
+			n++
+		}
+	}
+	for _, chk := range t.CheckConstraints {
+		if strings.TrimSpace(chk.Definition) != "" {
+			n++
+		}
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > maxAIExpressionFixesPerObject {
+		return maxAIExpressionFixesPerObject
+	}
+	return n
+}
+
+func expressionLocation(t *driver.Table, exprErr *driver.ExpressionRenderError) (colIdx, chkIdx int, colType string, ok bool) {
+	colIdx, chkIdx = -1, -1
+	switch exprErr.Kind {
+	case "default":
+		for i := range t.Columns {
+			if t.Columns[i].Name == exprErr.Column {
+				return i, -1, t.Columns[i].DataType, true
+			}
+		}
+	case "check":
+		for i := range t.CheckConstraints {
+			if t.CheckConstraints[i].Name == exprErr.Column {
+				return -1, i, "", true
+			}
+		}
+	}
+	return colIdx, chkIdx, "", false
+}
+
+func expressionFailureKey(exprErr *driver.ExpressionRenderError) string {
+	if exprErr == nil {
+		return ""
+	}
+	return exprErr.Kind + "\x00" + exprErr.Column
+}
+
+func (o *Orchestrator) expressionFixSuggester() expressionFixSuggester {
+	if o.fixSuggester != nil {
+		return o.fixSuggester
+	}
+	return o.errorDiagnoser()
 }
 
 // errorDiagnoser lazily resolves the AI failure-diagnosis advisor from the

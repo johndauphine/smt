@@ -38,8 +38,8 @@ type Options struct {
 	// SourceOnly skips the target connection (used by inspection commands).
 	SourceOnly bool
 
-	// ApplySuggested makes a single-expression render failure splice the AI
-	// fix and continue (instead of aborting), so the AI-assisted DDL becomes
+	// ApplySuggested makes structured expression render failures splice AI
+	// fixes and continue (instead of aborting), so the AI-assisted DDL becomes
 	// part of the plan. Explicit, off by default, and loud — the only path by
 	// which AI-authored content reaches schema.sql / the applied DDL (#134).
 	ApplySuggested bool
@@ -63,6 +63,7 @@ type Orchestrator struct {
 	// (ai_review.diagnose_failures), resolved lazily on the first failure.
 	diagnoser     *driver.AIErrorDiagnoser
 	diagnoserOnce sync.Once
+	fixSuggester  expressionFixSuggester
 
 	// suggestOnce guards writing schema.suggested.sql so concurrent table
 	// failures produce a single suggestion artifact.
