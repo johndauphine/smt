@@ -32,6 +32,14 @@ type Statement struct {
 	Object string        `json:"object,omitempty"`
 }
 
+// UnsupportedChange is a schema delta SMT can identify deterministically but
+// does not know how to render safely as DDL yet.
+type UnsupportedChange struct {
+	Table       string `json:"table,omitempty"`
+	Description string `json:"description"`
+	Reason      string `json:"reason"`
+}
+
 // StatementKind classifies a plan statement for execution-time gating.
 type StatementKind string
 
@@ -46,11 +54,12 @@ const (
 // Plan is the ordered list of statements that, applied in order, brings
 // the target schema in line with the current source schema.
 type Plan struct {
-	Statements []Statement `json:"statements"`
+	Statements  []Statement         `json:"statements"`
+	Unsupported []UnsupportedChange `json:"unsupported,omitempty"`
 }
 
 // IsEmpty returns true if the plan has no statements.
-func (p Plan) IsEmpty() bool { return len(p.Statements) == 0 }
+func (p Plan) IsEmpty() bool { return len(p.Statements) == 0 && len(p.Unsupported) == 0 }
 
 // SQL returns the plan as a single semicolon-terminated SQL script with
 // one comment per statement showing what it does and the classified risk.
@@ -68,6 +77,16 @@ func (p Plan) SQL() string {
 		b.WriteString(s.SQL)
 		b.WriteString(";\n\n")
 	}
+	for _, u := range p.Unsupported {
+		fmt.Fprintf(&b, "-- [unsupported] %s\n", u.Description)
+		if u.Table != "" {
+			fmt.Fprintf(&b, "-- table: %s\n", u.Table)
+		}
+		if u.Reason != "" {
+			fmt.Fprintf(&b, "-- reason: %s\n", u.Reason)
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 
@@ -84,7 +103,7 @@ func (p Plan) FilterByRisk(maxRisk Risk) Plan {
 		RiskUnknown:       3,
 	}
 	limit := rank[maxRisk]
-	out := Plan{}
+	out := Plan{Unsupported: append([]UnsupportedChange(nil), p.Unsupported...)}
 	for _, s := range p.Statements {
 		if rank[s.Risk] <= limit {
 			out.Statements = append(out.Statements, s)

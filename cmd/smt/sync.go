@@ -2,18 +2,19 @@ package main
 
 // `smt snapshot` and `smt sync` — the schema-diff feature.
 //
-// snapshot: extract the current source schema, store it in the SMT state DB
-//   so future `sync` runs can diff against it.
+// snapshot: extract the current source schema and store it in the SMT state DB
+//   as a source-schema baseline/history artifact.
 //
-// sync: extract the current source schema, load the latest snapshot, render
-//   the structural diff as ALTER statements, and either write the SQL to a
-//   file (default) or apply it against the target (--apply).
+// sync: extract the current source schema, introspect the live target schema,
+//   render the structural diff as ALTER statements, and either write the SQL
+//   to a file (default) or apply it against the target (--apply).
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/urfave/cli/v2"
@@ -22,6 +23,7 @@ import (
 	"smt/internal/driver"
 	"smt/internal/logging"
 	"smt/internal/orchestrator"
+	"smt/internal/pool"
 	"smt/internal/schemadiff"
 )
 
@@ -99,7 +101,7 @@ func runSnapshot(c *cli.Context) error {
 func syncCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "sync",
-		Usage: "Diff source schema against last snapshot and (optionally) apply ALTERs",
+		Usage: "Diff source schema against the live target and (optionally) apply ALTERs",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{Name: "apply", Usage: "Execute ALTERs against the target (default: emit SQL for review)"},
 			&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Value: "migration.sql", Usage: "Output file when not applying"},
@@ -117,8 +119,7 @@ func runSync(c *cli.Context) error {
 	}
 
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
-		StateFile:  c.String("state-file"),
-		SourceOnly: !c.Bool("apply"),
+		StateFile: c.String("state-file"),
 	})
 	if err != nil {
 		return err
@@ -129,14 +130,21 @@ func runSync(c *cli.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	state, ok := orch.State().(*checkpoint.State)
-	if !ok {
-		return fmt.Errorf("sync requires the SQLite state backend")
+	var state *checkpoint.State
+	if c.Bool("save-snapshot") {
+		var ok bool
+		state, ok = orch.State().(*checkpoint.State)
+		if !ok {
+			return fmt.Errorf("saving snapshots requires the SQLite state backend")
+		}
 	}
 
-	prevSnap, err := loadPreviousSnapshot(state, cfg.Source.Type, cfg.Source.Schema)
-	if err != nil {
-		return err
+	sourceDialect := driver.Canonicalize(cfg.Source.Type)
+	targetDialect := driver.Canonicalize(cfg.Target.Type)
+	opts := schemadiff.DriftOptions{
+		CompareIndexes:     cfg.Migration.CreateIndexes,
+		CompareForeignKeys: cfg.Migration.CreateForeignKeys,
+		CompareChecks:      cfg.Migration.CreateCheckConstraints,
 	}
 
 	logging.Info("extracting current source schema")
@@ -156,34 +164,46 @@ func runSync(c *cli.Context) error {
 		Tables:     currTables,
 	}
 
-	diff := schemadiff.Compute(prevSnap, currSnap)
-	if diff.IsEmpty() {
-		fmt.Println("No schema changes since last snapshot.")
-		return nil
+	norm := func(name string) string { return driver.NormalizeIdentifier(targetDialect, name) }
+	allSourceNorm := make(map[string]bool, len(currTables))
+	for _, t := range currTables {
+		allSourceNorm[strings.ToLower(norm(t.Name))] = true
+	}
+	desired := filterDesiredScope(currTables, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables)
+	desired = schemadiff.NormalizeIdentifiers(desired, norm)
+	desired = schemadiff.RetargetSchema(desired, cfg.Target.Schema)
+
+	logging.Info("introspecting target schema (%s)", cfg.Target.Schema)
+	targetReader, err := pool.NewSourcePool(targetAsSource(cfg), 4)
+	if err != nil {
+		return fmt.Errorf("opening target reader: %w", err)
+	}
+	defer targetReader.Close()
+	existing, err := targetReader.ExtractSchema(ctx, cfg.Target.Schema)
+	if err != nil {
+		return fmt.Errorf("introspecting target: %w", err)
+	}
+	if len(cfg.Migration.IncludeTables) > 0 || len(cfg.Migration.ExcludeTables) > 0 {
+		existing = filterToManagedSet(existing, desired, allSourceNorm)
+	}
+	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
+		return err
 	}
 
-	// Re-write source-original identifiers (e.g. MSSQL "Posts") to whatever
-	// the target dialect actually uses on disk (PG lowercases to "posts").
-	// Without this the renderer emits ALTERs against names the target doesn't have.
-	// See driver.NormalizeIdentifier for the per-dialect rules.
-	diff = diff.Normalize(func(name string) string {
-		return driver.NormalizeIdentifier(cfg.Target.Type, name)
-	})
-
-	// Point every table in the diff at the target schema. The diff carries
-	// source-side metadata in Table.Schema (e.g. the MySQL database name),
-	// and renderers use that for the ALTER TABLE qualifier unless we override
-	// it. Without this, MySQL→MSSQL produces ALTER TABLE [smt_src_test].[Posts]
-	// against an MSSQL target whose schema is dbo. See issue #4.
-	diff = diff.WithTargetSchema(cfg.Target.Schema)
+	diff := schemadiff.ComputeLiveDiff(desired, existing, sourceDialect, targetDialect, opts)
+	if diff.IsEmpty() {
+		fmt.Println("No schema drift: target matches the source-derived schema.")
+		return nil
+	}
 
 	fmt.Printf("Diff: %s\n", diff.Summary())
 
 	logging.Info("rendering diff deterministically as %s SQL...", cfg.Target.Type)
 	plan, err := schemadiff.RenderDeterministicWithOptions(diff, schemadiff.RenderOptions{
 		TargetSchema:      cfg.Target.Schema,
-		TargetDialect:     cfg.Target.Type,
-		SourceDialect:     cfg.Source.Type,
+		TargetDialect:     targetDialect,
+		SourceDialect:     sourceDialect,
+		ExistingDialect:   targetDialect,
 		UnknownTypePolicy: cfg.SchemaGeneration.UnknownTypePolicy,
 	})
 	if err != nil {
@@ -193,6 +213,7 @@ func runSync(c *cli.Context) error {
 		fmt.Println("Renderer returned no statements; nothing to apply.")
 		return nil
 	}
+	printPlanSummary(plan)
 
 	if !c.Bool("apply") {
 		out := c.String("out")
@@ -202,6 +223,11 @@ func runSync(c *cli.Context) error {
 		fmt.Printf("%d statement(s) written to %s for review.\n", len(plan.Statements), out)
 		fmt.Println("Run again with --apply to execute against the target.")
 		return nil
+	}
+
+	if len(plan.Unsupported) > 0 {
+		printUnsupportedChanges(plan.Unsupported)
+		return fmt.Errorf("refusing to apply plan with unsupported change(s)")
 	}
 
 	if !c.Bool("allow-data-loss") {
@@ -216,7 +242,7 @@ func runSync(c *cli.Context) error {
 	if err := applyPlan(ctx, orch.Target(), plan); err != nil {
 		return err
 	}
-	fmt.Printf("Applied %d statement(s) successfully.\n", len(plan.Statements))
+	fmt.Printf("Applied %d statement(s) successfully; skipped 0 unsupported change(s).\n", len(plan.Statements))
 
 	if c.Bool("save-snapshot") {
 		payload, _ := json.Marshal(currSnap)
@@ -230,10 +256,8 @@ func runSync(c *cli.Context) error {
 }
 
 // loadPreviousSnapshot returns the most recent stored snapshot for this
-// (sourceType, schema). If none exists, an empty snapshot is returned —
-// in that case `sync` would treat every current table as new, which is
-// usually not what the operator wants, so we error out and tell them to
-// run `snapshot` first.
+// (sourceType, schema). Kept for snapshot-history callers and tests; live
+// target sync planning does not require a previous snapshot.
 func loadPreviousSnapshot(state *checkpoint.State, sourceType, schema string) (schemadiff.Snapshot, error) {
 	snapRow, err := state.GetLatestSnapshot(sourceType, schema)
 	if err != nil {
@@ -294,4 +318,39 @@ func applyPlan(ctx context.Context, tgt sqlExecutor, plan schemadiff.Plan) error
 		}
 	}
 	return nil
+}
+
+func printPlanSummary(plan schemadiff.Plan) {
+	var safe, blocking, rebuild, destructive int
+	for _, stmt := range plan.Statements {
+		switch stmt.Risk {
+		case schemadiff.RiskSafe:
+			safe++
+		case schemadiff.RiskBlocking:
+			blocking++
+		case schemadiff.RiskRebuildNeeded:
+			rebuild++
+		case schemadiff.RiskDataLoss:
+			destructive++
+		}
+	}
+	fmt.Printf("Plan: %d statement(s): %d safe, %d blocking, %d rebuild, %d destructive; %d unsupported change(s).\n",
+		len(plan.Statements), safe, blocking, rebuild, destructive, len(plan.Unsupported))
+}
+
+func printUnsupportedChanges(changes []schemadiff.UnsupportedChange) {
+	if len(changes) == 0 {
+		return
+	}
+	fmt.Printf("Unsupported change(s) skipped: %d\n", len(changes))
+	for _, change := range changes {
+		parts := []string{change.Description}
+		if strings.TrimSpace(change.Table) != "" {
+			parts = append(parts, "table "+change.Table)
+		}
+		if strings.TrimSpace(change.Reason) != "" {
+			parts = append(parts, change.Reason)
+		}
+		fmt.Printf("  - %s\n", strings.Join(parts, " - "))
+	}
 }

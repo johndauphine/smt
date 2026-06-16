@@ -20,9 +20,10 @@ type Diff struct {
 	PrevCapturedAt time.Time `json:"prev_captured_at"`
 	CurrCapturedAt time.Time `json:"curr_captured_at"`
 
-	AddedTables   []driver.Table `json:"added_tables"`
-	RemovedTables []driver.Table `json:"removed_tables"`
-	ChangedTables []TableDiff    `json:"changed_tables"`
+	AddedTables   []driver.Table      `json:"added_tables"`
+	RemovedTables []driver.Table      `json:"removed_tables"`
+	ChangedTables []TableDiff         `json:"changed_tables"`
+	Unsupported   []UnsupportedChange `json:"unsupported,omitempty"`
 }
 
 // TableDiff captures all per-table changes in one place.
@@ -48,14 +49,18 @@ type TableDiff struct {
 // ColumnChange describes a column that exists in both snapshots but with
 // different attributes (type, nullability, length, etc.).
 type ColumnChange struct {
-	Name string        `json:"name"`
-	Old  driver.Column `json:"old"`
-	New  driver.Column `json:"new"`
+	Name     string        `json:"name"`
+	Old      driver.Column `json:"old"`
+	New      driver.Column `json:"new"`
+	Criteria []string      `json:"criteria,omitempty"`
 }
 
 // IsEmpty returns true if the diff would produce no DDL.
 func (d Diff) IsEmpty() bool {
 	if len(d.AddedTables) > 0 || len(d.RemovedTables) > 0 {
+		return false
+	}
+	if len(d.Unsupported) > 0 {
 		return false
 	}
 	for _, td := range d.ChangedTables {
@@ -85,14 +90,17 @@ func (d Diff) Summary() string {
 		return "no schema changes"
 	}
 	var b strings.Builder
-	if len(d.AddedTables) > 0 {
-		fmt.Fprintf(&b, "%d table(s) added, ", len(d.AddedTables))
+	if n := len(d.AddedTables); n > 0 {
+		fmt.Fprintf(&b, "%d table(s) added, ", n)
 	}
-	if len(d.RemovedTables) > 0 {
-		fmt.Fprintf(&b, "%d table(s) removed, ", len(d.RemovedTables))
+	if n := len(d.RemovedTables); n > 0 {
+		fmt.Fprintf(&b, "%d table(s) removed, ", n)
 	}
-	if len(d.ChangedTables) > 0 {
-		fmt.Fprintf(&b, "%d table(s) changed", len(d.ChangedTables))
+	if n := len(d.ChangedTables); n > 0 {
+		fmt.Fprintf(&b, "%d table(s) changed, ", n)
+	}
+	if n := len(d.Unsupported); n > 0 {
+		fmt.Fprintf(&b, "%d unsupported change(s), ", n)
 	}
 	return strings.TrimSuffix(strings.TrimSpace(b.String()), ",")
 }
@@ -111,6 +119,7 @@ func (d Diff) Normalize(norm func(string) string) Diff {
 	out := Diff{
 		PrevCapturedAt: d.PrevCapturedAt,
 		CurrCapturedAt: d.CurrCapturedAt,
+		Unsupported:    append([]UnsupportedChange(nil), d.Unsupported...),
 	}
 	for _, t := range d.AddedTables {
 		out.AddedTables = append(out.AddedTables, normalizeTable(t, norm))
@@ -144,6 +153,7 @@ func (d Diff) WithTargetSchema(targetSchema string) Diff {
 	out := Diff{
 		PrevCapturedAt: d.PrevCapturedAt,
 		CurrCapturedAt: d.CurrCapturedAt,
+		Unsupported:    append([]UnsupportedChange(nil), d.Unsupported...),
 	}
 	for _, t := range d.AddedTables {
 		retargetTable(&t, targetSchema)
