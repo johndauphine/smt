@@ -18,11 +18,12 @@ const (
 
 // Statement is one DDL statement plus its metadata.
 type Statement struct {
-	Table       string `json:"table"`
-	Description string `json:"description"`
-	SQL         string `json:"sql"`
-	Risk        Risk   `json:"risk"`
-	RiskNotes   string `json:"risk_notes,omitempty"`
+	Table       string   `json:"table"`
+	Description string   `json:"description"`
+	SQL         string   `json:"sql"`
+	Risk        Risk     `json:"risk"`
+	RiskNotes   string   `json:"risk_notes,omitempty"`
+	Warnings    []string `json:"warnings,omitempty"`
 	// Kind and Object classify the created object so `create --apply` can
 	// gate execution on target existence (idempotent re-runs, #87). Object
 	// is the target-normalized object name (table/index/FK/check). Sync-
@@ -60,6 +61,9 @@ func (p Plan) SQL() string {
 		fmt.Fprintf(&b, "-- [%s] %s\n", s.Risk, s.Description)
 		if s.RiskNotes != "" {
 			fmt.Fprintf(&b, "-- note: %s\n", s.RiskNotes)
+		}
+		for _, warning := range s.Warnings {
+			fmt.Fprintf(&b, "-- warning: %s\n", warning)
 		}
 		b.WriteString(s.SQL)
 		b.WriteString(";\n\n")

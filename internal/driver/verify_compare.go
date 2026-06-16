@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"smt/internal/canonical"
 )
 
 // fspNowArgPattern matches a bare function name with a single numeric
@@ -32,6 +34,8 @@ var fspNowArgPattern = regexp.MustCompile(`^([a-z_]+)\([0-9]+\)$`)
 // CONVERT(date, GETDATE()) default classify by its result (a date) rather than
 // the inner now-function, mirroring a PG <expr>::date cast.
 var convertTemporalRE = regexp.MustCompile(`(?i)^convert\(\s*[\["]?\s*(date|time)\s*[\]"]?\s*,\s*(.+?)\s*\)$`)
+
+var renderedTypeArgsRE = regexp.MustCompile(`\([^)]*\)`)
 
 // ColumnDelta records a single per-(column, criterion) mismatch from
 // CompareColumns. Format() renders it in the same wire shape #53's prompt
@@ -48,9 +52,9 @@ func (d ColumnDelta) String() string {
 	return fmt.Sprintf("%s: %s — %s vs %s", d.Column, d.Criterion, d.SourceVal, d.TargetVal)
 }
 
-// CompareColumns runs the six per-column criteria deterministically. Returns
+// CompareColumns runs the per-column criteria deterministically. Returns
 // an empty slice when the parsed target columns preserve the source under
-// every criterion the harness applies (max_length, precision, scale,
+// every criterion the harness applies (type, max_length, precision, scale,
 // nullability, identity, TZ class, default class). Caller's responsibility:
 // pass *parsed* target columns whose attributes faithfully reflect the
 // proposed DDL — i.e. the AI's parse step must round-trip the DDL into a
@@ -115,13 +119,70 @@ func CompareColumns(src, tgt []Column, srcDialect, tgtDialect string) []ColumnDe
 			}
 			fns = append(fns, cmpDefaultClass)
 		}
+		var columnDeltas []ColumnDelta
 		for _, fn := range fns {
 			if d := fn(s, t, srcDialect, tgtDialect); d != nil {
+				deltas = append(deltas, *d)
+				columnDeltas = append(columnDeltas, *d)
+			}
+		}
+		if !sameFixedClass && !hasTypeShapeDelta(columnDeltas) {
+			if d := cmpCanonicalType(s, t, srcDialect, tgtDialect); d != nil {
 				deltas = append(deltas, *d)
 			}
 		}
 	}
 	return deltas
+}
+
+func hasTypeShapeDelta(ds []ColumnDelta) bool {
+	for _, d := range ds {
+		switch d.Criterion {
+		case "max_length", "precision", "scale", "tz_class":
+			return true
+		}
+	}
+	return false
+}
+
+func cmpCanonicalType(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
+	expected, ok := renderedCanonicalType(src, srcDialect, tgtDialect)
+	if !ok {
+		return nil
+	}
+	actual, ok := renderedCanonicalType(tgt, tgtDialect, tgtDialect)
+	if !ok {
+		return nil
+	}
+	if (src.IsComputed || tgt.IsComputed) && normalizeRenderedTypeBase(expected) == normalizeRenderedTypeBase(actual) {
+		return nil
+	}
+	if normalizeRenderedType(expected) == normalizeRenderedType(actual) {
+		return nil
+	}
+	return &ColumnDelta{
+		Column:    src.Name,
+		Criterion: "type",
+		SourceVal: expected,
+		TargetVal: actual,
+	}
+}
+
+func renderedCanonicalType(col Column, sourceDialect, targetDialect string) (string, bool) {
+	ct := canonical.ToCanonical(col.DataType, MetaOf(col), sourceDialect)
+	typ, err := canonical.FromCanonical(ct, targetDialect, canonical.RenderOpts{IsIdentity: col.IsIdentity})
+	if err != nil {
+		return "", false
+	}
+	return typ, true
+}
+
+func normalizeRenderedType(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(s))), " ")
+}
+
+func normalizeRenderedTypeBase(s string) string {
+	return strings.Join(strings.Fields(renderedTypeArgsRE.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), "")), " ")
 }
 
 // cmpMaxLength enforces criterion 1 (length): source max_length must round-

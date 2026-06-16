@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"smt/internal/canonical"
 	"smt/internal/ddl"
 	"smt/internal/driver"
 )
@@ -43,8 +44,9 @@ func RenderDeterministicWithOptions(diff Diff, opts RenderOptions) (Plan, error)
 }
 
 type deterministicRenderer struct {
-	target   string
-	renderer ddl.Renderer
+	target        string
+	sourceDialect string
+	renderer      ddl.Renderer
 }
 
 func newDeterministicRenderer(opts RenderOptions) (deterministicRenderer, error) {
@@ -53,7 +55,29 @@ func newDeterministicRenderer(opts RenderOptions) (deterministicRenderer, error)
 		return deterministicRenderer{}, err
 	}
 	r = r.WithSource(opts.SourceDialect)
-	return deterministicRenderer{target: r.Target(), renderer: r}, nil
+	return deterministicRenderer{target: r.Target(), sourceDialect: opts.SourceDialect, renderer: r}, nil
+}
+
+func (r deterministicRenderer) tableMappingWarnings(t driver.Table) []string {
+	var out []string
+	for _, col := range t.Columns {
+		out = append(out, r.columnMappingWarnings(col)...)
+	}
+	return out
+}
+
+func (r deterministicRenderer) columnMappingWarnings(col driver.Column) []string {
+	ct := canonical.ToCanonical(col.DataType, driver.MetaOf(col), r.sourceDialect)
+	targetType, warnings, err := canonical.FromCanonicalWithWarnings(
+		ct, r.target, canonical.RenderOpts{IsIdentity: col.IsIdentity})
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(warnings))
+	for _, warning := range warnings {
+		out = append(out, fmt.Sprintf("column %s (%s -> %s): %s", col.Name, col.DataType, targetType, warning.Reason))
+	}
+	return out
 }
 
 func (r deterministicRenderer) render(diff Diff) (Plan, error) {
@@ -220,6 +244,7 @@ func (r deterministicRenderer) renderAddedTableDefinition(plan *Plan, t driver.T
 		Description: fmt.Sprintf("create table %s", t.Name),
 		SQL:         sql,
 		Risk:        RiskSafe,
+		Warnings:    r.tableMappingWarnings(t),
 	})
 	return nil
 }
@@ -294,6 +319,7 @@ func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 			SQL:         sql,
 			Risk:        risk,
 			RiskNotes:   notes,
+			Warnings:    r.columnMappingWarnings(c),
 		})
 	}
 
@@ -372,6 +398,7 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 			SQL:         sql,
 			Risk:        RiskRebuildNeeded,
 			RiskNotes:   "type changes may rewrite the table and can fail if existing values cannot be cast",
+			Warnings:    r.columnMappingWarnings(cc.New),
 		})
 	}
 	if cc.Old.IsNullable != cc.New.IsNullable {

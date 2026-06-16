@@ -175,6 +175,35 @@ func TestRenderDeterministic_AddedColumnPostgres(t *testing.T) {
 	}
 }
 
+func TestRenderDeterministic_SQLIncludesMappingWarnings(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{{
+		Name: "users",
+		Curr: driver.Table{Name: "users", Columns: []driver.Column{{Name: "account_id", DataType: "bigint", IsUnsigned: true}}},
+		AddedColumns: []driver.Column{{
+			Name:       "account_id",
+			DataType:   "bigint",
+			IsUnsigned: true,
+			IsNullable: true,
+		}},
+	}}}
+	plan, err := RenderDeterministicWithOptions(d, RenderOptions{
+		TargetSchema:      "public",
+		TargetDialect:     "postgres",
+		SourceDialect:     "mysql",
+		UnknownTypePolicy: "fail",
+	})
+	if err != nil {
+		t.Fatalf("RenderDeterministicWithOptions: %v", err)
+	}
+	if len(plan.Statements) != 1 || len(plan.Statements[0].Warnings) == 0 {
+		t.Fatalf("expected mapping warning on added column statement, got %+v", plan.Statements)
+	}
+	if sql := plan.SQL(); !strings.Contains(sql, "-- warning: column account_id") ||
+		!strings.Contains(sql, "target has no unsigned 64-bit integer") {
+		t.Fatalf("plan SQL did not include mapping warning:\n%s", sql)
+	}
+}
+
 func TestRenderDeterministic_AddedTableIncludesSideObjects(t *testing.T) {
 	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
 	audit := driver.Table{

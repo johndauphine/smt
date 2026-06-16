@@ -22,6 +22,10 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	dt := strings.ToLower(strings.TrimSpace(typeName))
 	mysql := isMySQL(dialect)
 
+	if ct, ok := toSpatial(dt, m, dialect); ok {
+		return ct
+	}
+
 	switch dt {
 	// ---- integers / booleans -------------------------------------------
 	case "tinyint":
@@ -161,6 +165,82 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	default:
 		return CanonicalType{Kind: Raw, Raw: dt}
 	}
+}
+
+func toSpatial(dt string, m TypeMeta, dialect string) (CanonicalType, bool) {
+	base, subtype, srid := parseSpatialType(dt, m)
+	if base == "" {
+		return CanonicalType{}, false
+	}
+	switch base {
+	case "geography":
+		return CanonicalType{Kind: Spatial, SpatialType: "geography", SpatialSubType: subtype, SRID: srid}, true
+	case "geometry":
+		return CanonicalType{Kind: Spatial, SpatialType: "geometry", SpatialSubType: subtype, SRID: srid}, true
+	case "point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon", "geometrycollection":
+		if !isMySQL(dialect) {
+			return CanonicalType{}, false
+		}
+		return CanonicalType{Kind: Spatial, SpatialType: "geometry", SpatialSubType: base, SRID: srid}, true
+	default:
+		return CanonicalType{}, false
+	}
+}
+
+func parseSpatialType(dt string, m TypeMeta) (base, subtype string, srid int) {
+	srid = m.SRID
+	base = strings.ToLower(strings.TrimSpace(dt))
+	if i := strings.Index(base, "("); i >= 0 && strings.HasSuffix(base, ")") {
+		rawBase := strings.TrimSpace(base[:i])
+		inner := strings.TrimSpace(base[i+1 : len(base)-1])
+		parts := strings.Split(inner, ",")
+		if len(parts) > 0 {
+			subtype = normalizeSpatialSubType(parts[0])
+		}
+		if len(parts) > 1 {
+			if parsed, ok := atoiPositive(strings.TrimSpace(parts[1])); ok {
+				srid = parsed
+			}
+		}
+		base = rawBase
+	}
+	if subtype == "" {
+		subtype = normalizeSpatialSubType(m.SpatialSubType)
+	}
+	return base, subtype, srid
+}
+
+func normalizeSpatialSubType(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimPrefix(s, "st_")
+	s = strings.ReplaceAll(s, " ", "")
+	switch s {
+	case "geometry", "geography":
+		return ""
+	default:
+		return s
+	}
+}
+
+func atoiPositive(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}
+
+// IsSpatialTypeName reports whether a dialect type name belongs to a supported
+// spatial family. It accepts bare names and PostGIS-style geometry(...).
+func IsSpatialTypeName(typeName string) bool {
+	_, ok := toSpatial(strings.ToLower(strings.TrimSpace(typeName)), TypeMeta{}, "mysql")
+	return ok
 }
 
 func isMySQL(dialect string) bool {

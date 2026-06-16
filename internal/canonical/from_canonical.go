@@ -26,20 +26,45 @@ type RenderOpts struct {
 	IsIdentity bool
 }
 
+// MappingWarning describes a mappable-but-lossy canonical type conversion.
+// These warnings are advisory: the rendered DDL is valid, but it does not carry
+// every source-side semantic fact.
+type MappingWarning struct {
+	Kind          string `json:"kind"`
+	TargetDialect string `json:"target_dialect"`
+	Reason        string `json:"reason"`
+}
+
 // FromCanonical renders a CanonicalType as a target dialect's DDL type string
 // (without NOT NULL / DEFAULT / IDENTITY clauses — those are the renderer's).
 // dialect is the canonical target driver name.
 func FromCanonical(ct CanonicalType, dialect string, opts RenderOpts) (string, error) {
-	switch canonDialect(dialect) {
+	typ, _, err := FromCanonicalWithWarnings(ct, dialect, opts)
+	return typ, err
+}
+
+// FromCanonicalWithWarnings renders the type and returns advisory warnings for
+// conversions that are supported but approximate/lossy.
+func FromCanonicalWithWarnings(ct CanonicalType, dialect string, opts RenderOpts) (string, []MappingWarning, error) {
+	target := canonDialect(dialect)
+	var (
+		typ string
+		err error
+	)
+	switch target {
 	case "postgres":
-		return fromCanonicalPG(ct, opts)
+		typ, err = fromCanonicalPG(ct, opts)
 	case "mssql":
-		return fromCanonicalMSSQL(ct, opts)
+		typ, err = fromCanonicalMSSQL(ct, opts)
 	case "mysql":
-		return fromCanonicalMySQL(ct, opts)
+		typ, err = fromCanonicalMySQL(ct, opts)
 	default:
-		return "", fmt.Errorf("FromCanonical: unsupported target dialect %q", dialect)
+		return "", nil, fmt.Errorf("FromCanonical: unsupported target dialect %q", dialect)
 	}
+	if err != nil {
+		return "", nil, err
+	}
+	return typ, mappingWarnings(ct, target, typ, opts), nil
 }
 
 func canonDialect(d string) string {
@@ -130,6 +155,8 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 		default:
 			return "text[]", nil
 		}
+	case Spatial:
+		return pgSpatialDDL(ct), nil
 	case Raw:
 		return "", fmt.Errorf("%w: %s", ErrUnknownType, ct.Raw)
 	default:
@@ -224,6 +251,11 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		return sized("NVARCHAR", enumStringLen(ct), "255"), nil
 	case Set:
 		return sized("NVARCHAR", setStringLen(ct), "255"), nil
+	case Spatial:
+		if ct.SpatialType == "geography" {
+			return "GEOGRAPHY", nil
+		}
+		return "GEOMETRY", nil
 	case Raw:
 		return "", fmt.Errorf("%w: %s", ErrUnknownType, ct.Raw)
 	default:
@@ -299,6 +331,8 @@ func fromCanonicalMySQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		return enumDDL("ENUM", ct)
 	case Set:
 		return enumDDL("SET", ct)
+	case Spatial:
+		return mysqlSpatialDDL(ct), nil
 	case Raw:
 		return "", fmt.Errorf("%w: %s", ErrUnknownType, ct.Raw)
 	default:
@@ -433,4 +467,213 @@ func enumDDL(name string, ct CanonicalType) (string, error) {
 		quoted[i] = "'" + strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), "'", "''") + "'"
 	}
 	return name + "(" + strings.Join(quoted, ",") + ")", nil
+}
+
+func pgSpatialDDL(ct CanonicalType) string {
+	family := ct.SpatialType
+	if family != "geography" {
+		family = "geometry"
+	}
+	subtype := pgSpatialSubType(ct.SpatialSubType)
+	if subtype == "" && ct.SRID <= 0 {
+		return family
+	}
+	if subtype == "" {
+		subtype = "Geometry"
+	}
+	if ct.SRID > 0 {
+		return fmt.Sprintf("%s(%s,%d)", family, subtype, ct.SRID)
+	}
+	return fmt.Sprintf("%s(%s)", family, subtype)
+}
+
+func mysqlSpatialDDL(ct CanonicalType) string {
+	base := strings.ToUpper(mysqlSpatialBase(ct.SpatialSubType))
+	if base == "" {
+		base = "GEOMETRY"
+	}
+	if ct.SRID > 0 {
+		return fmt.Sprintf("%s SRID %d", base, ct.SRID)
+	}
+	return base
+}
+
+func mysqlSpatialBase(subtype string) string {
+	switch strings.ToLower(strings.TrimSpace(subtype)) {
+	case "point":
+		return "POINT"
+	case "linestring":
+		return "LINESTRING"
+	case "polygon":
+		return "POLYGON"
+	case "multipoint":
+		return "MULTIPOINT"
+	case "multilinestring":
+		return "MULTILINESTRING"
+	case "multipolygon":
+		return "MULTIPOLYGON"
+	case "geometrycollection":
+		return "GEOMETRYCOLLECTION"
+	default:
+		return "GEOMETRY"
+	}
+}
+
+func pgSpatialSubType(subtype string) string {
+	switch strings.ToLower(strings.TrimSpace(subtype)) {
+	case "point":
+		return "Point"
+	case "linestring":
+		return "LineString"
+	case "polygon":
+		return "Polygon"
+	case "multipoint":
+		return "MultiPoint"
+	case "multilinestring":
+		return "MultiLineString"
+	case "multipolygon":
+		return "MultiPolygon"
+	case "geometrycollection":
+		return "GeometryCollection"
+	default:
+		return ""
+	}
+}
+
+func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts) []MappingWarning {
+	var out []MappingWarning
+	add := func(reason string) {
+		out = append(out, MappingWarning{
+			Kind:          kindName(ct.Kind),
+			TargetDialect: target,
+			Reason:        reason,
+		})
+	}
+
+	switch ct.Kind {
+	case TinyInt:
+		if target == "postgres" {
+			add("target has no 8-bit integer; rendered as " + rendered)
+		}
+	case MediumInt:
+		if target != "mysql" {
+			add("target has no 24-bit integer; rendered as " + rendered)
+		}
+	case SmallInt, Integer:
+		if ct.Unsigned && target != "mysql" {
+			add("target has no unsigned integer flag; widened to " + rendered)
+		}
+	case BigInt:
+		if ct.Unsigned && target != "mysql" && !opts.IsIdentity {
+			add("target has no unsigned 64-bit integer; rendered as " + rendered)
+		}
+	case Time, Timestamp:
+		if ct.WithTZ && target == "mysql" {
+			add("target has no equivalent time-zone-aware type; rendered as " + rendered)
+		}
+		if ct.UTCNormalized && target != "mysql" {
+			add("MySQL TIMESTAMP UTC-normalization is not represented on target; rendered as " + rendered)
+		}
+		if max := temporalFSPMax(target); max >= 0 {
+			if fsp, ok := ct.Fspv(); ok && fsp > max {
+				add(fmt.Sprintf("fractional-seconds precision %d clamped to target max %d", fsp, max))
+			}
+		}
+	case Text, Blob:
+		if target != "mysql" && mysqlLOBCapacity(ct.Length) {
+			add("MySQL LOB capacity tier is not represented on target; rendered as " + rendered)
+		}
+	case Spatial:
+		if target == "postgres" {
+			add("PostgreSQL spatial rendering requires PostGIS types to be installed")
+		}
+		if target == "mssql" && (ct.SRID > 0 || ct.SpatialSubType != "") {
+			add("SQL Server column DDL does not encode spatial subtype or SRID; rendered as " + rendered)
+		}
+		if target == "mysql" && ct.SpatialType == "geography" {
+			add("MySQL has no native geography type; rendered as " + rendered)
+		}
+	}
+	return out
+}
+
+func temporalFSPMax(target string) int {
+	switch target {
+	case "postgres", "mysql":
+		return 6
+	case "mssql":
+		return 7
+	default:
+		return -1
+	}
+}
+
+func mysqlLOBCapacity(length int) bool {
+	switch length {
+	case tinyCap, baseCap, mediumCap, longCap:
+		return true
+	default:
+		return false
+	}
+}
+
+func kindName(k Kind) string {
+	switch k {
+	case Boolean:
+		return "boolean"
+	case TinyInt:
+		return "tinyint"
+	case SmallInt:
+		return "smallint"
+	case MediumInt:
+		return "mediumint"
+	case Integer:
+		return "integer"
+	case BigInt:
+		return "bigint"
+	case Decimal:
+		return "decimal"
+	case Real:
+		return "real"
+	case Double:
+		return "double"
+	case Varchar:
+		return "varchar"
+	case Char:
+		return "char"
+	case Text:
+		return "text"
+	case Binary:
+		return "binary"
+	case VarBinary:
+		return "varbinary"
+	case Blob:
+		return "blob"
+	case Date:
+		return "date"
+	case Time:
+		return "time"
+	case Timestamp:
+		return "timestamp"
+	case Uuid:
+		return "uuid"
+	case Json:
+		return "json"
+	case Xml:
+		return "xml"
+	case RowVersion:
+		return "rowversion"
+	case Enum:
+		return "enum"
+	case Set:
+		return "set"
+	case Array:
+		return "array"
+	case Spatial:
+		return "spatial"
+	case Raw:
+		return "raw"
+	default:
+		return "unknown"
+	}
 }

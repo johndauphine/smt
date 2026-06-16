@@ -205,8 +205,8 @@ func TestComputeDrift_TypeFamilyMismatch(t *testing.T) {
 		t.Fatalf("expected 1 changed table, got %d: %+v", len(d.ChangedTables), d.ChangedTables)
 	}
 	deltas := strings.Join(d.ChangedTables[0].ColumnDeltas, "\n")
-	if !strings.Contains(deltas, "a type class: source=numeric target=string") {
-		t.Errorf("missing int->text type-class delta, got: %v", d.ChangedTables[0].ColumnDeltas)
+	if !strings.Contains(deltas, "a: type") {
+		t.Errorf("missing int->text canonical type delta, got: %v", d.ChangedTables[0].ColumnDeltas)
 	}
 	if strings.Contains(deltas, "flag") {
 		t.Errorf("bit->boolean false-flagged as type drift: %v", d.ChangedTables[0].ColumnDeltas)
@@ -480,7 +480,7 @@ func TestComputeDrift_MySQLUnsigned(t *testing.T) {
 	tgtSigned := []driver.Table{{Name: "t", Columns: []driver.Column{{Name: "n", DataType: "int", IsUnsigned: false}}}}
 
 	d := ComputeDrift(src, tgtSigned, "mysql", "mysql", DefaultDriftOptions())
-	if len(d.ChangedTables) != 1 || !strings.Contains(strings.Join(d.ChangedTables[0].ColumnDeltas, " "), "unsigned") {
+	if len(d.ChangedTables) != 1 || !strings.Contains(strings.Join(d.ChangedTables[0].ColumnDeltas, " "), "type") {
 		t.Errorf("mysql int unsigned → int should drift, got %+v", d.ChangedTables)
 	}
 	// Cross-dialect: pg bigint target carries no unsigned flag — must not drift.

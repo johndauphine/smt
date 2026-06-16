@@ -28,7 +28,8 @@ func corpus() []tcase {
 		return tcase{src: src, typ: typ, meta: m, col: driver.Column{
 			Name: "c", DataType: typ, MaxLength: m.MaxLength, Precision: m.Precision,
 			Scale: m.Scale, DatetimePrecision: m.DatetimePrecision, IsUnsigned: m.IsUnsigned,
-			DisplayWidth: m.DisplayWidth, EnumValues: m.EnumValues,
+			DisplayWidth: m.DisplayWidth, EnumValues: m.EnumValues, SRID: m.SRID,
+			SpatialSubType: m.SpatialSubType,
 		}}
 	}
 	var c []tcase
@@ -88,6 +89,8 @@ func corpus() []tcase {
 	add(mk("mssql", "uniqueidentifier", canonical.TypeMeta{}))
 	add(mk("mysql", "json", canonical.TypeMeta{}))
 	add(mk("mysql", "enum", canonical.TypeMeta{MaxLength: 8, EnumValues: []string{"a", "b"}}))
+	add(mk("mssql", "geometry", canonical.TypeMeta{SRID: 4326}))
+	add(mk("mysql", "point", canonical.TypeMeta{SRID: 4326}))
 	return c
 }
 

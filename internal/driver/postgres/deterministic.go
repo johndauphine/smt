@@ -370,7 +370,7 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 	dt := strings.ToLower(strings.TrimSpace(col.DataType))
 
 	ct := canonical.ToCanonical(dt, driver.MetaOf(col), r.sourceDialect)
-	typ, err := canonical.FromCanonical(ct, "postgres", canonical.RenderOpts{IsIdentity: col.IsIdentity})
+	typ, warnings, err := canonical.FromCanonicalWithWarnings(ct, "postgres", canonical.RenderOpts{IsIdentity: col.IsIdentity})
 	if err != nil {
 		if errors.Is(err, canonical.ErrUnknownType) {
 			switch r.unknownTypePolicy {
@@ -383,6 +383,13 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 			return "", fmt.Errorf("unsupported source type %q", col.DataType)
 		}
 		return "", err
+	}
+	for _, w := range warnings {
+		source := r.sourceDialect
+		if source == "" {
+			source = "unknown"
+		}
+		logging.Warn("deterministic PostgreSQL type mapper: %s→postgres column %s rendered as %s with warning: %s", source, col.Name, typ, w.Reason)
 	}
 
 	if col.IsIdentity {
