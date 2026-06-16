@@ -51,6 +51,8 @@ const (
 
 	Array // Element is the element kind (best-effort; pg arrays)
 
+	Spatial // SpatialType, SpatialSubType, SRID
+
 	// Raw is a non-portable passthrough: the original type name is kept in
 	// Raw and emitted verbatim / handled by the unknown-type policy.
 	Raw
@@ -99,6 +101,13 @@ type CanonicalType struct {
 	// Element is the element type for Array.
 	Element *CanonicalType
 
+	// SpatialType is the spatial storage family ("geometry" or "geography").
+	// SpatialSubType is the optional shape subtype ("point", "polygon", ...).
+	// SRID is 0 when unset/default.
+	SpatialType    string
+	SpatialSubType string
+	SRID           int
+
 	// Raw holds the original source type name for Kind == Raw.
 	Raw string
 }
@@ -122,4 +131,6 @@ type TypeMeta struct {
 	IsUnsigned        bool
 	DisplayWidth      int      // MySQL: captured only for tinyint(1)
 	EnumValues        []string // MySQL ENUM/SET members
+	SRID              int      // Spatial Reference ID, when known
+	SpatialSubType    string   // PostGIS geometry/geography subtype, when known
 }

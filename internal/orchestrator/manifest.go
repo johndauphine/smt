@@ -30,17 +30,19 @@ import (
 const manifestArtifactName = "manifest.json"
 
 type runManifest struct {
-	SMTVersion        string `json:"smt_version"`
-	RendererVersion   string `json:"renderer_version"`
-	SourceDialect     string `json:"source_dialect"`
-	TargetDialect     string `json:"target_dialect"`
-	TargetSchema      string `json:"target_schema"`
-	UnknownTypePolicy string `json:"unknown_type_policy"`
-	AIReviewEnabled   bool   `json:"ai_review_enabled"`
-	AIReviewMode      string `json:"ai_review_mode,omitempty"`
-	TableCount        int    `json:"table_count"`
-	SourceFingerprint string `json:"source_schema_fingerprint"`
-	PlanFingerprint   string `json:"plan_fingerprint"`
+	SMTVersion        string            `json:"smt_version"`
+	RendererVersion   string            `json:"renderer_version"`
+	SourceDialect     string            `json:"source_dialect"`
+	TargetDialect     string            `json:"target_dialect"`
+	TargetSchema      string            `json:"target_schema"`
+	UnknownTypePolicy string            `json:"unknown_type_policy"`
+	AIReviewEnabled   bool              `json:"ai_review_enabled"`
+	AIReviewMode      string            `json:"ai_review_mode,omitempty"`
+	AIReviewWarnings  []aiReviewWarning `json:"ai_review_warnings,omitempty"`
+	MappingWarnings   []mappingWarning  `json:"mapping_warnings,omitempty"`
+	TableCount        int               `json:"table_count"`
+	SourceFingerprint string            `json:"source_schema_fingerprint"`
+	PlanFingerprint   string            `json:"plan_fingerprint"`
 }
 
 // writeRunManifest fingerprints the source schema and the rendered SQL and
@@ -63,6 +65,8 @@ func (o *Orchestrator) writeRunManifest(ctx context.Context, runID string, r cre
 		UnknownTypePolicy: r.unknownTypePolicy,
 		AIReviewEnabled:   r.aiReviewEnabled,
 		AIReviewMode:      r.aiReviewMode,
+		AIReviewWarnings:  snapshotReviewWarnings(r.reviewWarnings),
+		MappingWarnings:   collectMappingWarnings(o.tables, r.sourceType, r.targetType),
 		TableCount:        len(o.tables),
 		SourceFingerprint: srcFP,
 		PlanFingerprint:   fingerprintBytes([]byte(planSQL)),
@@ -76,6 +80,13 @@ func (o *Orchestrator) writeRunManifest(ctx context.Context, runID string, r cre
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, manifestArtifactName), append(data, '\n'), 0600)
+}
+
+func snapshotReviewWarnings(r *reviewWarningRecorder) []aiReviewWarning {
+	if r == nil {
+		return nil
+	}
+	return r.Snapshot()
 }
 
 // canonicalSourceSnapshot returns a copy of the in-scope source tables loaded

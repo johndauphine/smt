@@ -369,7 +369,57 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 		}
 		t.Columns = append(t.Columns, c)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return r.loadSpatialColumns(ctx, t)
+}
+
+func (r *Reader) loadSpatialColumns(ctx context.Context, t *driver.Table) error {
+	if err := r.loadPostGISSpatialView(ctx, t, "geometry_columns", "f_geometry_column", "geometry"); err != nil {
+		return err
+	}
+	return r.loadPostGISSpatialView(ctx, t, "geography_columns", "f_geography_column", "geography")
+}
+
+func (r *Reader) loadPostGISSpatialView(ctx context.Context, t *driver.Table, view, columnField, family string) error {
+	query := fmt.Sprintf(`
+		SELECT %s, COALESCE(type, ''), COALESCE(srid, 0)
+		FROM %s
+		WHERE f_table_schema = $1 AND f_table_name = $2
+	`, columnField, view)
+	rows, err := r.sqlDB.QueryContext(ctx, query, t.Schema, t.Name)
+	if err != nil {
+		logging.Debug("skipping PostgreSQL %s metadata for %s.%s: %v", view, t.Schema, t.Name, err)
+		return nil
+	}
+	defer rows.Close()
+
+	type spatialMeta struct {
+		family  string
+		subtype string
+		srid    int
+	}
+	metadata := make(map[string]spatialMeta)
+	for rows.Next() {
+		var name, subtype string
+		var srid int
+		if err := rows.Scan(&name, &subtype, &srid); err != nil {
+			return fmt.Errorf("scanning %s metadata: %w", view, err)
+		}
+		metadata[strings.ToLower(name)] = spatialMeta{family: family, subtype: subtype, srid: srid}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating %s metadata: %w", view, err)
+	}
+	for i := range t.Columns {
+		if m, ok := metadata[strings.ToLower(t.Columns[i].Name)]; ok {
+			t.Columns[i].DataType = m.family
+			t.Columns[i].SpatialSubType = m.subtype
+			t.Columns[i].SRID = m.srid
+		}
+	}
+	return nil
 }
 
 func (r *Reader) loadPrimaryKey(ctx context.Context, t *driver.Table) error {

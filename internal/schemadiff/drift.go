@@ -43,7 +43,7 @@ type TableDrift struct {
 	// destructive.
 	ExtraColumns []string
 	// ColumnDeltas are columns present on both sides whose metadata differs
-	// (type class, length, precision, nullability, identity, default class).
+	// (canonical type, length, precision, nullability, identity, default class).
 	// Each entry is a human-readable description from the deterministic
 	// comparator.
 	ColumnDeltas []string
@@ -245,30 +245,10 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 		td.ColumnDeltas = append(td.ColumnDeltas, delta.String())
 	}
 
-	// CompareColumns checks length/precision/nullability/identity/TZ/default
-	// but not the general type family, so an `int` → `text` change (both with
-	// no length/default/identity) slips through. Flag a high-confidence family
-	// mismatch on matched columns. Deliberately conservative — only the strict
-	// families participate, and a flag fires ONLY when BOTH sides resolve to a
-	// known, differing family. This avoids false positives on a freshly created
-	// target, which is the bar drift must clear: SMT's own mappings must read
-	// as "no drift." Cases left to the comparator's existing equivalence rules
-	// (and therefore NOT family-flagged) include bit/boolean (mssql bit → pg
-	// boolean, mysql tinyint(1) → pg smallint — SMT maps these differently per
-	// target, so "boolean" is not a portable family here), uuid (uniqueidentifier
-	// → char(36)), and json/xml.
-	//
-	// Known limitations, all rooted in the lack of a canonical concrete-type /
-	// expression model (#62): a SAME-family type change (integer→bigint,
-	// varchar(20)→char(20)), a one-sided class change involving an unrecognized
-	// type (int→uuid, bit→integer), a datetime fractional-seconds change
-	// (DATETIME(6)→DATETIME(0)) — comparing it cleanly needs target-max-fsp
-	// awareness to not false-flag a legit clamp like mssql datetime2(7)→pg
-	// timestamp(6) — a same-dialect ENUM→TEXT change or ENUM value-list change,
-	// and per-column EXPRESSION/value details whose text differs across dialects
-	// (computed-expression bodies, ON UPDATE expressions, spatial SRID). Drift
-	// catches presence/structure (computed Y/N + storage class, type family,
-	// length/nullability/identity/TZ/default) today.
+	// CompareColumns handles canonical type equivalence plus length/precision/
+	// nullability/identity/TZ/default. Drift adds only schema-object facts the
+	// column comparator intentionally does not cover: target-only columns,
+	// computed storage class, PKs, indexes, FKs, and CHECK counts.
 	haveByName := make(map[string]driver.Column, len(have.Columns))
 	for _, c := range have.Columns {
 		haveByName[strings.ToLower(c.Name)] = c
@@ -279,20 +259,6 @@ func tableDrift(want, have driver.Table, sourceDialect, targetDialect string, op
 			continue
 		}
 		name := strings.ToLower(sc.Name)
-		if sf, tf := strictTypeFamily(sc.DataType), strictTypeFamily(tc.DataType); sf != "" && tf != "" && sf != tf {
-			td.ColumnDeltas = append(td.ColumnDeltas,
-				name+" type class: source="+sf+" target="+tf)
-		}
-		// MySQL UNSIGNED is a structured flag (Column.IsUnsigned) the readers
-		// populate and the renderer preserves. INT UNSIGNED → INT halves the
-		// positive range, so a same-dialect change must drift. Only compared
-		// MySQL→MySQL: cross-dialect, unsigned is absorbed into a wider target
-		// type (mysql int unsigned → pg bigint), where the target legitimately
-		// carries no unsigned flag and a comparison would false-flag.
-		if isMySQLDialect(sourceDialect) && isMySQLDialect(targetDialect) && sc.IsUnsigned != tc.IsUnsigned {
-			td.ColumnDeltas = append(td.ColumnDeltas,
-				name+" unsigned: source="+boolStr(sc.IsUnsigned)+" target="+boolStr(tc.IsUnsigned))
-		}
 		// Generated/computed status and storage class are cross-dialect
 		// structural facts CompareColumns doesn't cover: a column that's
 		// generated in the source must stay generated on the target, and a
@@ -407,15 +373,6 @@ func targetSupportsVirtualComputed(dialect string) bool {
 	}
 }
 
-func isMySQLDialect(dialect string) bool {
-	switch strings.ToLower(strings.TrimSpace(dialect)) {
-	case "mysql", "mariadb":
-		return true
-	default:
-		return false
-	}
-}
-
 func boolStr(b bool) string {
 	if b {
 		return "true"
@@ -453,36 +410,6 @@ func fkKeys(fks []driver.ForeignKey, ownerSchema string) []string {
 			"|"+normAction(fk.OnDelete)+"|"+normAction(fk.OnUpdate))
 	}
 	return out
-}
-
-// strictTypeFamily classifies a data type into one of the families where a
-// cross-family change is unambiguously incompatible (numeric/string/temporal/
-// binary). Types with known cross-dialect equivalences that span families —
-// boolean (handled by isBooleanType), uuid (uniqueidentifier↔char(36)), json,
-// xml — and anything unrecognized return "" so they are left to the
-// deterministic comparator and never produce a false family mismatch.
-func strictTypeFamily(dataType string) string {
-	switch strings.ToLower(strings.TrimSpace(dataType)) {
-	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint",
-		"int2", "int4", "int8", "serial", "bigserial", "smallserial",
-		"decimal", "numeric", "number", "money", "smallmoney",
-		"float", "double", "double precision", "real", "float4", "float8":
-		return "numeric"
-	case "char", "nchar", "character", "bpchar", "varchar", "nvarchar",
-		"character varying", "text", "ntext", "tinytext", "mediumtext",
-		"longtext", "enum", "set":
-		return "string"
-	case "date", "time", "timetz", "datetime", "datetime2", "smalldatetime",
-		"timestamp", "timestamptz", "datetimeoffset",
-		"timestamp without time zone", "timestamp with time zone",
-		"time without time zone", "time with time zone":
-		return "temporal"
-	case "binary", "varbinary", "image", "bytea", "rowversion",
-		"blob", "tinyblob", "mediumblob", "longblob":
-		return "binary"
-	default:
-		return ""
-	}
 }
 
 // orderedCols joins columns lowercased but order-preserved.

@@ -11,6 +11,7 @@ import (
 	"smt/internal/canonical"
 	"smt/internal/driver"
 	pgddl "smt/internal/driver/postgres"
+	"smt/internal/logging"
 )
 
 // RendererVersion identifies the deterministic renderer's output contract.
@@ -24,7 +25,8 @@ import (
 // source-dialect-aware, so the rendered DDL changed for some inputs vs "1"
 // (e.g. MySQL tinyint(1) -> BIT/boolean, dialect-correct float/real precision,
 // MySQL mediumint and time-with-tz no longer rejected on a pg target).
-const RendererVersion = "2"
+// "3": canonical spatial rendering and mapping warnings (#121/#122).
+const RendererVersion = "3"
 
 type Renderer struct {
 	target            string
@@ -583,7 +585,7 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 // Non-portable (Raw) types fall through to the unknown-type policy.
 func (r Renderer) canonicalColumnType(col driver.Column, dt, target string) (string, error) {
 	ct := canonical.ToCanonical(dt, driver.MetaOf(col), r.source)
-	typ, err := canonical.FromCanonical(ct, target, canonical.RenderOpts{IsIdentity: col.IsIdentity})
+	typ, warnings, err := canonical.FromCanonicalWithWarnings(ct, target, canonical.RenderOpts{IsIdentity: col.IsIdentity})
 	switch {
 	case errors.Is(err, canonical.ErrUnknownType):
 		return r.unknownType(dt)
@@ -596,7 +598,17 @@ func (r Renderer) canonicalColumnType(col driver.Column, dt, target string) (str
 		}
 		return "", fmt.Errorf("%s column %s is missing allowed values", strings.ToLower(dt), col.Name)
 	}
+	for _, w := range warnings {
+		logMappingWarning(col.Name, r.source, target, typ, w)
+	}
 	return typ, err
+}
+
+func logMappingWarning(column, source, target, rendered string, w canonical.MappingWarning) {
+	if source == "" {
+		source = "unknown"
+	}
+	logging.Warn("deterministic type mapper: %s→%s column %s rendered as %s with warning: %s", source, target, column, rendered, w.Reason)
 }
 
 func (r Renderer) Expression(expr string, tableColumns []driver.Column) (string, error) {

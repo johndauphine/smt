@@ -134,6 +134,7 @@ type createDDLRenderer struct {
 	ddlRenderer          ddl.Renderer
 	aiReviewEnabled      bool
 	aiReviewMode         string
+	reviewWarnings       *reviewWarningRecorder
 	tableVerifier        driver.TableDDLReviewer
 	finalizationVerifier driver.FinalizationDDLReviewer
 }
@@ -188,6 +189,7 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 		ddlRenderer:          ddlRenderer,
 		aiReviewEnabled:      reviewEnabled,
 		aiReviewMode:         o.config.AIReview.Mode,
+		reviewWarnings:       &reviewWarningRecorder{},
 		tableVerifier:        tableVerifier,
 		finalizationVerifier: finalizationVerifier,
 	}, nil
@@ -396,7 +398,7 @@ func (r createDDLRenderer) reviewTable(ctx context.Context, t *driver.Table, ddl
 	if err != nil {
 		return fmt.Errorf("AI review failed for table %s: %w", t.FullName(), err)
 	}
-	return handleReviewVerdict(r.aiReviewMode, fmt.Sprintf("table %s", t.FullName()), verdict)
+	return r.handleReviewVerdict(fmt.Sprintf("table %s", t.FullName()), verdict)
 }
 
 func (r createDDLRenderer) reviewFinalization(ctx context.Context, ddlType driver.DDLType, t *driver.Table, idx *driver.Index, fk *driver.ForeignKey, chk *driver.CheckConstraint, ddl string) error {
@@ -421,10 +423,18 @@ func (r createDDLRenderer) reviewFinalization(ctx context.Context, ddlType drive
 	if err != nil {
 		return fmt.Errorf("AI review failed for %s on %s: %w", ddlType, t.FullName(), err)
 	}
-	return handleReviewVerdict(r.aiReviewMode, fmt.Sprintf("%s on %s", ddlType, t.FullName()), verdict)
+	return r.handleReviewVerdict(fmt.Sprintf("%s on %s", ddlType, t.FullName()), verdict)
 }
 
 func handleReviewVerdict(mode, label string, verdict *driver.VerifyResult) error {
+	return handleReviewVerdictRecorded(mode, label, verdict, nil)
+}
+
+func (r createDDLRenderer) handleReviewVerdict(label string, verdict *driver.VerifyResult) error {
+	return handleReviewVerdictRecorded(r.aiReviewMode, label, verdict, r.reviewWarnings)
+}
+
+func handleReviewVerdictRecorded(mode, label string, verdict *driver.VerifyResult, warnings *reviewWarningRecorder) error {
 	// A nil verdict with no error is a reviewer-contract violation: review is
 	// enabled but produced no audit result. Fail closed (regardless of mode,
 	// like a provider failure) rather than letting apply proceed unreviewed.
@@ -438,6 +448,9 @@ func handleReviewVerdict(mode, label string, verdict *driver.VerifyResult) error
 	msg := strings.Join(verdict.Issues, "\n  ")
 	if strings.EqualFold(mode, "fail") {
 		return fmt.Errorf("AI review flagged %d issue(s) on %s:\n  %s", len(verdict.Issues), label, msg)
+	}
+	if warnings != nil {
+		warnings.Record(label, verdict.Issues)
 	}
 	logging.Warn("AI review flagged %d issue(s) on %s:\n  %s", len(verdict.Issues), label, msg)
 	return nil

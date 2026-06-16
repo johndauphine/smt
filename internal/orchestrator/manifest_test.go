@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -81,5 +82,35 @@ func TestFingerprintBytes(t *testing.T) {
 	second := fingerprintBytes([]byte("same"))
 	if first != second {
 		t.Error("identical bytes hashed to different fingerprints")
+	}
+}
+
+func TestCollectMappingWarningsForManifest(t *testing.T) {
+	tables := []driver.Table{{
+		Schema: "dbo",
+		Name:   "Accounts",
+		Columns: []driver.Column{{
+			Name:       "ExternalId",
+			DataType:   "bigint",
+			IsUnsigned: true,
+		}},
+	}}
+	warnings := collectMappingWarnings(tables, "mysql", "postgres")
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %d, want 1: %#v", len(warnings), warnings)
+	}
+	if warnings[0].Table != "dbo.Accounts" || warnings[0].Column != "ExternalId" {
+		t.Fatalf("warning location = %#v", warnings[0])
+	}
+	if warnings[0].TargetType != "numeric(20,0)" || warnings[0].Kind != "bigint" {
+		t.Fatalf("warning mapping = %#v", warnings[0])
+	}
+
+	blob, err := json.Marshal(runManifest{MappingWarnings: warnings})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if !strings.Contains(string(blob), "mapping_warnings") {
+		t.Fatalf("manifest JSON did not include mapping_warnings: %s", blob)
 	}
 }

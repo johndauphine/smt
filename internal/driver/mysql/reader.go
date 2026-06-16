@@ -391,7 +391,43 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 		}
 		t.Columns = append(t.Columns, c)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return r.loadSpatialColumns(ctx, t)
+}
+
+func (r *Reader) loadSpatialColumns(ctx context.Context, t *driver.Table) error {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT COLUMN_NAME, COALESCE(SRS_ID, 0)
+		FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+		  AND DATA_TYPE IN ('geometry','point','linestring','polygon','multipoint','multilinestring','multipolygon','geometrycollection')
+	`, t.Schema, t.Name)
+	if err != nil {
+		logging.Debug("skipping MySQL spatial SRID metadata for %s.%s: %v", t.Schema, t.Name, err)
+		return nil
+	}
+	defer rows.Close()
+
+	srids := make(map[string]int)
+	for rows.Next() {
+		var name string
+		var srid int
+		if err := rows.Scan(&name, &srid); err != nil {
+			return fmt.Errorf("scanning spatial metadata: %w", err)
+		}
+		srids[strings.ToLower(name)] = srid
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating spatial metadata: %w", err)
+	}
+	for i := range t.Columns {
+		if srid, ok := srids[strings.ToLower(t.Columns[i].Name)]; ok {
+			t.Columns[i].SRID = srid
+		}
+	}
+	return nil
 }
 
 func (r *Reader) loadPrimaryKey(ctx context.Context, t *driver.Table) error {

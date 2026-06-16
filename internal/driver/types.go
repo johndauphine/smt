@@ -133,6 +133,7 @@ type Column struct {
 	ComputedPersisted         bool     `json:"computed_persisted,omitempty"`   // true if computed value is persisted/stored (vs virtual)
 	EnumValues                []string `json:"enum_values,omitempty"`          // allowed values for MySQL ENUM/SET columns
 	SRID                      int      `json:"srid,omitempty"`                 // Spatial Reference ID for geography/geometry columns (0 = default/unset)
+	SpatialSubType            string   `json:"spatial_subtype,omitempty"`      // Spatial subtype (point, polygon, etc.) when the catalog exposes it
 	SampleValues              []string `json:"sample_values,omitempty"`        // Sample data values for AI type mapping context
 }
 
@@ -166,6 +167,8 @@ func MetaOf(col Column) canonical.TypeMeta {
 		IsUnsigned:        col.IsUnsigned,
 		DisplayWidth:      col.DisplayWidth,
 		EnumValues:        col.EnumValues,
+		SRID:              col.SRID,
+		SpatialSubType:    col.SpatialSubType,
 	}
 }
 
@@ -278,7 +281,7 @@ func (c *Column) GoValueBytes() int64 {
 		return sizeofStringHeader + dataLen
 
 	// Spatial types → string serialization
-	case dt == "geography" || dt == "geometry":
+	case canonical.IsSpatialTypeName(dt):
 		return sizeofStringHeader + 512
 
 	default:
@@ -316,11 +319,7 @@ func (t *Table) GoHeapBytesPerRow() int64 {
 
 // IsSpatialType returns true if the column is a spatial type.
 func (c *Column) IsSpatialType() bool {
-	switch c.DataType {
-	case "geography", "geometry":
-		return true
-	}
-	return false
+	return canonical.IsSpatialTypeName(c.DataType)
 }
 
 // Partition represents a data partition for parallel processing.

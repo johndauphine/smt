@@ -377,6 +377,27 @@ func TestCompareColumns_MissingColumn(t *testing.T) {
 	}
 }
 
+func TestCompareColumns_CanonicalTypeMismatch(t *testing.T) {
+	src := []Column{{Name: "amount", DataType: "int"}}
+	tgt := []Column{{Name: "amount", DataType: "text"}}
+	deltas := CompareColumns(src, tgt, "mssql", "postgres")
+	if len(deltas) != 1 || deltas[0].Criterion != "type" {
+		t.Fatalf("expected one canonical type delta, got %v", deltas)
+	}
+	if !strings.Contains(deltas[0].String(), "integer vs text") {
+		t.Errorf("type delta should compare rendered target types, got %q", deltas[0].String())
+	}
+}
+
+func TestCompareColumns_CanonicalTypeCatchesMySQLUnsigned(t *testing.T) {
+	src := []Column{{Name: "n", DataType: "int", IsUnsigned: true}}
+	tgt := []Column{{Name: "n", DataType: "int"}}
+	deltas := CompareColumns(src, tgt, "mysql", "mysql")
+	if len(deltas) != 1 || deltas[0].Criterion != "type" {
+		t.Fatalf("expected one canonical type delta for lost unsigned flag, got %v", deltas)
+	}
+}
+
 // TestCompareColumns_UUIDClassEquivalence pins the cross-dialect UUID
 // storage equivalence. The matrix run that motivated this fix exhausted
 // retries on `external_id: max_length — 0 vs 36`: source is mssql

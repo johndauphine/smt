@@ -9,6 +9,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -42,6 +43,7 @@ func reviewerFor(f *fakeReviewer, enabled bool, mode string) createDDLRenderer {
 		targetSchema:         "public",
 		aiReviewEnabled:      enabled,
 		aiReviewMode:         mode,
+		reviewWarnings:       &reviewWarningRecorder{},
 		tableVerifier:        f,
 		finalizationVerifier: f,
 	}
@@ -139,6 +141,43 @@ func TestReview_CannotRewriteDDL(t *testing.T) {
 	var vr driver.VerifyResult = *f.verdict
 	_ = vr.OK
 	_ = vr.Issues
+}
+
+func TestReview_WarnModeRecordsWarningsForManifest(t *testing.T) {
+	f := &fakeReviewer{verdict: &driver.VerifyResult{OK: false, Issues: []string{"missing index", "nullable changed"}}}
+	r := reviewerFor(f, true, "warn")
+	if err := r.reviewTable(context.Background(), sampleTable(), "CREATE TABLE ..."); err != nil {
+		t.Fatalf("warn verdict should not block: %v", err)
+	}
+	warnings := r.reviewWarnings.Snapshot()
+	if len(warnings) != 1 {
+		t.Fatalf("recorded warnings = %d, want 1", len(warnings))
+	}
+	if warnings[0].Label != "table dbo.Users" {
+		t.Fatalf("warning label = %q", warnings[0].Label)
+	}
+	if got := strings.Join(warnings[0].Issues, "|"); got != "missing index|nullable changed" {
+		t.Fatalf("warning issues = %q", got)
+	}
+
+	blob, err := json.Marshal(runManifest{AIReviewWarnings: warnings})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if !strings.Contains(string(blob), "ai_review_warnings") {
+		t.Fatalf("manifest JSON did not include ai_review_warnings: %s", blob)
+	}
+}
+
+func TestReview_FailModeDoesNotRecordWarningsBeforeBlocking(t *testing.T) {
+	f := &fakeReviewer{verdict: &driver.VerifyResult{OK: false, Issues: []string{"bad DDL"}}}
+	r := reviewerFor(f, true, "fail")
+	if err := r.reviewTable(context.Background(), sampleTable(), "CREATE TABLE ..."); err == nil {
+		t.Fatal("fail verdict should block")
+	}
+	if got := r.reviewWarnings.Snapshot(); len(got) != 0 {
+		t.Fatalf("fail-mode warnings recorded despite blocking: %#v", got)
+	}
 }
 
 // handleReviewVerdict is the shared decision point; pin it directly too.
