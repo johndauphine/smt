@@ -28,6 +28,7 @@ type RenderOptions struct {
 	TargetSchema      string
 	TargetDialect     string
 	SourceDialect     string // enables same-dialect type passthrough in the renderer; empty = cross-dialect mappings only
+	ExistingDialect   string // dialect of ColumnChange.Old; defaults to SourceDialect for snapshot diffs
 	UnknownTypePolicy string
 }
 
@@ -44,9 +45,10 @@ func RenderDeterministicWithOptions(diff Diff, opts RenderOptions) (Plan, error)
 }
 
 type deterministicRenderer struct {
-	target        string
-	sourceDialect string
-	renderer      ddl.Renderer
+	target          string
+	sourceDialect   string
+	existingDialect string
+	renderer        ddl.Renderer
 }
 
 func newDeterministicRenderer(opts RenderOptions) (deterministicRenderer, error) {
@@ -55,7 +57,11 @@ func newDeterministicRenderer(opts RenderOptions) (deterministicRenderer, error)
 		return deterministicRenderer{}, err
 	}
 	r = r.WithSource(opts.SourceDialect)
-	return deterministicRenderer{target: r.Target(), sourceDialect: opts.SourceDialect, renderer: r}, nil
+	existingDialect := opts.ExistingDialect
+	if strings.TrimSpace(existingDialect) == "" {
+		existingDialect = opts.SourceDialect
+	}
+	return deterministicRenderer{target: r.Target(), sourceDialect: opts.SourceDialect, existingDialect: existingDialect, renderer: r}, nil
 }
 
 func (r deterministicRenderer) tableMappingWarnings(t driver.Table) []string {
@@ -81,7 +87,7 @@ func (r deterministicRenderer) columnMappingWarnings(col driver.Column) []string
 }
 
 func (r deterministicRenderer) render(diff Diff) (Plan, error) {
-	var plan Plan
+	plan := Plan{Unsupported: append([]UnsupportedChange(nil), diff.Unsupported...)}
 
 	for _, t := range diff.AddedTables {
 		if err := r.renderAddedTableDefinition(&plan, t); err != nil {
@@ -363,11 +369,11 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 		return fmt.Errorf("computed column %s changes are not supported by deterministic %s sync", cc.Name, r.target)
 	}
 
-	oldType, err := r.renderer.ColumnType(cc.Old)
+	oldType, err := r.columnTypeWithSource(cc.Old, r.existingDialect)
 	if err != nil {
 		return err
 	}
-	newType, err := r.renderer.ColumnType(cc.New)
+	newType, err := r.columnTypeWithSource(cc.New, r.sourceDialect)
 	if err != nil {
 		return err
 	}
@@ -376,6 +382,12 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 	newDefault := strings.TrimSpace(cc.New.DefaultExpression)
 	typeChanged := oldType != newType
 	defaultChanged := oldDefault != newDefault
+	nullabilityChanged := cc.Old.IsNullable != cc.New.IsNullable
+	if len(cc.Criteria) > 0 {
+		typeChanged = hasAnyCriterion(cc.Criteria, "type", "max_length", "precision", "scale", "tz_class")
+		defaultChanged = hasAnyCriterion(cc.Criteria, "default")
+		nullabilityChanged = hasAnyCriterion(cc.Criteria, "nullability")
+	}
 	preDropDefault := oldDefault != "" && (typeChanged || (r.target == "mssql" && defaultChanged))
 
 	if preDropDefault {
@@ -401,7 +413,7 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 			Warnings:    r.columnMappingWarnings(cc.New),
 		})
 	}
-	if cc.Old.IsNullable != cc.New.IsNullable {
+	if nullabilityChanged {
 		risk := RiskSafe
 		notes := ""
 		if !cc.New.IsNullable {
@@ -445,6 +457,22 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 		}
 	}
 	return nil
+}
+
+func (r deterministicRenderer) columnTypeWithSource(col driver.Column, sourceDialect string) (string, error) {
+	renderer := r.renderer.WithSource(sourceDialect)
+	return renderer.ColumnType(col)
+}
+
+func hasAnyCriterion(got []string, want ...string) bool {
+	for _, g := range got {
+		for _, w := range want {
+			if g == w {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r deterministicRenderer) renderAddedIndex(plan *Plan, t driver.Table, idx driver.Index) error {
