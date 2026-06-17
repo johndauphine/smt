@@ -4,14 +4,29 @@ All notable changes to SMT are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.0] - 2026-06-17
 
 ### Added
 
+- **Config wizard** ([#160]) — `smt init` (and TUI `/init`) for guided
+  `config.yaml` creation, replacing copy-and-hand-edit of the example. A
+  UI-agnostic core (`internal/wizard`) defines the step/field list once;
+  `RenderYAML()` emits clean commented YAML, and the written file is validated as
+  the same artifact it produces.
+- **Live-target sync planner** ([#69]) — the drift/sync path introspects the
+  live target for a three-way source / desired / existing diff.
+- **Canonical type follow-ups** — a first-class **Spatial** kind for
+  geography/geometry ([#121]), warnings for approximate/lossy type conversions
+  ([#122]), and routing the drift / AI-review comparator through the canonical
+  type IR ([#123]).
 - **`smt snapshot list`** ([#159]) — list stored source-schema snapshots (id,
   source type, schema, table count, captured-at), newest first, with `--limit`
   (default 50). Surfaces the existing `schema_snapshots` baselines that `smt
   snapshot` writes and `smt sync` consumes; read-only.
+
+### Fixed
+
+- Multi-expression AI splice loop ([#141]).
 
 ### Removed
 
@@ -131,7 +146,13 @@ Releases before 0.10.0 are listed on the
 history since v0.9.0:
 [`v0.9.0...v0.10.0`](https://github.com/johndauphine/smt/compare/v0.9.0...v0.10.0).
 
+[0.12.0]: https://github.com/johndauphine/smt/releases/tag/v0.12.0
 [0.11.0]: https://github.com/johndauphine/smt/releases/tag/v0.11.0
+[#141]: https://github.com/johndauphine/smt/issues/141
+[#160]: https://github.com/johndauphine/smt/issues/160
+[#121]: https://github.com/johndauphine/smt/issues/121
+[#122]: https://github.com/johndauphine/smt/issues/122
+[#123]: https://github.com/johndauphine/smt/issues/123
 [0.10.1]: https://github.com/johndauphine/smt/releases/tag/v0.10.1
 [0.10.0]: https://github.com/johndauphine/smt/releases/tag/v0.10.0
 [#131]: https://github.com/johndauphine/smt/issues/131
