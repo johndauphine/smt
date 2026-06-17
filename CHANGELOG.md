@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- **Dead DMT-era state-DB tables and checkpoint APIs** ([#158]). The SQLite
+  state DB no longer creates the `tasks`, `task_outputs`, `transfer_progress`,
+  or `table_sync_timestamps` tables — they backed DMT's row-transfer pipeline
+  (parallel workers, chunk-level resume, date-based incremental sync) and were
+  never written by SMT, which runs DDL. The corresponding `StateBackend` /
+  `State` / `FileState` methods (task tracking, transfer progress, run-resume,
+  sync watermarks) and the `Task` / `TransferProgress` / `TaskWithProgress`
+  types are removed. `smt history <run>` is unchanged (its task section was
+  always empty). Forward-compat: existing `~/.smt` state DBs keep the orphan
+  tables as harmless empties — there is no DROP migration, and a pre-existing DB
+  opens and works unchanged.
 - **DMT-era `migration_defaults` keys dropped from the secrets file** ([#156]).
   The global `migration_defaults` block in `~/.secrets/smt-config.yaml` no longer
   carries data-transfer tuning that SMT (a schema tool) never consumed:
@@ -120,6 +131,7 @@ history since v0.9.0:
 [#133]: https://github.com/johndauphine/smt/pull/133
 [#134]: https://github.com/johndauphine/smt/issues/134
 [#156]: https://github.com/johndauphine/smt/issues/156
+[#158]: https://github.com/johndauphine/smt/issues/158
 [#46]: https://github.com/johndauphine/smt/issues/46
 [#57]: https://github.com/johndauphine/smt/issues/57
 [#58]: https://github.com/johndauphine/smt/issues/58
