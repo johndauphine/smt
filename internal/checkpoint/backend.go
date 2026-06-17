@@ -1,9 +1,5 @@
 package checkpoint
 
-import (
-	"time"
-)
-
 // Run kinds distinguish runs that executed DDL against a target from
 // generate-only previews in history and notifications (#90).
 const (
@@ -12,45 +8,27 @@ const (
 )
 
 // StateBackend defines the interface for state persistence.
-// Implementations include SQLite (full featured) and file-based (minimal, for Airflow).
+// Implementations: SQLite (full-featured, with history) and file-based (minimal,
+// for Airflow / headless runs).
+//
+// SMT records each schema run for history; it does not move rows, so the DMT-era
+// task/transfer-progress/resume surface was removed in v1 (#158).
 type StateBackend interface {
 	// Run management
 	CreateRun(id, kind, sourceSchema, targetSchema string, config any, profileName, configPath string) error
-	UpdateRunConfig(id string, config any) error // Persist post-AI-tuning config snapshot
 	CompleteRun(id string, status string, errorMsg string) error
-	GetLastIncompleteRun() (*Run, error)
-	HasSuccessfulRunAfter(run *Run) (bool, error) // Check if a successful run supersedes this incomplete run
-	MarkRunAsResumed(runID string) error
 	UpdatePhase(runID, phase string) error
 
-	// Task management
-	CreateTask(runID, taskType, taskKey string) (int64, error)
-	UpdateTaskStatus(taskID int64, status string, errorMsg string) error
-	MarkTaskComplete(runID, taskKey string) error
-	GetCompletedTables(runID string) (map[string]bool, error)
-	GetRunStats(runID string) (total, pending, running, success, failed int, err error)
-	GetTasksWithProgress(runID string) ([]TaskWithProgress, error)
-
-	// Progress tracking (for chunk-level resume)
-	SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
-	GetTransferProgress(taskID int64) (*TransferProgress, error)
-	ClearTransferProgress(taskID int64) error                     // Clear progress for fresh re-transfer
-	CountPartitionTasks(runID, taskKeyPrefix string) (int, error) // Count partition tasks for a table
-
-	// History (optional - file backend may return empty)
+	// History (optional - file backend may return just the current run)
 	GetAllRuns() ([]Run, error)
 	GetRunByID(runID string) (*Run, error)
-
-	// Date-based incremental sync (optional - file backend returns nil/no-op)
-	GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error)
-	UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error
 
 	// Lifecycle
 	Close() error
 }
 
 // HistoryBackend extends StateBackend with profile management.
-// Only SQLite implements this; file backend does not support profiles.
+// Only SQLite implements this; the file backend does not support profiles.
 type HistoryBackend interface {
 	StateBackend
 

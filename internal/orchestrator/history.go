@@ -53,18 +53,6 @@ func (o *Orchestrator) ShowRunDetails(runID string) error {
 	if r.Error != "" {
 		fmt.Printf("Error:      %s\n", r.Error)
 	}
-
-	tasks, err := o.state.GetTasksWithProgress(r.ID)
-	if err != nil {
-		return err
-	}
-	if len(tasks) == 0 {
-		return nil
-	}
-	fmt.Println("\nTasks:")
-	for _, t := range tasks {
-		fmt.Printf("  %-30s %s\n", t.TaskKey, t.Status)
-	}
 	return nil
 }
 
