@@ -135,6 +135,7 @@ func cliFlagInfo() tui.CLIFlagInfo {
 
 func commands() []*cli.Command {
 	return []*cli.Command{
+		initCommand(),
 		createCommand(),
 		syncCommand(),
 		driftCommand(),
