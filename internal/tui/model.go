@@ -49,6 +49,7 @@ type AppMode int
 const (
 	ModeNormal AppMode = iota
 	ModeMigration
+	ModeWizard
 )
 
 // Model is the main TUI model - simplified single-viewport architecture
@@ -82,6 +83,9 @@ type Model struct {
 	// Single migration state (one at a time)
 	migrationCancel context.CancelFunc
 	migrationStatus string // "", "running", "completed", "failed", "cancelled"
+
+	// Active config wizard (ModeWizard), nil otherwise.
+	wiz *wizardState
 }
 
 type commandInfo struct {
@@ -90,6 +94,7 @@ type commandInfo struct {
 }
 
 var availableCommands = []commandInfo{
+	{"/init", "Create a config.yaml with a guided wizard"},
 	{"/create", "Generate target DDL from the source"},
 	{"/sync", "Diff source vs snapshot and emit/apply ALTERs"},
 	{"/snapshot", "Capture current source schema for future diffing"},
@@ -214,6 +219,11 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// The wizard takes over key handling while active.
+		if m.mode == ModeWizard {
+			return m.updateWizard(msg)
+		}
+
 		// Handle suggestion navigation if active
 		if len(m.suggestions) > 0 {
 			switch msg.Type {
@@ -527,7 +537,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/create", "/sync", "/snapshot", "/config", "/history", "/logs", "/profile", "/verbosity", "/about", "/clear", "/quit", "/help"}
+	commands := []string{"/init", "/create", "/sync", "/snapshot", "/config", "/history", "/logs", "/profile", "/verbosity", "/about", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -639,8 +649,16 @@ func (m Model) welcomeMessage() string {
  Type /help to see available commands.
 `
 
+	// First-run nudge: if there's no config in the working directory, point the
+	// user at the wizard before anything else.
+	if _, err := os.Stat("config.yaml"); os.IsNotExist(err) {
+		body += stylePrompt.Render(`
+ No config.yaml here yet — run /init to create one with a guided wizard.
+`)
+	}
+
 	tips := lipgloss.NewStyle().Foreground(colorGray).Render(`
- Tip: /create writes schema DDL. /create --apply executes it.
+ Tip: /init builds a config.yaml. /create writes schema DDL; /create --apply executes it.
       /snapshot captures a source baseline, and /sync emits or applies ALTERs.
       Hold Shift to select text with mouse.`)
 
@@ -661,6 +679,9 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 	}
 
 	switch cmd {
+	case "/init":
+		return m.startWizard(parts)
+
 	case "/quit", "/exit":
 		return tea.Quit
 
@@ -672,6 +693,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 
 	case "/help":
 		help := `Available Commands:
+  /init [@config]         Create a config.yaml with a guided wizard
   /create [@config]       Generate target DDL from the source
   /create --apply         Execute generated DDL against the target
   /create --profile NAME  Generate using a saved profile

@@ -12,7 +12,8 @@ PostgreSQL, SQL Server, MySQL — both as source and target. New engines are add
 
 ```bash
 make build
-cp config.yaml.example config.yaml  # edit source; set target.type/schema if needed
+./smt init                          # guided wizard → writes config.yaml
+# (or: cp config.yaml.example config.yaml and edit by hand)
 ./smt health-check
 ./smt create                        # write target DDL to schema.sql
 ./smt create --apply                # execute DDL against the configured target
@@ -28,6 +29,7 @@ Run `./smt` with no arguments to launch the TUI. See `./smt --help` for the full
 
 | command | what it does |
 |---------|--------------|
+| `smt init` | build a `config.yaml` with a guided wizard (`--non-interactive` + per-field flags for scripting; `--print` to stdout) |
 | `smt create` | extract source schema and emit CREATE TABLE / CREATE INDEX / etc to `schema.sql` |
 | `smt create --apply` | also execute the generated DDL against the configured target |
 | `smt snapshot` | save the current source schema as a baseline for future diffing |

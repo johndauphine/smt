@@ -44,3 +44,6 @@ migrations/
 
 # SO2010 acceptance-test artifact (make test-so2010)
 so2010_verification.json
+
+# Local Claude Code settings (personal permission overrides)
+.claude/settings.local.json
