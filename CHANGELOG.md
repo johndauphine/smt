@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`smt snapshot list`** ([#159]) — list stored source-schema snapshots (id,
+  source type, schema, table count, captured-at), newest first, with `--limit`
+  (default 50). Surfaces the existing `schema_snapshots` baselines that `smt
+  snapshot` writes and `smt sync` consumes; read-only.
+
 ### Removed
 
 - **Dead DMT-era state-DB tables and checkpoint APIs** ([#158]). The SQLite
@@ -132,6 +139,7 @@ history since v0.9.0:
 [#134]: https://github.com/johndauphine/smt/issues/134
 [#156]: https://github.com/johndauphine/smt/issues/156
 [#158]: https://github.com/johndauphine/smt/issues/158
+[#159]: https://github.com/johndauphine/smt/issues/159
 [#46]: https://github.com/johndauphine/smt/issues/46
 [#57]: https://github.com/johndauphine/smt/issues/57
 [#58]: https://github.com/johndauphine/smt/issues/58

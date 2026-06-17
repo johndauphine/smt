@@ -14,12 +14,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/urfave/cli/v2"
 
 	"smt/internal/checkpoint"
+	"smt/internal/config"
 	"smt/internal/driver"
 	"smt/internal/logging"
 	"smt/internal/orchestrator"
@@ -35,7 +37,62 @@ func snapshotCommand() *cli.Command {
 			&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Usage: "Also write the snapshot JSON to this file"},
 		},
 		Action: runSnapshot,
+		Subcommands: []*cli.Command{
+			{
+				Name:    "list",
+				Aliases: []string{"ls"},
+				Usage:   "List stored source-schema snapshots (newest first)",
+				Flags: []cli.Flag{
+					&cli.IntFlag{Name: "limit", Aliases: []string{"n"}, Value: 50, Usage: "Maximum snapshots to show"},
+				},
+				Action: runSnapshotList,
+			},
+		},
 	}
+}
+
+func runSnapshotList(c *cli.Context) error {
+	if c.String("state-file") != "" {
+		return fmt.Errorf("snapshot list requires the SQLite state backend; it is not available with --state-file")
+	}
+	cfg, _, _, err := loadConfig(c)
+	if err != nil {
+		return err
+	}
+
+	dataDir := cfg.Migration.DataDir
+	if dataDir == "" {
+		dataDir, err = config.DefaultDataDir()
+		if err != nil {
+			return err
+		}
+	}
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+
+	snaps, err := state.ListSnapshots(c.Int("limit"))
+	if err != nil {
+		return err
+	}
+	if len(snaps) == 0 {
+		fmt.Println("No snapshots found. Run `smt snapshot` to capture one.")
+		return nil
+	}
+
+	fmt.Printf("%-5s  %-10s  %-20s  %-6s  %s\n", "ID", "SOURCE", "SCHEMA", "TABLES", "CAPTURED")
+	for _, s := range snaps {
+		tables := "?"
+		var snap schemadiff.Snapshot
+		if json.Unmarshal(s.Payload, &snap) == nil {
+			tables = strconv.Itoa(len(snap.Tables))
+		}
+		fmt.Printf("%-5d  %-10s  %-20s  %-6s  %s\n",
+			s.ID, s.SourceType, s.Schema, tables, s.CapturedAt.Format(time.RFC3339))
+	}
+	return nil
 }
 
 func runSnapshot(c *cli.Context) error {

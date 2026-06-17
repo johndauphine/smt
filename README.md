@@ -33,6 +33,7 @@ Run `./smt` with no arguments to launch the TUI. See `./smt --help` for the full
 | `smt create` | extract source schema and emit CREATE TABLE / CREATE INDEX / etc to `schema.sql` |
 | `smt create --apply` | also execute the generated DDL against the configured target |
 | `smt snapshot` | save the current source schema as a baseline for future diffing |
+| `smt snapshot list` | list stored snapshots (id, source, schema, table count, captured-at); `--limit N` |
 | `smt sync` | diff source against last snapshot; generate target-dialect SQL; emit to `migration.sql` for review |
 | `smt sync --apply` | also execute the generated SQL against the target |
 | `smt sync --apply --allow-data-loss` | permit column/table drops |
