@@ -4,6 +4,23 @@ All notable changes to SMT are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- **DMT-era `migration_defaults` keys dropped from the secrets file** ([#156]).
+  The global `migration_defaults` block in `~/.secrets/smt-config.yaml` no longer
+  carries data-transfer tuning that SMT (a schema tool) never consumed:
+  `workers`, `max_memory_mb`, `read_ahead_buffers`, `write_ahead_writers`,
+  `parallel_readers`, `strict_consistency`, `sample_validation`, `sample_size`,
+  `checkpoint_frequency`, `max_retries`, `history_retention_days`, `ai_adjust`,
+  and `ai_adjust_interval`. The v1-supported shape is `max_source_connections`,
+  `max_target_connections`, `create_indexes`, `create_foreign_keys`,
+  `create_check_constraints`, and `data_dir`. Existing secrets files that still
+  list a removed key load fine — the key is ignored and a single warning names
+  the dropped keys (warn-and-ignore, not a hard failure). `smt init-secrets`
+  emits only the supported shape.
+
 ## [0.11.0] - 2026-06-14
 
 Headline: **optional AI failure assistance** — when SMT's deterministic renderer
@@ -102,6 +119,7 @@ history since v0.9.0:
 [#131]: https://github.com/johndauphine/smt/issues/131
 [#133]: https://github.com/johndauphine/smt/pull/133
 [#134]: https://github.com/johndauphine/smt/issues/134
+[#156]: https://github.com/johndauphine/smt/issues/156
 [#46]: https://github.com/johndauphine/smt/issues/46
 [#57]: https://github.com/johndauphine/smt/issues/57
 [#58]: https://github.com/johndauphine/smt/issues/58

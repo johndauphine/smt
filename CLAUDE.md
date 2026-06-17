@@ -119,7 +119,7 @@ If you find yourself looking for these in SMT, they're intentionally gone:
 - `internal/driver/dbtuning/` — database-level data-transfer parameter tuning.
 - `internal/driver/ai_smartconfig.go` — AI suggestions for data-transfer parameters.
 - `cmd/migrate/...` paths — SMT's binary is `cmd/smt/`.
-- `MigrationDefaults` workers/chunk_size/buffers fields are still defined in `internal/secrets/secrets.go` (kept to avoid breaking the secrets file format) but unused.
+- `MigrationDefaults` (secrets file) DMT-era data-transfer tuning — removed in #156. The v1 `migration_defaults` shape is `max_source_connections`, `max_target_connections`, `create_{indexes,foreign_keys,check_constraints}`, and `data_dir`; removed keys (`workers`, `max_memory_mb`, buffers/readers/writers, `strict_consistency`, `sample_*`, `checkpoint_frequency`, `max_retries`, `history_retention_days`, `ai_adjust*`) warn-and-ignore on load.
 - `validator.go` — DMT's row-count validator. Schema validation lives in `schemadiff`.
 
 ## Reading the source
@@ -133,10 +133,6 @@ Active work is tracked in GitHub issues. Run `gh issue list --state open` and re
 - **#57 (deterministic DDL generation)** — core is done (no-AI schema path, deterministic renderer, repeat-stable). Remaining children: **#62** (UVG-style canonical type layer — largely behavioral-equivalent today; a refactor question), **#64** (renderer/mapper version fingerprints on persisted artifacts), **#65** (SO2010 MSSQL→PG no-AI acceptance test).
 - **#58 (optional AI review)** — review is optional, default-off, inspect-only; the verifier-feedback retry loop is gone. Remaining child: **#68** (reviewer contract + provider-failure tests).
 - **#59 (deterministic sync)** — snapshot diff, deterministic ALTERs, dry-run + risk gating, golden tests all landed. Remaining child: **#69** (target-side introspection + three-way source/desired/existing diff — the substantive open feature).
-
-Older non-issue follow-ups:
-
-- `MigrationDefaults` in `internal/secrets/secrets.go` carries unused workers/chunk_size/buffer fields. Safe to drop once we're confident no DMT secrets file in the wild needs them.
 
 ### Cross-engine coverage status
 
