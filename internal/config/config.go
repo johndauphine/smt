@@ -423,27 +423,12 @@ func (c *Config) applyGlobalDefaults() {
 		return
 	}
 
-	// Performance settings - only apply if not set in migration config
-	if c.Migration.Workers == 0 && defaults.Workers > 0 {
-		c.Migration.Workers = defaults.Workers
-	}
+	// Connection pool sizing - only apply if not set in migration config
 	if c.Migration.MaxSourceConnections == 0 && defaults.MaxSourceConnections > 0 {
 		c.Migration.MaxSourceConnections = defaults.MaxSourceConnections
 	}
 	if c.Migration.MaxTargetConnections == 0 && defaults.MaxTargetConnections > 0 {
 		c.Migration.MaxTargetConnections = defaults.MaxTargetConnections
-	}
-	if c.Migration.MaxMemoryMB == 0 && defaults.MaxMemoryMB > 0 {
-		c.Migration.MaxMemoryMB = defaults.MaxMemoryMB
-	}
-	if c.Migration.ReadAheadBuffers == 0 && defaults.ReadAheadBuffers > 0 {
-		c.Migration.ReadAheadBuffers = defaults.ReadAheadBuffers
-	}
-	if c.Migration.WriteAheadWriters == 0 && defaults.WriteAheadWriters > 0 {
-		c.Migration.WriteAheadWriters = defaults.WriteAheadWriters
-	}
-	if c.Migration.ParallelReaders == 0 && defaults.ParallelReaders > 0 {
-		c.Migration.ParallelReaders = defaults.ParallelReaders
 	}
 
 	// Schema-object defaults use YAML key presence so explicit false in a
@@ -459,30 +444,6 @@ func (c *Config) applyGlobalDefaults() {
 	if defaults.CreateCheckConstraints != nil && !c.hasMigrationKey("create_check_constraints") {
 		c.Migration.CreateCheckConstraints = *defaults.CreateCheckConstraints
 		c.markMigrationDefault("create_check_constraints")
-	}
-
-	// Other booleans retain the historical bool limitation: global true wins
-	// over an unset/false migration value because these fields do not track
-	// YAML key presence yet.
-	if defaults.StrictConsistency != nil && !c.Migration.StrictConsistency {
-		c.Migration.StrictConsistency = *defaults.StrictConsistency
-	}
-	if defaults.SampleValidation != nil && !c.Migration.SampleValidation {
-		c.Migration.SampleValidation = *defaults.SampleValidation
-	}
-	if c.Migration.SampleSize == 0 && defaults.SampleSize > 0 {
-		c.Migration.SampleSize = defaults.SampleSize
-	}
-
-	// Checkpoint and recovery
-	if c.Migration.CheckpointFrequency == 0 && defaults.CheckpointFrequency > 0 {
-		c.Migration.CheckpointFrequency = defaults.CheckpointFrequency
-	}
-	if c.Migration.MaxRetries == 0 && defaults.MaxRetries > 0 {
-		c.Migration.MaxRetries = defaults.MaxRetries
-	}
-	if c.Migration.HistoryRetentionDays == 0 && defaults.HistoryRetentionDays > 0 {
-		c.Migration.HistoryRetentionDays = defaults.HistoryRetentionDays
 	}
 
 	// Data directory

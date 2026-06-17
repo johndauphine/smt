@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+
+	"smt/internal/logging"
 )
 
 const (
@@ -32,39 +34,35 @@ type Config struct {
 	MigrationDefaults MigrationDefaults   `yaml:"migration_defaults"`
 }
 
-// MigrationDefaults holds global default settings for migrations.
-// These can be overridden in individual migration config files.
+// MigrationDefaults holds global default settings applied to every migration,
+// overridable per-migration in a config.yaml. This is the v1-supported shape:
+// only fields SMT actually consumes survive here. The broad DMT-era
+// data-transfer tuning surface (workers, memory/buffer/reader/writer counts,
+// chunk-checkpoint, table-retry, row-sample validation, AI runtime adjustment)
+// was removed in v1 — SMT runs DDL, not row transfer. Legacy keys still present
+// in a secrets file are warned about once and ignored (see legacyMigrationDefaultKeys).
 type MigrationDefaults struct {
-	// Performance settings (machine-dependent)
-	Workers              int   `yaml:"workers,omitempty"`                // Number of parallel workers (default: auto based on CPU)
-	MaxSourceConnections int   `yaml:"max_source_connections,omitempty"` // Max source DB connections
-	MaxTargetConnections int   `yaml:"max_target_connections,omitempty"` // Max target DB connections
-	MaxMemoryMB          int64 `yaml:"max_memory_mb,omitempty"`          // Max memory usage in MB
-	ReadAheadBuffers     int   `yaml:"read_ahead_buffers,omitempty"`     // Chunks to buffer ahead
-	WriteAheadWriters    int   `yaml:"write_ahead_writers,omitempty"`    // Parallel writers per job
-	ParallelReaders      int   `yaml:"parallel_readers,omitempty"`       // Parallel readers per job
+	// Connection pool sizing (applied to the schema source/target pools).
+	MaxSourceConnections int `yaml:"max_source_connections,omitempty"` // Max source DB connections
+	MaxTargetConnections int `yaml:"max_target_connections,omitempty"` // Max target DB connections
 
-	// Schema creation defaults (use *bool to distinguish "not set" from "false")
+	// Schema-object defaults (use *bool to distinguish "not set" from "false").
 	CreateIndexes          *bool `yaml:"create_indexes,omitempty"`           // Create non-PK indexes (default: true)
 	CreateForeignKeys      *bool `yaml:"create_foreign_keys,omitempty"`      // Create FK constraints (default: true)
 	CreateCheckConstraints *bool `yaml:"create_check_constraints,omitempty"` // Create CHECK constraints (default: false)
 
-	// Consistency and validation
-	StrictConsistency *bool `yaml:"strict_consistency,omitempty"` // Use table locks instead of NOLOCK
-	SampleValidation  *bool `yaml:"sample_validation,omitempty"`  // Enable sample data validation
-	SampleSize        int   `yaml:"sample_size,omitempty"`        // Rows to sample for validation
+	// Directory for the SMT state DB, snapshots, and run artifacts.
+	DataDir string `yaml:"data_dir,omitempty"`
+}
 
-	// Checkpoint and recovery
-	CheckpointFrequency  int `yaml:"checkpoint_frequency,omitempty"`   // Save progress every N chunks
-	MaxRetries           int `yaml:"max_retries,omitempty"`            // Retry failed tables N times
-	HistoryRetentionDays int `yaml:"history_retention_days,omitempty"` // Keep run history for N days
-
-	// AI features (enabled by default when AI provider is configured)
-	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"`          // Enable AI-driven parameter adjustment (default: true)
-	AIAdjustInterval string `yaml:"ai_adjust_interval,omitempty"` // How often AI evaluates metrics (default: 30s)
-
-	// Data directory
-	DataDir string `yaml:"data_dir,omitempty"` // Directory for state/checkpoint files
+// legacyMigrationDefaultKeys are migration_defaults keys SMT no longer honors
+// (DMT-era data-transfer tuning, removed for v1). They are warned about once on
+// load and otherwise ignored — see warnLegacyMigrationDefaults.
+var legacyMigrationDefaultKeys = []string{
+	"workers", "max_memory_mb", "read_ahead_buffers", "write_ahead_writers",
+	"parallel_readers", "strict_consistency", "sample_validation", "sample_size",
+	"checkpoint_frequency", "max_retries", "history_retention_days",
+	"ai_adjust", "ai_adjust_interval",
 }
 
 // AIConfig holds AI provider configuration
@@ -259,12 +257,37 @@ func loadFromFile() (*Config, error) {
 		return nil, fmt.Errorf("parsing secrets file: %w", err)
 	}
 
+	// Warn (once) about removed DMT-era migration_defaults keys still present in
+	// the file. They are ignored, not fatal — keep old secrets files loadable.
+	warnLegacyMigrationDefaults(data)
+
 	// Validate configuration
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 
 	return &config, nil
+}
+
+// warnLegacyMigrationDefaults emits a single warning naming any removed
+// migration_defaults keys present in the raw secrets YAML.
+func warnLegacyMigrationDefaults(data []byte) {
+	var raw struct {
+		MigrationDefaults map[string]any `yaml:"migration_defaults"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil || len(raw.MigrationDefaults) == 0 {
+		return
+	}
+	var found []string
+	for _, key := range legacyMigrationDefaultKeys {
+		if _, ok := raw.MigrationDefaults[key]; ok {
+			found = append(found, key)
+		}
+	}
+	if len(found) > 0 {
+		logging.Warn("secrets: ignoring removed migration_defaults keys (DMT-era, dropped in v1): %s",
+			strings.Join(found, ", "))
+	}
 }
 
 // Save writes the config to the secrets file, preserving existing fields.
@@ -329,44 +352,14 @@ func mergeAIConfig(existing, updates *AIConfig) {
 
 // mergeMigrationDefaults merges non-zero migration defaults.
 func mergeMigrationDefaults(existing, updates *MigrationDefaults) {
-	if updates.Workers > 0 {
-		existing.Workers = updates.Workers
-	}
 	if updates.MaxSourceConnections > 0 {
 		existing.MaxSourceConnections = updates.MaxSourceConnections
 	}
 	if updates.MaxTargetConnections > 0 {
 		existing.MaxTargetConnections = updates.MaxTargetConnections
 	}
-	if updates.MaxMemoryMB > 0 {
-		existing.MaxMemoryMB = updates.MaxMemoryMB
-	}
-	if updates.ReadAheadBuffers > 0 {
-		existing.ReadAheadBuffers = updates.ReadAheadBuffers
-	}
-	if updates.WriteAheadWriters > 0 {
-		existing.WriteAheadWriters = updates.WriteAheadWriters
-	}
-	if updates.ParallelReaders > 0 {
-		existing.ParallelReaders = updates.ParallelReaders
-	}
-	if updates.CheckpointFrequency > 0 {
-		existing.CheckpointFrequency = updates.CheckpointFrequency
-	}
-	if updates.MaxRetries > 0 {
-		existing.MaxRetries = updates.MaxRetries
-	}
-	if updates.SampleSize > 0 {
-		existing.SampleSize = updates.SampleSize
-	}
-	if updates.HistoryRetentionDays > 0 {
-		existing.HistoryRetentionDays = updates.HistoryRetentionDays
-	}
 	if updates.DataDir != "" {
 		existing.DataDir = updates.DataDir
-	}
-	if updates.AIAdjustInterval != "" {
-		existing.AIAdjustInterval = updates.AIAdjustInterval
 	}
 	// Boolean pointers - only update if explicitly set
 	if updates.CreateIndexes != nil {
@@ -377,15 +370,6 @@ func mergeMigrationDefaults(existing, updates *MigrationDefaults) {
 	}
 	if updates.CreateCheckConstraints != nil {
 		existing.CreateCheckConstraints = updates.CreateCheckConstraints
-	}
-	if updates.StrictConsistency != nil {
-		existing.StrictConsistency = updates.StrictConsistency
-	}
-	if updates.SampleValidation != nil {
-		existing.SampleValidation = updates.SampleValidation
-	}
-	if updates.AIAdjust != nil {
-		existing.AIAdjust = updates.AIAdjust
 	}
 }
 
@@ -471,25 +455,9 @@ func (c *Config) GetMasterKey() string {
 	return c.Encryption.MasterKey
 }
 
-// GetMigrationDefaults returns the global migration defaults with smart defaults applied.
-// AI adjust is enabled by default when an AI provider is configured.
+// GetMigrationDefaults returns the global migration defaults.
 func (c *Config) GetMigrationDefaults() *MigrationDefaults {
 	defaults := c.MigrationDefaults
-
-	// Apply smart defaults for AI adjust:
-	// If ai_adjust wasn't explicitly set (nil pointer),
-	// enable it by default when an AI provider is configured
-	if defaults.AIAdjust == nil && defaults.AIAdjustInterval == "" {
-		// Neither ai_adjust nor ai_adjust_interval was set - apply default
-		if provider, _, err := c.GetDefaultProvider(); err == nil && provider != nil {
-			if provider.APIKey != "" || provider.BaseURL != "" {
-				aiAdjust := true
-				defaults.AIAdjust = &aiAdjust
-				defaults.AIAdjustInterval = "30s"
-			}
-		}
-	}
-
 	return &defaults
 }
 
@@ -646,12 +614,14 @@ notifications:
 
 # Global migration defaults (can be overridden per-migration)
 migration_defaults:
-  # Schema creation defaults
+  # Schema-object defaults
   create_indexes: true            # Create non-PK indexes
   create_foreign_keys: true       # Create FK constraints
   create_check_constraints: false # Create CHECK constraints
 
-  # History
-  history_retention_days: 30      # Keep run history for N days
+  # Optional: connection pool sizing and state/artifact directory
+  # max_source_connections: 4
+  # max_target_connections: 4
+  # data_dir: ~/.smt
 `
 }
