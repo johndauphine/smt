@@ -39,12 +39,6 @@ type AIErrorDiagnoser struct {
 	mu       sync.RWMutex
 }
 
-// Package-level singleton for shared caching across DDL operations
-var (
-	globalDiagnoser   *AIErrorDiagnoser
-	globalDiagnoserMu sync.Mutex
-)
-
 // DiagnosisHandler is a callback function for handling diagnosis output.
 // The TUI can register a handler to receive diagnoses and format them as BoxedOutputMsg.
 type DiagnosisHandler func(diagnosis *ErrorDiagnosis)
@@ -74,35 +68,6 @@ func EmitDiagnosis(diagnosis *ErrorDiagnosis) {
 		// Fallback to logging with box format
 		logging.Warn("\n%s", diagnosis.FormatBox())
 	}
-}
-
-// GetAIErrorDiagnoser returns the global AI error diagnoser if available.
-// Returns nil if AI is not configured.
-func GetAIErrorDiagnoser() *AIErrorDiagnoser {
-	return getGlobalDiagnoser()
-}
-
-// getGlobalDiagnoser returns a shared diagnoser instance for caching.
-func getGlobalDiagnoser() *AIErrorDiagnoser {
-	globalDiagnoserMu.Lock()
-	defer globalDiagnoserMu.Unlock()
-
-	if globalDiagnoser != nil {
-		return globalDiagnoser
-	}
-
-	// Try to create a new diagnoser
-	typeMapper, err := GetAITypeMapper()
-	if err != nil {
-		return nil
-	}
-	aiMapper, ok := typeMapper.(*AITypeMapper)
-	if !ok || aiMapper == nil {
-		return nil
-	}
-
-	globalDiagnoser = NewAIErrorDiagnoser(aiMapper)
-	return globalDiagnoser
 }
 
 // NewAIErrorDiagnoser creates a new AI-powered error diagnoser.
@@ -334,32 +299,6 @@ func (d *AIErrorDiagnoser) ClearCache() {
 	d.mu.Lock()
 	d.cache = make(map[string]*ErrorDiagnosis)
 	d.mu.Unlock()
-}
-
-// DiagnoseSchemaError diagnoses a DDL/schema error and emits the diagnosis.
-// Uses a shared diagnoser instance for caching across multiple calls.
-// The diagnosis is emitted via the registered DiagnosisHandler (or logged as fallback).
-func DiagnoseSchemaError(ctx context.Context, tableName, tableSchema, sourceDBType, targetDBType, operation string, err error) {
-	diagnoser := getGlobalDiagnoser()
-	if diagnoser == nil {
-		return
-	}
-
-	errCtx := &ErrorContext{
-		ErrorMessage: fmt.Sprintf("%s: %v", operation, err),
-		TableName:    tableName,
-		TableSchema:  tableSchema,
-		SourceDBType: sourceDBType,
-		TargetDBType: targetDBType,
-	}
-
-	diagnosis, diagErr := diagnoser.Diagnose(ctx, errCtx)
-	if diagErr != nil {
-		logging.Debug("AI error diagnosis unavailable: %v", diagErr)
-		return
-	}
-
-	EmitDiagnosis(diagnosis)
 }
 
 // Format returns a plain text representation of the diagnosis.

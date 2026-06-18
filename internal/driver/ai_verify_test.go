@@ -2,11 +2,7 @@ package driver
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 )
 
@@ -70,34 +66,6 @@ func TestParseVerifyResponse(t *testing.T) {
 			}
 		})
 	}
-}
-
-// verifyMockServer returns an httptest server that responds to every
-// chat-completion request with the supplied content and increments the
-// counter on each call.
-func verifyMockServer(t *testing.T, content string, calls *atomic.Int32) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(openAIResponse{
-			Choices: []struct {
-				Message struct {
-					Content          string `json:"content"`
-					ReasoningContent string `json:"reasoning_content"`
-				} `json:"message"`
-				FinishReason string `json:"finish_reason"`
-			}{
-				{
-					Message: struct {
-						Content          string `json:"content"`
-						ReasoningContent string `json:"reasoning_content"`
-					}{Content: content},
-					FinishReason: "stop",
-				},
-			},
-		})
-	}))
 }
 
 // TestVerifyTableDDL_OK is the happy path under the parse+compare flow

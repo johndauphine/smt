@@ -13,9 +13,6 @@
 package orchestrator
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -68,11 +65,6 @@ type Orchestrator struct {
 	// suggestOnce guards writing schema.suggested.sql so concurrent table
 	// failures produce a single suggestion artifact.
 	suggestOnce sync.Once
-}
-
-// New constructs an Orchestrator with default options.
-func New(cfg *config.Config) (*Orchestrator, error) {
-	return NewWithOptions(cfg, Options{})
 }
 
 // NewWithOptions constructs an Orchestrator with the given options.
@@ -149,10 +141,6 @@ func (o *Orchestrator) SetRunContext(profileName, configPath string) {
 	o.runConfig = configPath
 }
 
-// Tables returns the tables in scope after include/exclude filtering.
-// Populated after Run or after the extract-schema phase has been called.
-func (o *Orchestrator) Tables() []source.Table { return o.tables }
-
 // Source returns the underlying source Reader. Used by schema-diff and
 // other inspection commands that introspect the source directly.
 func (o *Orchestrator) Source() pool.SourcePool { return o.source }
@@ -163,14 +151,6 @@ func (o *Orchestrator) Target() pool.TargetPool { return o.target }
 
 // State returns the underlying state backend.
 func (o *Orchestrator) State() checkpoint.StateBackend { return o.state }
-
-// ConfigHash returns a short hex hash of the sanitized config — used for
-// detecting config drift across runs.
-func (o *Orchestrator) ConfigHash() string {
-	configJSON, _ := json.Marshal(o.config.Sanitized())
-	hash := sha256.Sum256(configJSON)
-	return hex.EncodeToString(hash[:8])
-}
 
 func newNotifier(cfg *config.Config) notify.Provider {
 	if cfg.Slack != nil && cfg.Slack.Enabled {

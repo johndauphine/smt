@@ -36,14 +36,6 @@ func (r deterministicDDL) withSource(sourceDialect string) deterministicDDL {
 	return r
 }
 
-func RenderCreateTableDDL(t *driver.Table, targetSchema string, unlogged bool) (string, map[string]string, error) {
-	return RenderCreateTableDDLWithPolicy(t, targetSchema, unlogged, "")
-}
-
-func RenderCreateTableDDLWithPolicy(t *driver.Table, targetSchema string, unlogged bool, unknownTypePolicy string) (string, map[string]string, error) {
-	return newDeterministicDDL(unknownTypePolicy).createTable(t, targetSchema, unlogged)
-}
-
 // RenderCreateTableDDLWithSource is RenderCreateTableDDLWithPolicy that also
 // knows the source dialect, so the canonical type mapping can resolve
 // dialect-dependent source types. sourceDialect "" reproduces the source-blind
@@ -52,29 +44,11 @@ func RenderCreateTableDDLWithSource(t *driver.Table, targetSchema string, unlogg
 	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).createTable(t, targetSchema, unlogged)
 }
 
-func RenderColumnDefinition(col driver.Column) (string, error) {
-	return RenderColumnDefinitionWithPolicy(col, "")
-}
-
-func RenderColumnDefinitionWithPolicy(col driver.Column, unknownTypePolicy string) (string, error) {
-	def, _, err := newDeterministicDDL(unknownTypePolicy).columnDefinition(col)
-	return def, err
-}
-
-func RenderColumnDefinitionWithContextAndPolicy(col driver.Column, tableColumns []driver.Column, unknownTypePolicy string) (string, error) {
-	def, _, err := newDeterministicDDL(unknownTypePolicy).columnDefinition(col, tableColumns)
-	return def, err
-}
-
 // RenderColumnDefinitionWithSource is the source-dialect-aware variant of
 // RenderColumnDefinitionWithContextAndPolicy.
 func RenderColumnDefinitionWithSource(col driver.Column, tableColumns []driver.Column, unknownTypePolicy, sourceDialect string) (string, error) {
 	def, _, err := newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).columnDefinition(col, tableColumns)
 	return def, err
-}
-
-func RenderColumnType(col driver.Column) (string, error) {
-	return RenderColumnTypeWithPolicy(col, "")
 }
 
 func RenderColumnTypeWithPolicy(col driver.Column, unknownTypePolicy string) (string, error) {
@@ -87,23 +61,11 @@ func RenderColumnTypeWithSource(col driver.Column, unknownTypePolicy, sourceDial
 	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).columnType(col)
 }
 
-func RenderColumnDefaultDDL(col driver.Column) (string, error) {
-	return RenderColumnDefaultDDLWithPolicy(col, "")
-}
-
-func RenderColumnDefaultDDLWithPolicy(col driver.Column, unknownTypePolicy string) (string, error) {
-	return newDeterministicDDL(unknownTypePolicy).defaultExpression(col)
-}
-
 // RenderColumnDefaultDDLWithSource is the source-dialect-aware variant of
 // RenderColumnDefaultDDLWithPolicy, so boolean defaults are translated for the
 // source's boolean convention (MSSQL bit and MySQL tinyint(1) alike).
 func RenderColumnDefaultDDLWithSource(col driver.Column, unknownTypePolicy, sourceDialect string) (string, error) {
 	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).defaultExpression(col)
-}
-
-func RenderCreateIndexDDL(t *driver.Table, idx *driver.Index, targetSchema string) (string, error) {
-	return newDeterministicDDL().createIndex(t, idx, targetSchema)
 }
 
 // RenderCreateIndexDDLWithSource is the source-dialect-aware variant of

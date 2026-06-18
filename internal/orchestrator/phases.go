@@ -16,7 +16,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"smt/internal/checkpoint"
-	"smt/internal/driver"
 	"smt/internal/logging"
 	"smt/internal/schemadiff"
 	"smt/internal/source"
@@ -246,12 +245,4 @@ func (o *Orchestrator) writeJSONArtifact(runID, name string, value any) error {
 	}
 	data = append(data, '\n')
 	return os.WriteFile(filepath.Join(dir, name), data, 0600)
-}
-
-func artifactName(name string) string {
-	normalized := driver.NormalizeIdentifier("postgres", name)
-	if normalized == "" {
-		return "unnamed"
-	}
-	return normalized
 }
