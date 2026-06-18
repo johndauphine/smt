@@ -4,18 +4,15 @@ import "github.com/charmbracelet/lipgloss"
 
 var (
 	// Colors
-	colorBackground = lipgloss.Color("")
-	colorSurface    = lipgloss.Color("")
-	colorPurple     = lipgloss.Color("#B08CFF")
-	colorTeal       = lipgloss.Color("#8FE3FF")
-	colorGold       = lipgloss.Color("#E9C07A")
-	colorGreen      = lipgloss.Color("#39D98A")
-	colorRed        = lipgloss.Color("#FF6B6B")
-	colorGray       = lipgloss.Color("#5D6581")
-	colorLightGray  = lipgloss.Color("#A8B0C9")
-	colorWhite      = lipgloss.Color("#E6E9F5")
-	colorBlue       = lipgloss.Color("#5B9BD5")
-	colorDark       = lipgloss.Color("#1A1B26") // Dark text for high contrast on colored backgrounds
+	colorPurple    = lipgloss.Color("#B08CFF")
+	colorTeal      = lipgloss.Color("#8FE3FF")
+	colorGold      = lipgloss.Color("#E9C07A")
+	colorGreen     = lipgloss.Color("#39D98A")
+	colorRed       = lipgloss.Color("#FF6B6B")
+	colorGray      = lipgloss.Color("#5D6581")
+	colorLightGray = lipgloss.Color("#A8B0C9")
+	colorWhite     = lipgloss.Color("#E6E9F5")
+	colorDark      = lipgloss.Color("#1A1B26") // Dark text for high contrast on colored backgrounds
 
 	// Base Styles
 	styleNormal = lipgloss.NewStyle().
@@ -90,14 +87,6 @@ var (
 				BorderForeground(colorGold).
 				Foreground(colorWhite).
 				Padding(0, 1)
-
-	styleScrollbar = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), false, false, false, true). // Left border only
-			BorderForeground(colorGray).
-			Foreground(colorGray)
-
-	styleScrollbarHandle = lipgloss.NewStyle().
-				Foreground(colorPurple)
 
 	// Command output box style - subtle left border to indicate command output
 	styleOutputBox = lipgloss.NewStyle().

@@ -50,17 +50,6 @@ const (
 	ProviderLMStudio AIProvider = "lmstudio"
 )
 
-// ValidAIProviders returns the list of supported AI provider names.
-func ValidAIProviders() []string {
-	return []string{
-		string(ProviderAnthropic),
-		string(ProviderOpenAI),
-		string(ProviderGoogle),
-		string(ProviderOllama),
-		string(ProviderLMStudio),
-	}
-}
-
 // IsValidAIProvider returns true if the provider name is valid (case-insensitive).
 func IsValidAIProvider(provider string) bool {
 	switch AIProvider(strings.ToLower(provider)) {
@@ -371,12 +360,6 @@ func (m *AITypeMapper) dispatch(ctx context.Context, prompt string) (string, err
 
 // maxSampleValueLen is the maximum length of a single sample value in prompts.
 const maxSampleValueLen = 100
-
-// maxSamplesInPrompt is the maximum number of sample values to include in prompts.
-const maxSamplesInPrompt = 5
-
-// maxTotalSampleBytes is the maximum total bytes of sample data to include.
-const maxTotalSampleBytes = 500
 
 // sanitizeSampleValue cleans and truncates a sample value for inclusion in AI prompts.
 // It redacts potential PII patterns and limits length.

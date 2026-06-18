@@ -184,7 +184,7 @@ func Load() (*Config, error) {
 	return globalConfig, configErr
 }
 
-// Reset clears the cached config (useful for testing)
+// Reset clears the cached config (useful for testing).
 func Reset() {
 	configOnce = sync.Once{}
 	globalConfig = nil
@@ -287,89 +287,6 @@ func warnLegacyMigrationDefaults(data []byte) {
 	if len(found) > 0 {
 		logging.Warn("secrets: ignoring removed migration_defaults keys (DMT-era, dropped in v1): %s",
 			strings.Join(found, ", "))
-	}
-}
-
-// Save writes the config to the secrets file, preserving existing fields.
-// It loads the current file first to preserve any fields not in the new config.
-func Save(updates *Config) error {
-	path := GetSecretsPath()
-
-	// Load existing config if it exists
-	existing := &Config{}
-	data, err := os.ReadFile(path)
-	if err == nil {
-		_ = yaml.Unmarshal(data, existing)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("reading existing secrets file: %w", err)
-	}
-
-	// Merge updates into existing config
-	mergeConfig(existing, updates)
-
-	// Marshal the merged config
-	newData, err := yaml.Marshal(existing)
-	if err != nil {
-		return fmt.Errorf("marshaling config: %w", err)
-	}
-
-	// Ensure the directory exists
-	if _, err := EnsureSecretsDir(); err != nil {
-		return err
-	}
-
-	// Write with secure permissions
-	if err := os.WriteFile(path, newData, SecureFileMode); err != nil {
-		return fmt.Errorf("writing secrets file: %w", err)
-	}
-
-	// Reset the cached config so next Load() picks up changes
-	Reset()
-
-	return nil
-}
-
-// mergeConfig merges updates into existing config, only overwriting non-zero values.
-func mergeConfig(existing, updates *Config) {
-	mergeAIConfig(&existing.AI, &updates.AI)
-	mergeMigrationDefaults(&existing.MigrationDefaults, &updates.MigrationDefaults)
-}
-
-// mergeAIConfig merges AI configuration updates into existing config.
-func mergeAIConfig(existing, updates *AIConfig) {
-	if updates.DefaultProvider != "" {
-		existing.DefaultProvider = updates.DefaultProvider
-	}
-	if len(updates.Providers) > 0 {
-		if existing.Providers == nil {
-			existing.Providers = make(map[string]*Provider)
-		}
-		for name, provider := range updates.Providers {
-			existing.Providers[name] = provider
-		}
-	}
-}
-
-// mergeMigrationDefaults merges non-zero migration defaults.
-func mergeMigrationDefaults(existing, updates *MigrationDefaults) {
-	if updates.MaxSourceConnections > 0 {
-		existing.MaxSourceConnections = updates.MaxSourceConnections
-	}
-	if updates.MaxTargetConnections > 0 {
-		existing.MaxTargetConnections = updates.MaxTargetConnections
-	}
-	if updates.DataDir != "" {
-		existing.DataDir = updates.DataDir
-	}
-	// Boolean pointers - only update if explicitly set
-	if updates.CreateIndexes != nil {
-		existing.CreateIndexes = updates.CreateIndexes
-	}
-	if updates.CreateForeignKeys != nil {
-		existing.CreateForeignKeys = updates.CreateForeignKeys
-	}
-	if updates.CreateCheckConstraints != nil {
-		existing.CreateCheckConstraints = updates.CreateCheckConstraints
 	}
 }
 

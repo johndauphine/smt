@@ -56,20 +56,6 @@ func CaptureOutput(p *tea.Program) func() {
 	}
 }
 
-// WriterAdapter implements io.Writer and sends messages to the program
-type WriterAdapter struct {
-	Program *tea.Program
-}
-
-func (w *WriterAdapter) Write(p []byte) (n int, err error) {
-	if w.Program != nil {
-		w.Program.Send(OutputMsg(string(p)))
-	} else {
-		fmt.Print(string(p))
-	}
-	return len(p), nil
-}
-
 // programRef holds a reference to the tea.Program for use by migration commands
 var programRef *tea.Program
 

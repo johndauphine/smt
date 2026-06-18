@@ -1,7 +1,6 @@
 package driver
 
 import (
-	"strings"
 	"time"
 )
 
@@ -95,15 +94,4 @@ type Dialect interface {
 
 	// ValidDateTypes returns a map of valid date/timestamp types.
 	ValidDateTypes() map[string]bool
-}
-
-// GetDialect returns the appropriate dialect for the given database type.
-// This uses the driver registry to get the dialect, eliminating switch statements.
-// Returns nil if no driver is registered for the given type.
-func GetDialect(dbType string) Dialect {
-	d, err := Get(strings.ToLower(dbType))
-	if err != nil {
-		return nil
-	}
-	return d.Dialect()
 }

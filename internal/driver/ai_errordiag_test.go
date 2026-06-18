@@ -1,7 +1,6 @@
 package driver
 
 import (
-	"context"
 	"strings"
 	"testing"
 )
@@ -126,14 +125,6 @@ func TestErrorDiagnosis_FormatBox(t *testing.T) {
 	if !strings.Contains(got, "Fix 1") || !strings.Contains(got, "Fix 2") {
 		t.Error("FormatBox() should contain suggestions")
 	}
-}
-
-func TestDiagnoseSchemaError_NoPanic(t *testing.T) {
-	ctx := context.Background()
-	// Calling with nil error should not panic
-	// DiagnoseSchemaError now emits via handler (or logs as fallback)
-	DiagnoseSchemaError(ctx, "test_table", "public", "postgres", "mssql", "CREATE TABLE", nil)
-	// Just verify no panic
 }
 
 func TestSetDiagnosisHandler(t *testing.T) {

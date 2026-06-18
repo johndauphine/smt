@@ -228,15 +228,3 @@ func TestReaderDatabaseContext_Populated(t *testing.T) {
 		}
 	}
 }
-
-// callerFile returns the absolute path of the file calling this helper.
-// Used by readReader-style tests that need to locate sibling files via
-// runtime.Caller without hardcoding the package path.
-func callerFile(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(1)
-	if !ok {
-		t.Fatal("runtime.Caller(1) failed")
-	}
-	return thisFile
-}

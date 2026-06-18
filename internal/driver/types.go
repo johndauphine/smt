@@ -416,11 +416,3 @@ func isValidIdentifierChar(r rune) bool {
 		r == '$' || // PostgreSQL allows $ in identifiers
 		r == '#' // SQL Server allows # for temp tables
 }
-
-// MustValidateIdentifier validates an identifier and panics if invalid.
-// Use only when identifier comes from trusted source (e.g., INFORMATION_SCHEMA).
-func MustValidateIdentifier(name string) {
-	if err := ValidateIdentifier(name); err != nil {
-		panic(fmt.Sprintf("invalid identifier: %v", err))
-	}
-}

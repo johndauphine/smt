@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"regexp"
@@ -623,22 +622,6 @@ func (w *Writer) upsertBatch(ctx context.Context, tableName, colList string, col
 
 	_, err := w.db.ExecContext(ctx, query, args...)
 	return err
-}
-
-// safeStagingName generates a safe staging table name.
-func (w *Writer) safeStagingName(table string, writerID int, partitionID *int) string {
-	suffix := fmt.Sprintf("_w%d", writerID)
-	if partitionID != nil {
-		suffix = fmt.Sprintf("_p%d%s", *partitionID, suffix)
-	}
-	base := fmt.Sprintf("_stg_%s", table)
-	maxLen := 60 // MySQL max identifier is 64, leave room for suffix
-
-	if len(base)+len(suffix) > maxLen {
-		hash := sha256.Sum256([]byte(table))
-		base = fmt.Sprintf("_stg_%x", hash[:8])
-	}
-	return base + suffix
 }
 
 // convertRowValues converts row values to MySQL-compatible types.
