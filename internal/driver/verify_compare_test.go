@@ -751,6 +751,14 @@ func TestCompareColumns_EnumExemptionScoped(t *testing.T) {
 		[]Column{{Name: "s", DataType: "enum", EnumValues: []string{"a", "b", "c"}}}, "mysql", "mysql"); !hasCriterion(d, "type") {
 		t.Error("enum→enum member-set difference should flag (type)")
 	}
+	// enum → enum where the parse dropped the member list: must flag rather
+	// than silently pass (cmpCanonicalType can't render an enum with no members,
+	// so without this guard a changed/dropped member set would not be caught).
+	if d := CompareColumns(
+		[]Column{{Name: "s", DataType: "enum", EnumValues: []string{"a", "b"}}},
+		[]Column{{Name: "s", DataType: "enum"}}, "mysql", "mysql"); !hasCriterion(d, "enum_values") {
+		t.Error("enum→enum with no parsed target members should flag enum_values")
+	}
 }
 
 // TestCompareColumns_ParserContractFields is the #168/#170 regression guard:

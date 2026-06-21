@@ -102,6 +102,7 @@ func CompareColumns(src, tgt []Column, srcDialect, tgtDialect string) []ColumnDe
 			cmpNullability,
 			cmpIdentity,
 			cmpTZClass,
+			cmpEnumValues,
 		}
 		// Same-class fixed-form columns (UUID, JSON, etc.) also skip
 		// max_length / precision / scale: those metadata are dialect-storage
@@ -470,6 +471,28 @@ func cmpDefaultClass(src, tgt Column, _, _ string) *ColumnDelta {
 		SourceVal: fmt.Sprintf("%s (%q)", srcClass, src.DefaultExpression),
 		TargetVal: fmt.Sprintf("%s (%q)", tgtClass, tgt.DefaultExpression),
 	}
+}
+
+// cmpEnumValues guards same-family ENUM/SET comparison. Length is no longer
+// compared for enum/set (cmpMaxLength skips it — the longest-member length is
+// a derived artifact the AI parse reports as 0), so the member list is the
+// real signal, normally compared via the rendered ENUM(...) type. But that
+// render FAILS when the parsed target omits enum_values, which would let a
+// dropped/changed member set pass silently. A source enum/set always carries
+// its members (from introspection), so a same-family target that parsed
+// without them is an incomplete parse — flag it rather than skip.
+func cmpEnumValues(src, tgt Column, _, _ string) *ColumnDelta {
+	if !isEnumSetType(src.DataType) || !isEnumSetType(tgt.DataType) {
+		return nil
+	}
+	if len(src.EnumValues) > 0 && len(tgt.EnumValues) == 0 {
+		return &ColumnDelta{
+			Column: src.Name, Criterion: "enum_values",
+			SourceVal: fmt.Sprintf("%v", src.EnumValues),
+			TargetVal: "<no members parsed>",
+		}
+	}
+	return nil
 }
 
 // tzClass returns the timezone-awareness class of a dialect-specific
