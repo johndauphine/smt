@@ -89,7 +89,7 @@ func TestFromCanonicalWithWarnings_Lossy(t *testing.T) {
 		{"unsigned integer widening", CanonicalType{Kind: Integer, Unsigned: true}, "postgres", "bigint", "unsigned integer flag"},
 		{"mediumint widening", CanonicalType{Kind: MediumInt}, "mssql", "INT", "24-bit"},
 		{"tinyint widening", CanonicalType{Kind: TinyInt}, "postgres", "smallint", "8-bit"},
-		{"tz-aware timestamp to mysql", CanonicalType{Kind: Timestamp, WithTZ: true}, "mysql", "DATETIME(6)", "time-zone-aware"},
+		{"tz-aware timestamp to mysql", CanonicalType{Kind: Timestamp, WithTZ: true}, "mysql", "TIMESTAMP(6)", "1970-2038"},
 		{"mysql timestamp to pg", CanonicalType{Kind: Timestamp, UTCNormalized: true}, "postgres", "timestamp without time zone", "UTC-normalization"},
 		{"fsp clamp", CanonicalType{Kind: Timestamp, Fsp: &fsp7}, "postgres", "timestamp(6) without time zone", "clamped"},
 		{"mysql text tier to pg", CanonicalType{Kind: Text, Length: baseCap}, "postgres", "text", "LOB capacity tier"},
