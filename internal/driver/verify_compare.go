@@ -203,12 +203,19 @@ func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	// A MySQL ENUM/SET maps to an unbounded target type (pg text) on a
 	// NON-MySQL target; the enum's reported max_length is the longest member,
 	// not a user bound, so length must not flag there. Gated on a non-MySQL
-	// target so a same-dialect ENUM→ENUM still compares length AND an
-	// ENUM→TEXT change on a MySQL target keeps its length signal (the only
-	// delta that reveals the enum constraint was lost). The enum VALUE list
-	// itself is a #62 follow-up, not compared here.
+	// target so an ENUM→TEXT change on a MySQL target keeps its length signal
+	// (the delta that reveals the enum constraint was lost).
 	if isEnumSetType(src.DataType) && !isMySQLDialect(tgtDialect) &&
 		lobDataTypes[strings.ToLower(strings.TrimSpace(tgt.DataType))] {
+		return nil
+	}
+	// Same-family ENUM/SET → ENUM/SET: the reported max_length is the longest
+	// member — a derived artifact, not a user bound — and it does NOT survive
+	// the AI parse (which reports 0), so the old length "value-set proxy"
+	// false-positived as e.g. 7 vs 0 (#170). Skip the length check; the member
+	// list is now compared faithfully via the rendered ENUM(...)/SET(...) type
+	// (cmpCanonicalType), since the parser supplies enum_values.
+	if isEnumSetType(src.DataType) && isEnumSetType(tgt.DataType) {
 		return nil
 	}
 	// MySQL's LOB tiers ARE user-meaningful capacity choices when both
