@@ -91,7 +91,7 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
       "max_length": <integer; characters for char/varchar/nvarchar/text-class types; 0 if not applicable or unbounded>,
       "precision": <integer; for decimal/numeric/money — total digits; 0 otherwise>,
       "scale": <integer; for decimal/numeric/money — fractional digits; 0 otherwise>,
-      "datetime_precision": <integer; fractional-seconds digits for date/time/timestamp types — the N in TIMESTAMP(N)/DATETIME2(N)/DATETIMEOFFSET(N)/TIME(N); for a bare temporal type use the dialect default (rule 9); 0 only for non-temporal types>,
+      "datetime_precision": <integer; fractional-seconds digits for date/time/timestamp types — the explicit N in TIMESTAMP(N)/DATETIME2(N)/DATETIMEOFFSET(N)/TIME(N), else the dialect default per rule 9 (0 for MySQL, 6 for PostgreSQL, 7 for SQL Server); 0 when not a temporal type>,
       "is_unsigned": <true for an UNSIGNED numeric type (MySQL); false otherwise>,
       "display_width": <integer; the N in MySQL tinyint(N) — e.g. TINYINT(1) → 1; 0 for every other type>,
       "is_nullable": <true if the column allows NULL, false if NOT NULL or PRIMARY KEY>,
