@@ -403,11 +403,34 @@ func cmpTZClass(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	if srcClass == tgtClass {
 		return nil
 	}
+	// MySQL TIMESTAMP is the dialect's only time-zone-aware-capable column: it
+	// stores UTC and converts on read, so it faithfully carries a TZ-aware
+	// source (pg timestamptz, mssql datetimeoffset — rendered to TIMESTAMP by
+	// the canonical mapper, #169) just as well as a naive one. tzClass reports
+	// it as naive_dt to keep the MySQL-as-source mapping aligned, so reconcile
+	// here: a MySQL TIMESTAMP on either side matches either date+time class.
+	// MySQL DATETIME stays strictly naive — a TZ-aware source landing there is
+	// the #169 fidelity loss and must still flag.
+	if mysqlTimestampMatchesDT(srcDialect, src.DataType, tgtClass) ||
+		mysqlTimestampMatchesDT(tgtDialect, tgt.DataType, srcClass) {
+		return nil
+	}
 	return &ColumnDelta{
 		Column: src.Name, Criterion: "tz_class",
 		SourceVal: fmt.Sprintf("%s (%s)", srcClass, src.DataType),
 		TargetVal: fmt.Sprintf("%s (%s)", tgtClass, tgt.DataType),
 	}
+}
+
+// mysqlTimestampMatchesDT reports whether the column is a MySQL TIMESTAMP (the
+// dialect's tz-aware-capable type) being compared against a date+time class it
+// can faithfully store — naive_dt or tzaware_dt. Used to reconcile the #169
+// mapping (TZ-aware source -> MySQL TIMESTAMP) against tzClass's deliberate
+// naive_dt classification of MySQL TIMESTAMP.
+func mysqlTimestampMatchesDT(dialect, dataType, otherClass string) bool {
+	return isMySQLDialect(dialect) &&
+		strings.EqualFold(strings.TrimSpace(dataType), "timestamp") &&
+		(otherClass == "naive_dt" || otherClass == "tzaware_dt")
 }
 
 // cmpDefaultClass enforces criterion 6: default-expression class preserved.
