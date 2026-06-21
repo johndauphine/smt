@@ -810,6 +810,25 @@ func TestBuildVerifyParsePrompt_ContractFields(t *testing.T) {
 			t.Errorf("parser prompt is missing the %q field — comparator will false-positive", field)
 		}
 	}
+	// A bare temporal type must be reported at its dialect default, not 0,
+	// or a dropped explicit precision (e.g. timestamp(0) -> bare timestamp)
+	// would be silently accepted as a match.
+	if !strings.Contains(p, "stored default") {
+		t.Error("parser prompt should instruct dialect-default precision for bare temporal types")
+	}
+}
+
+// TestCompareColumns_TemporalPrecisionLossFlags guards that a real
+// fractional-seconds loss still flags once the parser reports the target's
+// true precision: source timestamp(0) against a target the parser read as the
+// pg default (6) must produce a type delta, not silently match.
+func TestCompareColumns_TemporalPrecisionLossFlags(t *testing.T) {
+	zero, six := 0, 6
+	src := []Column{{Name: "at", DataType: "datetime2", DatetimePrecision: &zero}}
+	tgt := []Column{{Name: "at", DataType: "timestamp", DatetimePrecision: &six}}
+	if d := CompareColumns(src, tgt, "mssql", "postgres"); !hasCriterion(d, "type") {
+		t.Errorf("datetime2(0)→timestamp(6) precision loss should flag type, got %v", d)
+	}
 }
 
 func hasCriterion(ds []ColumnDelta, crit string) bool {

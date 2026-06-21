@@ -214,7 +214,12 @@ func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	// the AI parse (which reports 0), so the old length "value-set proxy"
 	// false-positived as e.g. 7 vs 0 (#170). Skip the length check; the member
 	// list is now compared faithfully via the rendered ENUM(...)/SET(...) type
-	// (cmpCanonicalType), since the parser supplies enum_values.
+	// (cmpCanonicalType), since the parser supplies enum_values. That path
+	// catches member add/remove/rename/reorder; it normalizes case and
+	// whitespace, so a case-only label change (`ENUM('Draft')` vs `'draft'`)
+	// does not flag — accepted deliberately: MySQL ENUM equality is
+	// collation-dependent, and a case-sensitive AI-parsed comparison would
+	// reintroduce the model-dependent false positives this change removes.
 	if isEnumSetType(src.DataType) && isEnumSetType(tgt.DataType) {
 		return nil
 	}
