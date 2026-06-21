@@ -128,11 +128,20 @@ Some files preserve DMT's original code shape unchanged (verbatim copy with modu
 
 ## Open follow-ups
 
-Active work is tracked in GitHub issues. Run `gh issue list --state open` and read the bodies — each carries Symptom + Root cause + Proposed fix. The remaining open work clusters under three epics:
+Active work is tracked in GitHub issues. Run `gh issue list --state open` and read the bodies — each carries Symptom + Root cause + Proposed fix. **Always check an issue's live state before acting on it; this list and the references below can lag GitHub.**
 
-- **#57 (deterministic DDL generation)** — core is done (no-AI schema path, deterministic renderer, repeat-stable). Remaining children: **#62** (UVG-style canonical type layer — largely behavioral-equivalent today; a refactor question), **#64** (renderer/mapper version fingerprints on persisted artifacts), **#65** (SO2010 MSSQL→PG no-AI acceptance test).
-- **#58 (optional AI review)** — review is optional, default-off, inspect-only; the verifier-feedback retry loop is gone. Remaining child: **#68** (reviewer contract + provider-failure tests).
-- **#59 (deterministic sync)** — snapshot diff, deterministic ALTERs, dry-run + risk gating, golden tests all landed. Remaining child: **#69** (target-side introspection + three-way source/desired/existing diff — the substantive open feature).
+The three foundational epics are **closed/complete** — kept here only as orientation, not open work:
+
+- **#57 (deterministic DDL generation)** — CLOSED. No-AI schema path, canonical type IR, deterministic renderer, repeat-stable artifacts; children #60–#65 all done.
+- **#58 (optional AI review)** — CLOSED. Review is optional, default-off, inspect-only (AI parses DDL, Go compares); child #68 done.
+- **#59 (deterministic sync)** — CLOSED. Snapshot diff, deterministic ALTERs, dry-run + risk gating, and live target-side three-way diff (#69) all landed.
+
+The live open work is the **v1-readiness cluster** — tracking issue **#144** plus the `release-blocker`/`v1` issues (#145–#157: hermetic CI and release gates, live acceptance matrix, CLI-surface freeze, forward-compat policy for persisted artifacts, failed-apply/recovery behavior, the legacy free-text auditor's v1 fate, boolean-override semantics, and release packaging). Run `gh issue list --state open --label v1` for the current set.
+
+Two standalone follow-ons sit outside the v1 cluster:
+
+- **#167** — wire up the held snapshot-to-snapshot diff as a reachable offline sync mode (no live target).
+- **#175** — Expression IR for DEFAULT/CHECK translation, to make **all three engines first-class targets** (today only PostgreSQL is first-class; mssql/mysql go through a thinner, divergent path). Independent of the v1 cluster; #57 is its architectural precedent, not its parent.
 
 ### Cross-engine coverage status
 
