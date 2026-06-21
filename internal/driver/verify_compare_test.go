@@ -727,8 +727,10 @@ func TestDefaultExpressionClass_NowFspArgStripped(t *testing.T) {
 	}
 }
 
-// enum/set exemption is scoped to an unbounded target: ENUM→TEXT cross-dialect
-// doesn't flag length, but a same-dialect ENUM→ENUM still compares length.
+// enum/set exemption: ENUM→TEXT cross-dialect doesn't flag length, and a
+// same-dialect ENUM→ENUM no longer flags on the derived longest-member length
+// (#170 — it doesn't survive the AI parse). The member list is the real
+// signal, compared via the rendered ENUM(...) type instead.
 func TestCompareColumns_EnumExemptionScoped(t *testing.T) {
 	// enum → pg text: exempt, no length flag.
 	if d := CompareColumns(
@@ -736,11 +738,104 @@ func TestCompareColumns_EnumExemptionScoped(t *testing.T) {
 		[]Column{{Name: "s", DataType: "text", MaxLength: 0}}, "mysql", "postgres"); hasCriterion(d, "max_length") {
 		t.Error("enum→text should not flag max_length")
 	}
-	// enum → enum (mysql→mysql) with different length still flags.
+	// enum → enum (mysql→mysql): same members, but the AI-parsed target reports
+	// max_length 0 — must NOT flag max_length (#170 false positive).
 	if d := CompareColumns(
-		[]Column{{Name: "s", DataType: "enum", MaxLength: 3}},
-		[]Column{{Name: "s", DataType: "enum", MaxLength: 8}}, "mysql", "mysql"); !hasCriterion(d, "max_length") {
-		t.Error("enum→enum length difference should flag (value-set proxy)")
+		[]Column{{Name: "s", DataType: "enum", MaxLength: 3, EnumValues: []string{"a", "bbb"}}},
+		[]Column{{Name: "s", DataType: "enum", MaxLength: 0, EnumValues: []string{"a", "bbb"}}}, "mysql", "mysql"); hasCriterion(d, "max_length") {
+		t.Error("enum→enum should not flag max_length (longest-member length is a derived artifact)")
+	}
+	// enum → enum with a different member set flags via the rendered type.
+	if d := CompareColumns(
+		[]Column{{Name: "s", DataType: "enum", EnumValues: []string{"a", "b"}}},
+		[]Column{{Name: "s", DataType: "enum", EnumValues: []string{"a", "b", "c"}}}, "mysql", "mysql"); !hasCriterion(d, "type") {
+		t.Error("enum→enum member-set difference should flag (type)")
+	}
+	// enum → enum where the parse dropped the member list: must flag rather
+	// than silently pass (cmpCanonicalType can't render an enum with no members,
+	// so without this guard a changed/dropped member set would not be caught).
+	if d := CompareColumns(
+		[]Column{{Name: "s", DataType: "enum", EnumValues: []string{"a", "b"}}},
+		[]Column{{Name: "s", DataType: "enum"}}, "mysql", "mysql"); !hasCriterion(d, "enum_values") {
+		t.Error("enum→enum with no parsed target members should flag enum_values")
+	}
+}
+
+// TestCompareColumns_ParserContractFields is the #168/#170 regression guard:
+// once the parser supplies datetime_precision / is_unsigned / display_width /
+// enum_values, a faithful target carrying those fields must produce zero
+// deltas (previously each false-positived because the parsed target lacked the
+// field the comparator checks).
+func TestCompareColumns_ParserContractFields(t *testing.T) {
+	dp := func(n int) *int { return &n }
+	cases := []struct {
+		name           string
+		src, tgt       Column
+		srcDia, tgtDia string
+	}{
+		{ // #168: datetime2(7) -> pg timestamp(6); precision carried, not dropped
+			"datetime_precision",
+			Column{Name: "at", DataType: "datetime2", DatetimePrecision: dp(7)},
+			Column{Name: "at", DataType: "timestamp", DatetimePrecision: dp(6)},
+			"mssql", "postgres",
+		},
+		{ // #170: int unsigned -> int unsigned
+			"is_unsigned",
+			Column{Name: "n", DataType: "int", IsUnsigned: true},
+			Column{Name: "n", DataType: "int", IsUnsigned: true},
+			"mysql", "mysql",
+		},
+		{ // #170: tinyint(1) boolean convention preserved
+			"display_width",
+			Column{Name: "ok", DataType: "tinyint", DisplayWidth: 1},
+			Column{Name: "ok", DataType: "tinyint", DisplayWidth: 1},
+			"mysql", "mysql",
+		},
+		{ // #170: enum members preserved
+			"enum_values",
+			Column{Name: "s", DataType: "enum", EnumValues: []string{"draft", "sent", "paid"}},
+			Column{Name: "s", DataType: "enum", EnumValues: []string{"draft", "sent", "paid"}},
+			"mysql", "mysql",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if d := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, tc.srcDia, tc.tgtDia); len(d) != 0 {
+				t.Errorf("%s: expected zero deltas for a faithful target, got %v", tc.name, d)
+			}
+		})
+	}
+}
+
+// TestBuildVerifyParsePrompt_ContractFields pins that the parser prompt asks
+// the model for every field the comparator relies on (#168/#170). A field
+// silently dropped from the contract reintroduces the systematic false
+// positive regardless of model.
+func TestBuildVerifyParsePrompt_ContractFields(t *testing.T) {
+	p := buildVerifyParsePrompt("CREATE TABLE t (id INT)", "mysql")
+	for _, field := range []string{"datetime_precision", "is_unsigned", "display_width", "enum_values"} {
+		if !strings.Contains(p, field) {
+			t.Errorf("parser prompt is missing the %q field — comparator will false-positive", field)
+		}
+	}
+	// A bare temporal type must be reported at its dialect default, not 0,
+	// or a dropped explicit precision (e.g. timestamp(0) -> bare timestamp)
+	// would be silently accepted as a match.
+	if !strings.Contains(p, "stored default") {
+		t.Error("parser prompt should instruct dialect-default precision for bare temporal types")
+	}
+}
+
+// TestCompareColumns_TemporalPrecisionLossFlags guards that a real
+// fractional-seconds loss still flags once the parser reports the target's
+// true precision: source timestamp(0) against a target the parser read as the
+// pg default (6) must produce a type delta, not silently match.
+func TestCompareColumns_TemporalPrecisionLossFlags(t *testing.T) {
+	zero, six := 0, 6
+	src := []Column{{Name: "at", DataType: "datetime2", DatetimePrecision: &zero}}
+	tgt := []Column{{Name: "at", DataType: "timestamp", DatetimePrecision: &six}}
+	if d := CompareColumns(src, tgt, "mssql", "postgres"); !hasCriterion(d, "type") {
+		t.Errorf("datetime2(0)→timestamp(6) precision loss should flag type, got %v", d)
 	}
 }
 

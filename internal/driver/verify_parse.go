@@ -91,18 +91,22 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
       "max_length": <integer; characters for char/varchar/nvarchar/text-class types; 0 if not applicable or unbounded>,
       "precision": <integer; for decimal/numeric/money — total digits; 0 otherwise>,
       "scale": <integer; for decimal/numeric/money — fractional digits; 0 otherwise>,
+      "datetime_precision": <integer; fractional-seconds digits for date/time/timestamp types — the explicit N in TIMESTAMP(N)/DATETIME2(N)/DATETIMEOFFSET(N)/TIME(N), else the dialect default per rule 9 (0 for MySQL, 6 for PostgreSQL, 7 for SQL Server); 0 when not a temporal type>,
+      "is_unsigned": <true for an UNSIGNED numeric type (MySQL); false otherwise>,
+      "display_width": <integer; the N in MySQL tinyint(N) — e.g. TINYINT(1) → 1; 0 for every other type>,
       "is_nullable": <true if the column allows NULL, false if NOT NULL or PRIMARY KEY>,
       "is_identity": <true if the column auto-increments; see EXTRACTION RULES below>,
       "default_expression": "<exact default clause text, or empty string>",
       "is_computed": <true for generated/computed columns>,
       "computed_expression": "<the generation expression, or empty>",
-      "computed_persisted": <true for STORED/PERSISTED computed columns>
+      "computed_persisted": <true for STORED/PERSISTED computed columns>,
+      "enum_values": [<for MySQL ENUM/SET: member string values in declaration order; [] otherwise>]
     }
   ]
 }
 `)
 	sb.WriteString("\n=== EXTRACTION RULES ===\n")
-	sb.WriteString("1. data_type carries ONLY the base type name (lowercase). Strip parens and parameters: `VARCHAR(20)` → `varchar` with max_length=20; `NUMERIC(18,4)` → `numeric` with precision=18, scale=4.\n")
+	sb.WriteString("1. data_type carries ONLY the base type name (lowercase). Strip parens and parameters: `VARCHAR(20)` → `varchar` with max_length=20; `NUMERIC(18,4)` → `numeric` with precision=18, scale=4. The stripped modifiers go in their dedicated fields — fractional-seconds precision in datetime_precision, the tinyint width in display_width, UNSIGNED in is_unsigned, enum/set members in enum_values (rules 9-12).\n")
 	sb.WriteString("2. Unbounded text types (`TEXT`, `NTEXT`, `CLOB`, `MEDIUMTEXT`, `LONGTEXT`, `VARCHAR(MAX)`, `NVARCHAR(MAX)`) → max_length=0.\n")
 	sb.WriteString("3. Integer types (`INT`, `BIGINT`, `SMALLINT`) → max_length=0, precision=0, scale=0 (the dialect's default precision is irrelevant for verification).\n")
 	sb.WriteString("4. is_identity is TRUE for any auto-generated PK default mechanism:\n")
@@ -113,13 +117,17 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
 	sb.WriteString("5. default_expression captures the literal text after `DEFAULT`, including any wrapping parentheses (e.g. `((0))`, `(getutcdate())`, `'pending'`, `CURRENT_TIMESTAMP`). Empty string when no DEFAULT clause is present (and not an identity column).\n")
 	sb.WriteString("6. Computed columns (`GENERATED ALWAYS AS (expr) STORED|VIRTUAL`, MSSQL `AS (expr) PERSISTED`) → is_computed=true, computed_expression=<expr>, computed_persisted=true for STORED/PERSISTED, false for VIRTUAL or unspecified.\n")
 	sb.WriteString("7. is_nullable: false for `NOT NULL`, false for PRIMARY KEY columns, true otherwise.\n")
-	sb.WriteString("8. Names: preserve exact case as written in the DDL. Strip surrounding quoting characters (`\"`, `[]`, backticks).\n\n")
+	sb.WriteString("8. Names: preserve exact case as written in the DDL. Strip surrounding quoting characters (`\"`, `[]`, backticks).\n")
+	sb.WriteString("9. datetime_precision: the fractional-seconds precision of a temporal type — the N in `TIMESTAMP(N)`, `DATETIME2(N)`, `DATETIMEOFFSET(N)`, `TIME(N)`, `timestamp(N) with|without time zone`. When a temporal type is written WITHOUT an explicit precision, use the dialect's stored default, NOT 0: PostgreSQL `timestamp`/`timestamptz`/`time` = 6; SQL Server `datetime2`/`datetimeoffset`/`time` = 7; MySQL `TIMESTAMP`/`DATETIME`/`TIME` = 0. Use 0 for non-temporal types. This is SEPARATE from precision/scale, which are for decimal/numeric/money only.\n")
+	sb.WriteString("10. is_unsigned: true for a MySQL `... UNSIGNED` numeric type (`INT UNSIGNED`, `BIGINT UNSIGNED`, `TINYINT UNSIGNED`, ...); false otherwise.\n")
+	sb.WriteString("11. display_width: the integer N in MySQL `tinyint(N)` (e.g. `TINYINT(1)` → 1). Capture it ONLY for tinyint; 0 for every other type.\n")
+	sb.WriteString("12. enum_values: for MySQL `ENUM(...)` / `SET(...)`, the list of member string values in declaration order (`ENUM('a','b')` → [\"a\",\"b\"]); empty array for non-enum/set types.\n\n")
 
 	sb.WriteString("=== OUTPUT CONSTRAINTS ===\n")
 	sb.WriteString("- Output MUST be a single JSON object starting with `{` and ending with `}`.\n")
 	sb.WriteString("- No markdown fences. No prose before or after the JSON. No comments inside the JSON.\n")
 	sb.WriteString("- One columns[] entry per column in the DDL, in declaration order.\n")
-	sb.WriteString("- If a field's value is unknown or not applicable, use the type's zero value (0 for ints, false for bools, \"\" for strings) — never null.\n")
+	sb.WriteString("- If a field's value is unknown or not applicable, use the type's zero value (0 for ints, false for bools, \"\" for strings, [] for arrays) — never null.\n")
 
 	return sb.String()
 }

@@ -102,6 +102,7 @@ func CompareColumns(src, tgt []Column, srcDialect, tgtDialect string) []ColumnDe
 			cmpNullability,
 			cmpIdentity,
 			cmpTZClass,
+			cmpEnumValues,
 		}
 		// Same-class fixed-form columns (UUID, JSON, etc.) also skip
 		// max_length / precision / scale: those metadata are dialect-storage
@@ -203,12 +204,24 @@ func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	// A MySQL ENUM/SET maps to an unbounded target type (pg text) on a
 	// NON-MySQL target; the enum's reported max_length is the longest member,
 	// not a user bound, so length must not flag there. Gated on a non-MySQL
-	// target so a same-dialect ENUM→ENUM still compares length AND an
-	// ENUM→TEXT change on a MySQL target keeps its length signal (the only
-	// delta that reveals the enum constraint was lost). The enum VALUE list
-	// itself is a #62 follow-up, not compared here.
+	// target so an ENUM→TEXT change on a MySQL target keeps its length signal
+	// (the delta that reveals the enum constraint was lost).
 	if isEnumSetType(src.DataType) && !isMySQLDialect(tgtDialect) &&
 		lobDataTypes[strings.ToLower(strings.TrimSpace(tgt.DataType))] {
+		return nil
+	}
+	// Same-family ENUM/SET → ENUM/SET: the reported max_length is the longest
+	// member — a derived artifact, not a user bound — and it does NOT survive
+	// the AI parse (which reports 0), so the old length "value-set proxy"
+	// false-positived as e.g. 7 vs 0 (#170). Skip the length check; the member
+	// list is now compared faithfully via the rendered ENUM(...)/SET(...) type
+	// (cmpCanonicalType), since the parser supplies enum_values. That path
+	// catches member add/remove/rename/reorder; it normalizes case and
+	// whitespace, so a case-only label change (`ENUM('Draft')` vs `'draft'`)
+	// does not flag — accepted deliberately: MySQL ENUM equality is
+	// collation-dependent, and a case-sensitive AI-parsed comparison would
+	// reintroduce the model-dependent false positives this change removes.
+	if isEnumSetType(src.DataType) && isEnumSetType(tgt.DataType) {
 		return nil
 	}
 	// MySQL's LOB tiers ARE user-meaningful capacity choices when both
@@ -458,6 +471,28 @@ func cmpDefaultClass(src, tgt Column, _, _ string) *ColumnDelta {
 		SourceVal: fmt.Sprintf("%s (%q)", srcClass, src.DefaultExpression),
 		TargetVal: fmt.Sprintf("%s (%q)", tgtClass, tgt.DefaultExpression),
 	}
+}
+
+// cmpEnumValues guards same-family ENUM/SET comparison. Length is no longer
+// compared for enum/set (cmpMaxLength skips it — the longest-member length is
+// a derived artifact the AI parse reports as 0), so the member list is the
+// real signal, normally compared via the rendered ENUM(...) type. But that
+// render FAILS when the parsed target omits enum_values, which would let a
+// dropped/changed member set pass silently. A source enum/set always carries
+// its members (from introspection), so a same-family target that parsed
+// without them is an incomplete parse — flag it rather than skip.
+func cmpEnumValues(src, tgt Column, _, _ string) *ColumnDelta {
+	if !isEnumSetType(src.DataType) || !isEnumSetType(tgt.DataType) {
+		return nil
+	}
+	if len(src.EnumValues) > 0 && len(tgt.EnumValues) == 0 {
+		return &ColumnDelta{
+			Column: src.Name, Criterion: "enum_values",
+			SourceVal: fmt.Sprintf("%v", src.EnumValues),
+			TargetVal: "<no members parsed>",
+		}
+	}
+	return nil
 }
 
 // tzClass returns the timezone-awareness class of a dialect-specific
