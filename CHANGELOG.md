@@ -4,6 +4,31 @@ All notable changes to SMT are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **TZ-aware timestamps no longer flatten to naive `DATETIME` on MySQL targets**
+  ([#169]). A PostgreSQL `timestamptz` or SQL Server `datetimeoffset` source now
+  renders to MySQL `TIMESTAMP` (which stores UTC and converts on read) instead of
+  timezone-naive `DATETIME`. The canonical Timestamp mapper gated on
+  `UTCNormalized` rather than `WithTZ`, so the same canonical `tzaware_dt` stayed
+  TZ-aware on PostgreSQL/SQL Server targets but lost it on MySQL — a fidelity
+  regression the deterministic `tz_class` comparator flagged. The comparator is
+  reconciled to accept MySQL `TIMESTAMP` for a TZ-aware source (MySQL `DATETIME`
+  still flags a genuine loss). `RendererVersion` 3 → 4.
+- **AI-review false positives from an incomplete parser contract** ([#168],
+  [#170]). The AI-review comparator read four `Column` attributes the parser
+  prompt never asked the model to emit, so every affected column false-positived
+  regardless of reviewer model (local and cloud alike): fractional-seconds
+  precision (`timestamp(6)` vs `timestamp`, also `TIME(N)` / `DATETIME2(N)` /
+  `DATETIMEOFFSET(N)`) ([#168]); MySQL `UNSIGNED` (`INT UNSIGNED` vs `INT`); the
+  `tinyint(1)` boolean display width (`TINYINT(1)` vs `TINYINT`); and same-dialect
+  `ENUM`/`SET` member lists (`max_length 7 vs 0`) ([#170]). The parser contract now
+  emits `datetime_precision`, `is_unsigned`, `display_width`, and `enum_values`,
+  and the dead ENUM length proxy is replaced by the rendered `ENUM(...)`
+  comparison (with a guard that flags an enum parsed without its members).
+
 ## [0.12.0] - 2026-06-17
 
 ### Added
@@ -146,6 +171,7 @@ Releases before 0.10.0 are listed on the
 history since v0.9.0:
 [`v0.9.0...v0.10.0`](https://github.com/johndauphine/smt/compare/v0.9.0...v0.10.0).
 
+[Unreleased]: https://github.com/johndauphine/smt/compare/v0.12.0...HEAD
 [0.12.0]: https://github.com/johndauphine/smt/releases/tag/v0.12.0
 [0.11.0]: https://github.com/johndauphine/smt/releases/tag/v0.11.0
 [#141]: https://github.com/johndauphine/smt/issues/141
@@ -170,3 +196,6 @@ history since v0.9.0:
 [#71]: https://github.com/johndauphine/smt/issues/71
 [#126]: https://github.com/johndauphine/smt/pull/126
 [#127]: https://github.com/johndauphine/smt/issues/127
+[#168]: https://github.com/johndauphine/smt/issues/168
+[#169]: https://github.com/johndauphine/smt/issues/169
+[#170]: https://github.com/johndauphine/smt/issues/170
