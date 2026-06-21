@@ -321,7 +321,14 @@ func fromCanonicalMySQL(ct CanonicalType, opts RenderOpts) (string, error) {
 	case Time:
 		return mysqlFspDDL("TIME", ct, 0), nil
 	case Timestamp:
-		if ct.UTCNormalized {
+		// A TZ-aware source (pg timestamptz, mssql datetimeoffset; WithTZ) and
+		// MySQL's own UTC-normalized TIMESTAMP both map to MySQL TIMESTAMP,
+		// which is time-zone-aware (it stores UTC and converts on read). Only a
+		// genuinely naive timestamp becomes DATETIME. This mirrors the mssql
+		// target's WithTZ -> DATETIMEOFFSET branch so the same canonical
+		// tzaware_dt stays TZ-aware on every target instead of being silently
+		// flattened to naive DATETIME here (#169).
+		if ct.WithTZ || ct.UTCNormalized {
 			return mysqlFspDDL("TIMESTAMP", ct, 6), nil
 		}
 		return mysqlFspDDL("DATETIME", ct, 6), nil
@@ -568,7 +575,15 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 			add("target has no unsigned 64-bit integer; rendered as " + rendered)
 		}
 	case Time, Timestamp:
-		if ct.WithTZ && target == "mysql" {
+		if ct.WithTZ && target == "mysql" && ct.Kind == Timestamp {
+			// MySQL TIMESTAMP preserves the TZ-aware semantic (#169) but is
+			// range-limited to 1970-2038; values outside that window can't be
+			// stored. Surface the trade-off rather than the (now incorrect)
+			// "no equivalent" message.
+			add("MySQL TIMESTAMP is time-zone-aware but limited to 1970-2038; rendered as " + rendered)
+		}
+		if ct.WithTZ && target == "mysql" && ct.Kind == Time {
+			// MySQL TIME has no time-zone-aware form; the zone offset is dropped.
 			add("target has no equivalent time-zone-aware type; rendered as " + rendered)
 		}
 		if ct.UTCNormalized && target != "mysql" {

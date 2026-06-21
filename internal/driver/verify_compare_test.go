@@ -358,6 +358,46 @@ func TestCompareColumns_TZClassEquivalent(t *testing.T) {
 	}
 }
 
+// TestCompareColumns_TZClass_MySQLTimestampAcceptsTZAware is the false-positive
+// guard for #169: a TZ-aware source (pg timestamptz / mssql datetimeoffset) now
+// renders to MySQL TIMESTAMP, which is the dialect's tz-aware-capable type, so
+// the comparator must NOT flag tz_class on it (otherwise AI review in fail mode,
+// or drift gating, would block a migration the renderer just made correct).
+func TestCompareColumns_TZClass_MySQLTimestampAcceptsTZAware(t *testing.T) {
+	for _, srcDT := range []string{"timestamptz", "datetimeoffset"} {
+		srcDialect := "postgres"
+		if srcDT == "datetimeoffset" {
+			srcDialect = "mssql"
+		}
+		src := []Column{{Name: "created_at", DataType: srcDT}}
+		tgt := []Column{{Name: "created_at", DataType: "timestamp"}}
+		deltas := CompareColumns(src, tgt, srcDialect, "mysql")
+		for _, d := range deltas {
+			if d.Criterion == "tz_class" {
+				t.Errorf("%s→mysql timestamp: unexpected tz_class delta %q", srcDT, d.String())
+			}
+		}
+	}
+}
+
+// TestCompareColumns_TZClass_MySQLDatetimeStillFlagsTZAware guards the other
+// direction: MySQL DATETIME is strictly naive, so a TZ-aware source landing
+// there is a real fidelity loss (the #169 bug) and must still flag.
+func TestCompareColumns_TZClass_MySQLDatetimeStillFlagsTZAware(t *testing.T) {
+	src := []Column{{Name: "created_at", DataType: "timestamptz"}}
+	tgt := []Column{{Name: "created_at", DataType: "datetime"}}
+	deltas := CompareColumns(src, tgt, "postgres", "mysql")
+	var found bool
+	for _, d := range deltas {
+		if d.Criterion == "tz_class" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("timestamptz→mysql datetime should flag tz_class loss, got %v", deltas)
+	}
+}
+
 // TestCompareColumns_MissingColumn covers the case where the AI parser
 // returns target Column[] that's missing a source column entirely (e.g. the
 // generator dropped the column from the DDL). This must surface as a

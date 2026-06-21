@@ -26,7 +26,9 @@ import (
 // (e.g. MySQL tinyint(1) -> BIT/boolean, dialect-correct float/real precision,
 // MySQL mediumint and time-with-tz no longer rejected on a pg target).
 // "3": canonical spatial rendering and mapping warnings (#121/#122).
-const RendererVersion = "3"
+// "4": TZ-aware timestamp sources (pg timestamptz, mssql datetimeoffset) now
+// render to MySQL TIMESTAMP (time-zone-aware) instead of naive DATETIME (#169).
+const RendererVersion = "4"
 
 type Renderer struct {
 	target            string
