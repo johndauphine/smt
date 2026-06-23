@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  SMT_SECRETS_FILE: ${{ runner.temp }}/smt/no-host-secrets.yaml
+  SMT_SECRETS_FILE: /tmp/smt/no-host-secrets.yaml
   SMT_LIVE_AI: "0"
 
 jobs:
