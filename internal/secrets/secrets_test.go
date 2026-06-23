@@ -286,6 +286,55 @@ func TestSecretsNotFoundError(t *testing.T) {
 	}
 }
 
+func TestDefaultTestsDoNotReadHostSecrets(t *testing.T) {
+	tmpHome := t.TempDir()
+	secretsDir := filepath.Join(tmpHome, DefaultSecretsDir)
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("create fake home secrets dir: %v", err)
+	}
+	hostSecrets := filepath.Join(secretsDir, DefaultSecretsFile)
+	content := `
+ai:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: "host-secret-that-tests-must-ignore"
+encryption:
+  master_key: "test-master-key"
+`
+	if err := os.WriteFile(hostSecrets, []byte(content), 0600); err != nil {
+		t.Fatalf("write fake host secrets: %v", err)
+	}
+
+	t.Setenv("HOME", tmpHome)
+	t.Setenv(SecretsFileEnvVar, "")
+	t.Setenv(LiveAIEnvVar, "")
+	Reset()
+	t.Cleanup(Reset)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() read host secrets during default test run")
+	}
+	if _, ok := err.(*SecretsNotFoundError); !ok {
+		t.Fatalf("Load() error = %T %v, want SecretsNotFoundError", err, err)
+	}
+
+	t.Setenv(LiveAIEnvVar, "1")
+	Reset()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with %s=1 should read explicit live-test secrets: %v", LiveAIEnvVar, err)
+	}
+	provider, _, err := cfg.GetDefaultProvider()
+	if err != nil {
+		t.Fatalf("GetDefaultProvider: %v", err)
+	}
+	if provider.APIKey != "host-secret-that-tests-must-ignore" {
+		t.Fatalf("provider API key = %q, want fake host secret after explicit live opt-in", provider.APIKey)
+	}
+}
+
 func TestGenerateTemplate(t *testing.T) {
 	template := GenerateTemplate()
 

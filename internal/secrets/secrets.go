@@ -20,6 +20,9 @@ const (
 	DefaultSecretsFile = "smt-config.yaml"
 	// SecretsFileEnvVar allows overriding the secrets file location
 	SecretsFileEnvVar = "SMT_SECRETS_FILE"
+	// LiveAIEnvVar explicitly opts integration tests into loading host AI
+	// secrets and calling live providers.
+	LiveAIEnvVar = "SMT_LIVE_AI"
 	// SecureDirMode is the permission mode for the secrets directory
 	SecureDirMode = 0700
 	// SecureFileMode is the permission mode for the secrets file
@@ -232,6 +235,10 @@ func EnsureSecretsDir() (string, error) {
 }
 
 func loadFromFile() (*Config, error) {
+	if hostSecretsDisabledForTest() {
+		return nil, &SecretsNotFoundError{Path: filepath.Join("<test>", DefaultSecretsDir, DefaultSecretsFile)}
+	}
+
 	path := GetSecretsPath()
 
 	data, err := os.ReadFile(path)
@@ -267,6 +274,24 @@ func loadFromFile() (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+func hostSecretsDisabledForTest() bool {
+	if os.Getenv(SecretsFileEnvVar) != "" {
+		return false
+	}
+	if os.Getenv(LiveAIEnvVar) == "1" {
+		return false
+	}
+	if strings.HasSuffix(os.Args[0], ".test") || strings.HasSuffix(os.Args[0], ".test.exe") {
+		return true
+	}
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "-test.") {
+			return true
+		}
+	}
+	return false
 }
 
 // warnLegacyMigrationDefaults emits a single warning naming any removed

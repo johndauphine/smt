@@ -1,4 +1,4 @@
-.PHONY: build clean test test-short test-coverage test-so2010 run install check setup-hooks fmt lint
+.PHONY: build clean test test-short test-coverage test-so2010 test-crm-acceptance test-live-ai release-artifacts release-checksums run install check setup-hooks fmt lint
 
 # Build variables
 BINARY_NAME=smt
@@ -28,6 +28,15 @@ build-windows:
 
 build-all: build-linux build-darwin build-windows
 
+release-artifacts:
+	mkdir -p dist
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o dist/$(BINARY_NAME)-linux-amd64 ./cmd/smt
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o dist/$(BINARY_NAME)-darwin-arm64 ./cmd/smt
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o dist/$(BINARY_NAME)-windows-amd64.exe ./cmd/smt
+
+release-checksums: release-artifacts
+	cd dist && shasum -a 256 $(BINARY_NAME)-* > checksums.txt
+
 clean:
 	rm -f $(BINARY_NAME)
 	rm -f $(BINARY_NAME)-*
@@ -48,8 +57,25 @@ test-coverage:
 # (load StackOverflow2010 into the mssql container first). Override
 # SO2010_* env vars for non-default connection params.
 test-so2010:
-	SMT_E2E_SO2010=1 SO2010_REPORT_DIR=$(CURDIR) $(GOTEST) -count=1 -v -run TestSO2010 ./internal/orchestrator/
-	@echo "Verification report: $(CURDIR)/so2010_verification.json"
+	mkdir -p .acceptance-artifacts/so2010
+	SMT_E2E_SO2010=1 SO2010_REPORT_DIR=$(CURDIR)/.acceptance-artifacts/so2010 $(GOTEST) -count=1 -v -run TestSO2010 ./internal/orchestrator/
+	@echo "Verification report: $(CURDIR)/.acceptance-artifacts/so2010/so2010_verification.json"
+
+# No-AI CRM live acceptance matrix. The three cases cover every supported
+# engine at least once as a source and once as a target:
+#   mssql -> postgres, postgres -> mysql, mysql -> mssql.
+# Requires the CRM fixture databases from testdata/crm to be loaded first.
+test-crm-acceptance:
+	mkdir -p .acceptance-artifacts/crm
+	SMT_E2E_CRM=1 CRM_REPORT_DIR=$(CURDIR)/.acceptance-artifacts/crm $(GOTEST) -count=1 -v -run TestCRM_DeterministicAcceptanceMatrix ./internal/orchestrator/
+	@echo "CRM report: $(CURDIR)/.acceptance-artifacts/crm/crm_acceptance_matrix.json"
+
+# Optional live AI smoke. Explicitly opt in so default unit tests remain
+# hermetic and never load host AI secrets.
+test-live-ai:
+	mkdir -p .acceptance-artifacts/ai
+	SMT_LIVE_AI=1 SMT_LIVE_AI_REPORT_DIR=$(CURDIR)/.acceptance-artifacts/ai $(GOTEST) -count=1 -v -run TestLiveAIReviewAndAdvisorySmoke ./internal/driver/
+	@echo "Live AI report: $(CURDIR)/.acceptance-artifacts/ai/live_ai_smoke.json"
 
 deps:
 	$(GOMOD) download

@@ -4,6 +4,64 @@ All notable changes to SMT are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.0.0] - 2026-06-22
+
+### Added
+
+- **Hermetic CI and default test isolation for v1 release gates** ([#145],
+  [#146]). GitHub Actions now runs unit tests, race tests, lint, and a CLI build
+  without host secrets; default unit tests ignore host AI secrets unless
+  `SMT_LIVE_AI=1` explicitly opts into live provider access.
+- **Repeatable live database acceptance matrix** ([#147]). The v1 release gates
+  include the existing StackOverflow2010 SQL Server to PostgreSQL path plus a
+  CRM matrix covering SQL Server, PostgreSQL, and MySQL each as a source and as
+  a target, with stable archiveable reports under `.acceptance-artifacts/`.
+- **Explicit live AI smoke gate** ([#152]). `make test-live-ai` exercises the
+  configured provider only when `SMT_LIVE_AI=1`, covering `CallAI`, AI DDL
+  parsing, advisory diagnosis, and expression-fix validation without recording
+  raw provider responses or secrets.
+- **v1.0.0 release packaging and install docs** ([#151]). The release checklist
+  documents supported artifacts, checksum generation, first-run setup,
+  install/update flow, no-AI defaults, optional AI configuration, and exact
+  release-gate commands.
+
+### Fixed
+
+- **Per-migration schema-object booleans reliably override global defaults**
+  ([#150]). Explicit `false` for `migration.create_indexes`,
+  `create_foreign_keys`, or `create_check_constraints` now remains false even
+  when the global secrets default is true; tests cover global nil/true/false
+  against omitted/true/false migration values.
+- **v1 persisted artifact compatibility policy documented** ([#154]). The
+  policy now covers state DB migration behavior, snapshot read compatibility,
+  run-manifest reader fields, `RendererVersion` semantics, and the accepted
+  0.x snapshot migration path. A pinned v1 snapshot fixture deserializes in the
+  test suite.
+- **AI-review finding source is explicit** ([#157]). Table DDL findings are
+  labeled as deterministic-comparator results; index, foreign-key, and
+  check-constraint findings are labeled as free-text-auditor results in logs and
+  `manifest.json`. Structured side-object comparison is tracked as a 1.x
+  enhancement in [#177].
+- **v1 CLI surface documented** ([#155]). `docs/cli.md` enumerates commands,
+  flags, stability labels, and exit codes; the only v1 experimental flag is
+  marked in help text.
+- **v1 sync support contract documented and pinned** ([#148]). The docs list
+  supported sync changes, unsupported/refused classes, data-loss gating, and
+  apply-stop behavior; tests cover unsupported metadata classes and CLI
+  unsupported-change output.
+- **Apply failure and recovery behavior documented** ([#149]). The v1 contract
+  now states that `create --apply` and `sync --apply` stop at the first failed
+  statement, keep artifact SQL as the recovery record, avoid cross-dialect
+  whole-plan transactions, and document rerun/idempotency expectations.
+
+### Removed
+
+- **Deprecated 0.x AI-review config aliases removed** ([#153]). `migration.ai_verify`
+  and `migration.ai_verifier_model` no longer load in v1 configs. Rename them to
+  `ai_review.enabled` and `ai_review.model` respectively.
+
 ## [0.12.1] - 2026-06-21
 
 ### Fixed
@@ -171,6 +229,7 @@ Releases before 0.10.0 are listed on the
 history since v0.9.0:
 [`v0.9.0...v0.10.0`](https://github.com/johndauphine/smt/compare/v0.9.0...v0.10.0).
 
+[1.0.0]: https://github.com/johndauphine/smt/releases/tag/v1.0.0
 [0.12.1]: https://github.com/johndauphine/smt/releases/tag/v0.12.1
 [0.12.0]: https://github.com/johndauphine/smt/releases/tag/v0.12.0
 [0.11.0]: https://github.com/johndauphine/smt/releases/tag/v0.11.0
@@ -184,9 +243,22 @@ history since v0.9.0:
 [#131]: https://github.com/johndauphine/smt/issues/131
 [#133]: https://github.com/johndauphine/smt/pull/133
 [#134]: https://github.com/johndauphine/smt/issues/134
+[#145]: https://github.com/johndauphine/smt/issues/145
+[#146]: https://github.com/johndauphine/smt/issues/146
+[#147]: https://github.com/johndauphine/smt/issues/147
+[#148]: https://github.com/johndauphine/smt/issues/148
+[#149]: https://github.com/johndauphine/smt/issues/149
+[#150]: https://github.com/johndauphine/smt/issues/150
+[#151]: https://github.com/johndauphine/smt/issues/151
+[#152]: https://github.com/johndauphine/smt/issues/152
+[#153]: https://github.com/johndauphine/smt/issues/153
+[#154]: https://github.com/johndauphine/smt/issues/154
+[#155]: https://github.com/johndauphine/smt/issues/155
 [#156]: https://github.com/johndauphine/smt/issues/156
+[#157]: https://github.com/johndauphine/smt/issues/157
 [#158]: https://github.com/johndauphine/smt/issues/158
 [#159]: https://github.com/johndauphine/smt/issues/159
+[#177]: https://github.com/johndauphine/smt/issues/177
 [#46]: https://github.com/johndauphine/smt/issues/46
 [#57]: https://github.com/johndauphine/smt/issues/57
 [#58]: https://github.com/johndauphine/smt/issues/58

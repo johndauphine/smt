@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"smt/internal/checkpoint"
@@ -15,6 +17,8 @@ type fakeWriter struct {
 	tables        map[string]bool
 	indexes       map[string]bool
 	execed        []string
+	failAt        int
+	failErr       error
 }
 
 func (f *fakeWriter) TableExists(_ context.Context, _, table string) (bool, error) {
@@ -31,6 +35,9 @@ func (f *fakeWriter) CheckConstraintExists(_ context.Context, _, _, _ string) (b
 }
 func (f *fakeWriter) ExecRaw(_ context.Context, query string, _ ...any) (int64, error) {
 	f.execed = append(f.execed, query)
+	if f.failAt > 0 && len(f.execed) == f.failAt {
+		return 0, f.failErr
+	}
 	return 0, nil
 }
 
@@ -71,5 +78,31 @@ func TestExecutePlanSkipsExistingObjects(t *testing.T) {
 		if w.execed[i] != want[i] {
 			t.Fatalf("executed %v, want %v", w.execed, want)
 		}
+	}
+}
+
+func TestExecutePlanStopsAtFirstFailure(t *testing.T) {
+	w := &fakeWriter{failAt: 2, failErr: errors.New("syntax error near BAD")}
+	cfg := &config.Config{}
+	cfg.Target.Schema = "public"
+	o := &Orchestrator{config: cfg, target: w, state: fakeState{}}
+
+	plan := schemadiff.Plan{Statements: []schemadiff.Statement{
+		{Kind: schemadiff.StatementKindSchema, SQL: "CREATE SCHEMA public", Description: "create schema"},
+		{Kind: schemadiff.StatementKindTable, Table: "bad", Object: "bad", SQL: "CREATE TABLE BAD", Description: "create table bad"},
+		{Kind: schemadiff.StatementKindTable, Table: "later", Object: "later", SQL: "CREATE TABLE later", Description: "create table later"},
+	}}
+
+	err := o.executePlan(context.Background(), "run-1", plan)
+	if err == nil {
+		t.Fatal("executePlan succeeded, want statement failure")
+	}
+	for _, want := range []string{"create table bad", "syntax error near BAD", "CREATE TABLE BAD"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("executePlan error missing %q:\n%v", want, err)
+		}
+	}
+	if len(w.execed) != 2 {
+		t.Fatalf("executePlan should stop after the failing statement, executed %d: %v", len(w.execed), w.execed)
 	}
 }

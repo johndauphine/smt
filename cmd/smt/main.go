@@ -33,22 +33,29 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
-		// A command that returns a cli.ExitCoder (e.g. `smt drift` signaling
-		// "drift detected" with cli.Exit("", 3)) owns its exit code and is not
-		// an error condition — exit with that code and print its message only
-		// if it carries one, without the generic Error/Exit-code banner.
 		var coder cli.ExitCoder
 		if errors.As(err, &coder) {
 			if msg := err.Error(); msg != "" {
 				fmt.Fprintln(os.Stderr, msg)
 			}
-			os.Exit(coder.ExitCode())
+			os.Exit(exitCodeForError(err))
 		}
-		code := exitcodes.FromError(err)
+		code := exitCodeForError(err)
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Exit code %d (%s)\n", code, exitcodes.Description(code))
 		os.Exit(code)
 	}
+}
+
+func exitCodeForError(err error) int {
+	// A command that returns a cli.ExitCoder (e.g. `smt drift` signaling
+	// "drift detected" with cli.Exit("", 3)) owns its exit code and is not
+	// classified through the generic error mapper.
+	var coder cli.ExitCoder
+	if errors.As(err, &coder) {
+		return coder.ExitCode()
+	}
+	return exitcodes.FromError(err)
 }
 
 func globalFlags() []cli.Flag {

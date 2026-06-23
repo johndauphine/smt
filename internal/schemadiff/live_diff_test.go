@@ -143,6 +143,33 @@ func TestComputeLiveDiff_MetadataChangeUnsupported(t *testing.T) {
 	}
 }
 
+func TestComputeLiveDiff_ComputedSpatialAndDisplayWidthUnsupported(t *testing.T) {
+	desired := []driver.Table{{Schema: "app", Name: "catalog", Columns: []driver.Column{
+		{Name: "total", DataType: "int", IsComputed: true, ComputedExpression: "price * qty", ComputedPersisted: true},
+		{Name: "location", DataType: "geometry", SRID: 4326},
+		{Name: "flag", DataType: "tinyint", DisplayWidth: 1},
+	}}}
+	existing := []driver.Table{{Schema: "app", Name: "catalog", Columns: []driver.Column{
+		{Name: "total", DataType: "int", IsComputed: true, ComputedExpression: "price * (qty + 1)", ComputedPersisted: false},
+		{Name: "location", DataType: "geometry", SRID: 3857},
+		{Name: "flag", DataType: "tinyint", DisplayWidth: 4},
+	}}}
+
+	d := ComputeLiveDiff(desired, existing, "mysql", "mysql", DefaultDriftOptions())
+	if len(d.Unsupported) != 3 {
+		t.Fatalf("expected computed/SRID/display-width changes to be unsupported, got %+v", d.Unsupported)
+	}
+	reasons := strings.Join([]string{d.Unsupported[0].Reason, d.Unsupported[1].Reason, d.Unsupported[2].Reason}, " ")
+	for _, want := range []string{"computed-column", "spatial SRID", "display-width"} {
+		if !strings.Contains(reasons, want) {
+			t.Fatalf("unsupported reasons missing %q: %+v", want, d.Unsupported)
+		}
+	}
+	if len(d.ChangedTables) != 0 {
+		t.Fatalf("unsupported metadata changes should not emit partial column DDL: %+v", d.ChangedTables)
+	}
+}
+
 func TestComputeLiveDiff_SameDialectCheckDefinitionUnsupported(t *testing.T) {
 	desired := []driver.Table{{Schema: "public", Name: "accounts",
 		Columns:          []driver.Column{{Name: "balance", DataType: "int"}},

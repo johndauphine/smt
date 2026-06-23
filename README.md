@@ -23,7 +23,7 @@ make build
 ./smt sync --apply                  # execute the ALTERs against the target
 ```
 
-Run `./smt` with no arguments to launch the TUI. See `./smt --help` for the full command list.
+Run `./smt` with no arguments to launch the TUI. See `./smt --help` for command help and [docs/cli.md](docs/cli.md) for the v1 CLI surface contract.
 
 ## Commands
 
@@ -89,6 +89,16 @@ notifications:
 
 The same secrets file is read by both the CLI and the TUI. File mode 0600 is enforced.
 
+In v1, table DDL review uses an AI parser plus SMT's deterministic Go
+comparator. Index, foreign-key, and check-constraint review remains a
+best-effort free-text auditor. Warnings in logs and `manifest.json` identify
+which method produced each finding. Structured side-object comparison is tracked
+as a 1.x enhancement in [#177](https://github.com/johndauphine/smt/issues/177).
+
+Use the `ai_review.enabled` and `ai_review.model` keys for optional AI review.
+The 0.x aliases `migration.ai_verify` and `migration.ai_verifier_model` are
+removed from the v1 config contract and fail with rename guidance.
+
 ## Philosophy
 
 SMT's core schema path is deterministic: introspect schemas, map types, compute structural diffs, render SQL, write artifacts, and run SQL. AI can be a strong reviewer, but it is not required and is not the author of executable DDL.
@@ -99,6 +109,10 @@ SMT's core schema path is deterministic: introspect schemas, map types, compute 
 2. `smt sync` extracts the current source schema again, loads the latest snapshot, and computes a structural diff (added / removed / changed tables and per-table column/index/FK/check deltas).
 3. SMT renders a target-dialect plan locally using deterministic rules.
 4. By default the SQL is written to `migration.sql` for review and no target connection is opened. With `--apply` the statements are executed against the target in order. `data-loss-risk` statements (column drops, table drops) are refused unless `--allow-data-loss` is also passed.
+
+The stable v1 sync support and refusal behavior is documented in [docs/sync-contract.md](docs/sync-contract.md).
+Apply failure and rerun behavior for `create --apply` and `sync --apply` is
+documented in [docs/apply-recovery.md](docs/apply-recovery.md).
 
 ## Configuration
 
@@ -123,6 +137,12 @@ slack: { ... }                 # optional
 Passwords support `${env:VAR}`, `${file:/path}`, and literal forms.
 
 `~/.secrets/smt-config.yaml` (global): AI provider keys, profile encryption master key, Slack webhook. Never put these in `config.yaml`.
+
+Persisted artifact compatibility for the state DB, snapshots, run manifests, and
+`RendererVersion` is documented in [docs/v1-compatibility.md](docs/v1-compatibility.md).
+Live database and optional live AI release gates are documented in
+[docs/live-acceptance.md](docs/live-acceptance.md). Release packaging and
+installation steps are documented in [docs/release-checklist.md](docs/release-checklist.md).
 
 ## Heritage
 
