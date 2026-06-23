@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Documented the published v1.0.0 release status, artifact list, CI status,
   release-blocker closure, and validation artifacts.
+- Added a CI CRM fixture matrix that runs every supported source-to-target
+  permutation across SQL Server, PostgreSQL, and MySQL.
 
 ## [1.0.0] - 2026-06-22
 

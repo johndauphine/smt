@@ -305,6 +305,20 @@ func TestCompareColumns_DefaultClassColumnAware(t *testing.T) {
 			srcDialect: "postgres",
 			tgtDialect: "mysql",
 		},
+		{
+			name:       "postgres empty json object default serializes to mssql text storage",
+			src:        Column{Name: "settings", DataType: "jsonb", DefaultExpression: "'{}'::jsonb"},
+			tgt:        Column{Name: "settings", DataType: "nvarchar", MaxLength: -1, DefaultExpression: "('{}')"},
+			srcDialect: "postgres",
+			tgtDialect: "mssql",
+		},
+		{
+			name:       "postgres empty array default serializes to mssql text storage",
+			src:        Column{Name: "skills", DataType: "text[]", DefaultExpression: "'{}'::text[]"},
+			tgt:        Column{Name: "skills", DataType: "nvarchar", MaxLength: -1, DefaultExpression: "('{}')"},
+			srcDialect: "postgres",
+			tgtDialect: "mssql",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

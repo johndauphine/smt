@@ -81,3 +81,45 @@ jobs:
 
       - name: Build ./cmd/smt
         run: go build -trimpath -o "${RUNNER_TEMP}/smt" ./cmd/smt
+
+  crm-matrix:
+    name: CRM Fixture Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start database containers
+        run: |
+          make test-dbs-up
+          make mysql-test-up
+
+      - name: Wait for databases
+        run: make test-dbs-wait
+
+      - name: Load CRM fixtures
+        run: make test-crm-fixtures-load
+
+      - name: Run all-pairs CRM fixture matrix
+        run: make test-crm-acceptance
+
+      - name: Upload CRM matrix report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crm-acceptance-matrix
+          path: .acceptance-artifacts/crm/
+          if-no-files-found: ignore
+
+      - name: Stop database containers
+        if: always()
+        run: |
+          make test-dbs-down
+          make mysql-test-down

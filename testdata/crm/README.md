@@ -73,16 +73,33 @@ docker exec mysql-test sh -c "mysql -uroot -pTestPass2024 crm_mysql < /tmp/crm_m
 The integration-test docker containers are started by `make test-dbs-up` (postgres + mssql)
 and `make mysql-test-up` (mysql).
 
-## Migration permutation matrix
+## Migration Permutation Matrix
 
-The v1 release gate uses three representative paths so every supported engine is
-exercised at least once as a source and once as a target:
+The CRM acceptance gate runs all nine supported source-to-target permutations:
+
+| Case | Source | Target |
+|------|--------|--------|
+| `mssql-to-mssql` | SQL Server | SQL Server |
+| `mssql-to-postgres` | SQL Server | PostgreSQL |
+| `mssql-to-mysql` | SQL Server | MySQL |
+| `postgres-to-mssql` | PostgreSQL | SQL Server |
+| `postgres-to-postgres` | PostgreSQL | PostgreSQL |
+| `postgres-to-mysql` | PostgreSQL | MySQL |
+| `mysql-to-mssql` | MySQL | SQL Server |
+| `mysql-to-postgres` | MySQL | PostgreSQL |
+| `mysql-to-mysql` | MySQL | MySQL |
 
 ```bash
+make test-dbs-wait
+make test-crm-fixtures-load
 make test-crm-acceptance
 ```
 
-The committed manual configs live under `testdata/crm/configs/`:
+From a clean Docker environment, `make test-crm-ci` starts the containers,
+waits for readiness, loads the fixtures, and runs the same matrix.
+
+The committed manual configs for representative paths live under
+`testdata/crm/configs/`:
 
 - `mssql-to-postgres.yaml`
 - `postgres-to-mysql.yaml`
