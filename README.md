@@ -4,6 +4,16 @@ SMT extracts the schema of a source database and builds matching target-dialect 
 
 SMT is the schema-only counterpart to [DMT](https://github.com/johndauphine/dmt) (the data migration tool): same pluggable driver model, same TUI scaffolding, same encrypted profile storage. It does not move rows.
 
+## Release Status
+
+SMT v1.0.0 is published as a stable GitHub Release:
+[SMT v1.0.0](https://github.com/johndauphine/smt/releases/tag/v1.0.0).
+The release tag points at commit
+`b08be2c1fcf22ced8e38e7137420e5d81b8e8ec0`, and downloadable Linux, macOS,
+and Windows artifacts are available with SHA-256 checksums. See
+[docs/release-checklist.md](docs/release-checklist.md#current-release-status)
+for the current release status, validation gates, and asset list.
+
 ## Supported databases
 
 PostgreSQL, SQL Server, MySQL — both as source and target. New engines are added by dropping a package under `internal/driver/foo/` that implements `driver.Driver`/`Reader`/`Writer` and registers itself in `init()`.
