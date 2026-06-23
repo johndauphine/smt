@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Documented the published v1.0.0 release status, artifact list, CI status,
+  release-blocker closure, and validation artifacts.
+
 ## [1.0.0] - 2026-06-22
 
 ### Added

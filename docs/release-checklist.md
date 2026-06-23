@@ -1,5 +1,20 @@
 # SMT v1.0.0 Release Checklist
 
+## Current Release Status
+
+SMT v1.0.0 is published as a stable GitHub Release:
+[SMT v1.0.0](https://github.com/johndauphine/smt/releases/tag/v1.0.0).
+
+| Item | Status |
+|------|--------|
+| Release | Published on 2026-06-23 at 02:10 UTC; not a draft or prerelease |
+| Tag | Annotated tag `v1.0.0`, targeting `b08be2c1fcf22ced8e38e7137420e5d81b8e8ec0` |
+| CI | Passing on `main` for Unit Tests, Race Tests, Lint, and Build CLI at the release commit |
+| Release blockers | No open `v1` or `release-blocker` issues; release readiness tracker [#144](https://github.com/johndauphine/smt/issues/144) is closed |
+| Assets | `smt-linux-amd64`, `smt-darwin-arm64`, `smt-windows-amd64.exe`, `checksums.txt` |
+| Checksums | Local release checksums passed before upload; the published `checksums.txt` matches the local file |
+| Acceptance artifacts | `so2010_verification.json`, `crm_acceptance_matrix.json`, and `live_ai_smoke.json` were generated under `.acceptance-artifacts/` during release validation |
+
 ## Supported Artifacts
 
 `make release-artifacts` builds:
