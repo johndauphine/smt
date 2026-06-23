@@ -264,16 +264,6 @@ type MigrationConfig struct {
 	// compatibility even though core DDL generation is deterministic.
 	AIConcurrency int `yaml:"ai_concurrency"`
 
-	// AIVerify is a deprecated alias for ai_review.enabled. AI review can
-	// inspect deterministic DDL but cannot rewrite it or feed changes back
-	// into generation.
-	AIVerify bool `yaml:"ai_verify"`
-
-	// AIVerifierModel names a provider entry in the secrets file
-	// (~/.secrets/smt-config.yaml under `ai.providers`) to use for optional
-	// AI review. Deprecated alias for ai_review.model.
-	AIVerifierModel string `yaml:"ai_verifier_model"`
-
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 }
@@ -612,18 +602,14 @@ func (c *Config) applyDefaults() error {
 	if c.SchemaGeneration.UnknownTypePolicy == "" {
 		c.SchemaGeneration.UnknownTypePolicy = "fail"
 	}
-	// migration.ai_verify / ai_verifier_model are deprecated aliases for the
-	// ai_review block. They still resolve (below), but warn so users migrate
-	// off them. Gated on key presence so an omitted key never warns; an
-	// explicit ai_review value always wins over the alias.
 	if c.hasMigrationKey("ai_verify") {
-		logging.Warn("config: migration.ai_verify is deprecated; use ai_review.enabled instead")
+		return fmt.Errorf("migration.ai_verify was removed in v1; rename it to ai_review.enabled")
 	}
 	if c.hasMigrationKey("ai_verifier_model") {
-		logging.Warn("config: migration.ai_verifier_model is deprecated; use ai_review.model instead")
+		return fmt.Errorf("migration.ai_verifier_model was removed in v1; rename it to ai_review.model")
 	}
 	if c.AIReview.Enabled == nil {
-		enabled := c.Migration.AIVerify
+		enabled := false
 		c.AIReview.Enabled = &enabled
 	}
 	// suggest_fixes is opt-OUT: when omitted it follows diagnose_failures, so
@@ -632,9 +618,6 @@ func (c *Config) applyDefaults() error {
 	if c.AIReview.SuggestFixes == nil {
 		suggest := c.AIReview.DiagnoseFailures
 		c.AIReview.SuggestFixes = &suggest
-	}
-	if c.AIReview.Model == "" {
-		c.AIReview.Model = c.Migration.AIVerifierModel
 	}
 	if c.AIReview.Mode == "" {
 		c.AIReview.Mode = "warn"

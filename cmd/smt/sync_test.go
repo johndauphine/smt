@@ -77,6 +77,24 @@ func TestApplyPlan_EmptyPlan(t *testing.T) {
 	}
 }
 
+func TestFormatUnsupportedChangesIncludesManualActionContext(t *testing.T) {
+	out := formatUnsupportedChanges([]schemadiff.UnsupportedChange{{
+		Table:       "users",
+		Description: "change primary key",
+		Reason:      "primary-key changes are not supported by deterministic sync",
+	}})
+	for _, want := range []string{
+		"Unsupported change(s) skipped: 1",
+		"change primary key",
+		"table users",
+		"primary-key changes are not supported by deterministic sync",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("unsupported output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // stubLoader records which tables had each loader called, and can fail
 // on a specific table+method combination.
 type stubLoader struct {

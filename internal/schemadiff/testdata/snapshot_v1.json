@@ -1,0 +1,67 @@
+{
+  "version": 4,
+  "schema": "dbo",
+  "source_type": "mssql",
+  "captured_at": "2026-06-22T00:00:00Z",
+  "tables": [
+    {
+      "schema": "dbo",
+      "name": "users",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "int",
+          "max_length": 0,
+          "precision": 10,
+          "scale": 0,
+          "is_nullable": false,
+          "is_identity": true,
+          "ordinal_position": 1
+        },
+        {
+          "name": "status",
+          "data_type": "varchar",
+          "max_length": 20,
+          "precision": 0,
+          "scale": 0,
+          "is_nullable": false,
+          "is_identity": false,
+          "ordinal_position": 2,
+          "default_expression": "('active')"
+        },
+        {
+          "name": "is_active",
+          "data_type": "tinyint",
+          "max_length": 1,
+          "precision": 3,
+          "scale": 0,
+          "is_nullable": false,
+          "is_identity": false,
+          "display_width": 1,
+          "ordinal_position": 3,
+          "default_expression": "((1))"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "indexes": [
+        {
+          "name": "ix_users_status",
+          "columns": [
+            "status"
+          ],
+          "is_unique": false,
+          "is_clustered": false
+        }
+      ],
+      "foreign_keys": [],
+      "check_constraints": [
+        {
+          "name": "ck_users_is_active",
+          "definition": "([is_active]=(0) OR [is_active]=(1))"
+        }
+      ]
+    }
+  ]
+}

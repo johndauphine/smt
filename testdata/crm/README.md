@@ -53,16 +53,16 @@ Coverage exercised by every script:
 
 ```bash
 # SQL Server
-docker exec mssql-bench /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TestPass2024' -C \
+docker exec mssql-test /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TestPass2024' -C \
   -Q "CREATE DATABASE CRM_MSSQL;"
-docker cp testdata/crm/crm_mssql.sql mssql-bench:/tmp/
-docker exec mssql-bench /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TestPass2024' -C \
+docker cp testdata/crm/crm_mssql.sql mssql-test:/tmp/
+docker exec mssql-test /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TestPass2024' -C \
   -d CRM_MSSQL -i /tmp/crm_mssql.sql
 
 # PostgreSQL
-PGPASSWORD=TestPass2024 docker exec pg-bench createdb -U postgres crm_pg
-docker cp testdata/crm/crm_postgres.sql pg-bench:/tmp/
-PGPASSWORD=TestPass2024 docker exec pg-bench psql -U postgres -d crm_pg -f /tmp/crm_postgres.sql
+PGPASSWORD=TestPass2024 docker exec pg-test createdb -U postgres crm_pg
+docker cp testdata/crm/crm_postgres.sql pg-test:/tmp/
+PGPASSWORD=TestPass2024 docker exec pg-test psql -U postgres -d crm_pg -f /tmp/crm_postgres.sql
 
 # MySQL / MariaDB
 docker exec mysql-test mysql -uroot -pTestPass2024 -e "CREATE DATABASE crm_mysql;"
@@ -75,7 +75,18 @@ and `make mysql-test-up` (mysql).
 
 ## Migration permutation matrix
 
-With these three sources you can drive the full source × target migration matrix
-(any of the three engines as source → any of the three as target). Use `smt create`
-with a config like `testdata/crm/configs/<src>-to-<tgt>.yaml` (configs not included —
-each user's setup will differ).
+The v1 release gate uses three representative paths so every supported engine is
+exercised at least once as a source and once as a target:
+
+```bash
+make test-crm-acceptance
+```
+
+The committed manual configs live under `testdata/crm/configs/`:
+
+- `mssql-to-postgres.yaml`
+- `postgres-to-mysql.yaml`
+- `mysql-to-mssql.yaml`
+
+See `docs/live-acceptance.md` for the release-gate contract, environment
+variables, and artifact paths.

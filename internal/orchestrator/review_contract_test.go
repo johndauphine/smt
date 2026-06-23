@@ -156,6 +156,9 @@ func TestReview_WarnModeRecordsWarningsForManifest(t *testing.T) {
 	if warnings[0].Label != "table dbo.Users" {
 		t.Fatalf("warning label = %q", warnings[0].Label)
 	}
+	if warnings[0].Method != reviewMethodDeterministicComparator {
+		t.Fatalf("warning method = %q, want %q", warnings[0].Method, reviewMethodDeterministicComparator)
+	}
 	if got := strings.Join(warnings[0].Issues, "|"); got != "missing index|nullable changed" {
 		t.Fatalf("warning issues = %q", got)
 	}
@@ -166,6 +169,33 @@ func TestReview_WarnModeRecordsWarningsForManifest(t *testing.T) {
 	}
 	if !strings.Contains(string(blob), "ai_review_warnings") {
 		t.Fatalf("manifest JSON did not include ai_review_warnings: %s", blob)
+	}
+}
+
+func TestReview_FinalizationWarnModeRecordsFreeTextAuditor(t *testing.T) {
+	f := &fakeReviewer{verdict: &driver.VerifyResult{OK: false, Issues: []string{"predicate may differ"}}}
+	r := reviewerFor(f, true, "warn")
+	err := r.reviewFinalization(
+		context.Background(),
+		driver.DDLTypeCheckConstraint,
+		sampleTable(),
+		nil,
+		nil,
+		&driver.CheckConstraint{Name: "ck_users_active"},
+		"ALTER TABLE users ADD CONSTRAINT ck_users_active CHECK (active IN (0, 1))",
+	)
+	if err != nil {
+		t.Fatalf("warn verdict should not block: %v", err)
+	}
+	warnings := r.reviewWarnings.Snapshot()
+	if len(warnings) != 1 {
+		t.Fatalf("recorded warnings = %d, want 1", len(warnings))
+	}
+	if warnings[0].Method != reviewMethodFreeTextAuditor {
+		t.Fatalf("warning method = %q, want %q", warnings[0].Method, reviewMethodFreeTextAuditor)
+	}
+	if !strings.Contains(warnings[0].Label, string(driver.DDLTypeCheckConstraint)) {
+		t.Fatalf("warning label = %q, want check-constraint label", warnings[0].Label)
 	}
 }
 

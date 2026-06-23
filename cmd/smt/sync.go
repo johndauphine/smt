@@ -396,10 +396,15 @@ func printPlanSummary(plan schemadiff.Plan) {
 }
 
 func printUnsupportedChanges(changes []schemadiff.UnsupportedChange) {
+	fmt.Print(formatUnsupportedChanges(changes))
+}
+
+func formatUnsupportedChanges(changes []schemadiff.UnsupportedChange) string {
 	if len(changes) == 0 {
-		return
+		return ""
 	}
-	fmt.Printf("Unsupported change(s) skipped: %d\n", len(changes))
+	var b strings.Builder
+	fmt.Fprintf(&b, "Unsupported change(s) skipped: %d\n", len(changes))
 	for _, change := range changes {
 		parts := []string{change.Description}
 		if strings.TrimSpace(change.Table) != "" {
@@ -408,6 +413,7 @@ func printUnsupportedChanges(changes []schemadiff.UnsupportedChange) {
 		if strings.TrimSpace(change.Reason) != "" {
 			parts = append(parts, change.Reason)
 		}
-		fmt.Printf("  - %s\n", strings.Join(parts, " - "))
+		fmt.Fprintf(&b, "  - %s\n", strings.Join(parts, " - "))
 	}
+	return b.String()
 }

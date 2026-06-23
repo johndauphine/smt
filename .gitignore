@@ -8,6 +8,11 @@
 *.yml
 !config.yaml.example
 !.golangci.yml
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
+!testdata/crm/configs/
+!testdata/crm/configs/*.yaml
 
 # State database
 *.db
@@ -35,6 +40,7 @@ vendor/
 *.bak
 *.png
 *.jpg
+.acceptance-artifacts/
 
 # Generated migration scripts
 migrations/

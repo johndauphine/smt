@@ -179,8 +179,8 @@ func NewAITypeMapperFromSecrets() (*AITypeMapper, error) {
 
 // NewAITypeMapperByName creates an AI type mapper for a specific provider
 // entry in the secrets file. Used by the orchestrator to build the verifier
-// mapper from migration.ai_verifier_model. Errors if the provider name is
-// not found in the secrets config.
+// mapper from ai_review.model. Errors if the provider name is not found in the
+// secrets config.
 func NewAITypeMapperByName(name string) (*AITypeMapper, error) {
 	config, err := secrets.Load()
 	if err != nil {

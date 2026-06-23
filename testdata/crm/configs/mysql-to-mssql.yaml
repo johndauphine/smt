@@ -1,0 +1,31 @@
+source:
+  type: mysql
+  host: localhost
+  port: 3306
+  database: crm_mysql
+  user: root
+  password: TestPass2024
+  schema: crm_mysql
+
+target:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: tempdb
+  user: sa
+  password: TestPass2024
+  schema: crm_accept_mysql_to_mssql
+  trust_server_cert: true
+
+schema_generation:
+  mode: deterministic
+  unknown_type_policy: fail
+
+ai_review:
+  enabled: false
+
+migration:
+  create_indexes: true
+  create_foreign_keys: true
+  create_check_constraints: true
+  data_dir: .acceptance-artifacts/crm/mysql-to-mssql

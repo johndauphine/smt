@@ -1,11 +1,40 @@
 package schemadiff
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
 	"smt/internal/driver"
 )
+
+func TestSnapshotV1FixtureDeserializes(t *testing.T) {
+	data, err := os.ReadFile("testdata/snapshot_v1.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal v1 snapshot fixture: %v", err)
+	}
+	if snap.Version != 4 {
+		t.Fatalf("snapshot version = %d, want v1 fixture version 4", snap.Version)
+	}
+	if snap.SourceType != "mssql" || snap.Schema != "dbo" {
+		t.Fatalf("snapshot identity = %s/%s, want mssql/dbo", snap.SourceType, snap.Schema)
+	}
+	if len(snap.Tables) != 1 || snap.Tables[0].Name != "users" {
+		t.Fatalf("snapshot tables = %#v", snap.Tables)
+	}
+	if got := snap.Tables[0].Columns[2].DisplayWidth; got != 1 {
+		t.Fatalf("display_width = %d, want 1", got)
+	}
+	if len(snap.Tables[0].Indexes) != 1 || len(snap.Tables[0].CheckConstraints) != 1 {
+		t.Fatalf("side objects did not deserialize: indexes=%d checks=%d",
+			len(snap.Tables[0].Indexes), len(snap.Tables[0].CheckConstraints))
+	}
+}
 
 // #78 — a pre-v2 snapshot (no IsUnsigned/EnumValues/OnUpdateExpression) must
 // not diff those fields against a fresh extraction that has them.

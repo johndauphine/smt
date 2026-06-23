@@ -398,7 +398,7 @@ func (r createDDLRenderer) reviewTable(ctx context.Context, t *driver.Table, ddl
 	if err != nil {
 		return fmt.Errorf("AI review failed for table %s: %w", t.FullName(), err)
 	}
-	return r.handleReviewVerdict(fmt.Sprintf("table %s", t.FullName()), verdict)
+	return r.handleReviewVerdict(fmt.Sprintf("table %s", t.FullName()), reviewMethodDeterministicComparator, verdict)
 }
 
 func (r createDDLRenderer) reviewFinalization(ctx context.Context, ddlType driver.DDLType, t *driver.Table, idx *driver.Index, fk *driver.ForeignKey, chk *driver.CheckConstraint, ddl string) error {
@@ -423,18 +423,18 @@ func (r createDDLRenderer) reviewFinalization(ctx context.Context, ddlType drive
 	if err != nil {
 		return fmt.Errorf("AI review failed for %s on %s: %w", ddlType, t.FullName(), err)
 	}
-	return r.handleReviewVerdict(fmt.Sprintf("%s on %s", ddlType, t.FullName()), verdict)
+	return r.handleReviewVerdict(fmt.Sprintf("%s on %s", ddlType, t.FullName()), reviewMethodFreeTextAuditor, verdict)
 }
 
 func handleReviewVerdict(mode, label string, verdict *driver.VerifyResult) error {
-	return handleReviewVerdictRecorded(mode, label, verdict, nil)
+	return handleReviewVerdictRecorded(mode, label, reviewMethodDeterministicComparator, verdict, nil)
 }
 
-func (r createDDLRenderer) handleReviewVerdict(label string, verdict *driver.VerifyResult) error {
-	return handleReviewVerdictRecorded(r.aiReviewMode, label, verdict, r.reviewWarnings)
+func (r createDDLRenderer) handleReviewVerdict(label, method string, verdict *driver.VerifyResult) error {
+	return handleReviewVerdictRecorded(r.aiReviewMode, label, method, verdict, r.reviewWarnings)
 }
 
-func handleReviewVerdictRecorded(mode, label string, verdict *driver.VerifyResult, warnings *reviewWarningRecorder) error {
+func handleReviewVerdictRecorded(mode, label, method string, verdict *driver.VerifyResult, warnings *reviewWarningRecorder) error {
 	// A nil verdict with no error is a reviewer-contract violation: review is
 	// enabled but produced no audit result. Fail closed (regardless of mode,
 	// like a provider failure) rather than letting apply proceed unreviewed.
@@ -446,14 +446,26 @@ func handleReviewVerdictRecorded(mode, label string, verdict *driver.VerifyResul
 		return nil
 	}
 	msg := strings.Join(verdict.Issues, "\n  ")
+	methodLabel := reviewMethodLabel(method)
 	if strings.EqualFold(mode, "fail") {
-		return fmt.Errorf("AI review flagged %d issue(s) on %s:\n  %s", len(verdict.Issues), label, msg)
+		return fmt.Errorf("AI review (%s) flagged %d issue(s) on %s:\n  %s", methodLabel, len(verdict.Issues), label, msg)
 	}
 	if warnings != nil {
-		warnings.Record(label, verdict.Issues)
+		warnings.Record(label, method, verdict.Issues)
 	}
-	logging.Warn("AI review flagged %d issue(s) on %s:\n  %s", len(verdict.Issues), label, msg)
+	logging.Warn("AI review (%s) flagged %d issue(s) on %s:\n  %s", methodLabel, len(verdict.Issues), label, msg)
 	return nil
+}
+
+func reviewMethodLabel(method string) string {
+	switch method {
+	case reviewMethodDeterministicComparator:
+		return "deterministic comparator"
+	case reviewMethodFreeTextAuditor:
+		return "free-text auditor"
+	default:
+		return "unknown review method"
+	}
 }
 
 func (o *Orchestrator) writeSQLArtifact(runID, name, sql string) error {

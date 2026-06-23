@@ -1,13 +1,11 @@
 package config
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"smt/internal/logging"
 	"smt/internal/secrets"
 )
 
@@ -1407,69 +1405,87 @@ func TestSanitizedRedactsPasswords(t *testing.T) {
 	}
 }
 
-func TestBooleanGlobalDefaultsLogic(t *testing.T) {
-	// This test documents the historical global-default behavior for boolean
-	// fields that do not track YAML key presence. Schema-object phase flags
-	// now use presence tracking so explicit false can be preserved.
-
-	boolPtr := func(b bool) *bool { return &b }
-
-	tests := []struct {
-		name           string
-		globalDefault  *bool // nil = not set in global config
-		migrationValue bool  // value in per-migration config
-		expected       bool  // expected final value
+func TestSchemaObjectBooleanGlobalDefaultsRespectMigrationPresence(t *testing.T) {
+	flags := []struct {
+		key string
+		got func(*Config) bool
 	}{
-		// Global not set - migration value preserved
-		{"global nil, migration false", nil, false, false},
-		{"global nil, migration true", nil, true, true},
-
-		// Global true - wins unless migration is already true
-		{"global true, migration false", boolPtr(true), false, true},
-		{"global true, migration true", boolPtr(true), true, true},
-
-		// Global false - applied when migration is false, migration true wins
-		{"global false, migration false", boolPtr(false), false, false},
-		{"global false, migration true", boolPtr(false), true, true},
+		{"create_indexes", func(c *Config) bool { return c.Migration.CreateIndexes }},
+		{"create_foreign_keys", func(c *Config) bool { return c.Migration.CreateForeignKeys }},
+		{"create_check_constraints", func(c *Config) bool { return c.Migration.CreateCheckConstraints }},
+	}
+	boolPtr := func(v bool) *bool { return &v }
+	cases := []struct {
+		name           string
+		globalDefault  *bool
+		migrationValue *bool
+		want           bool
+	}{
+		{"global nil, migration omitted", nil, nil, true},
+		{"global nil, migration false", nil, boolPtr(false), false},
+		{"global nil, migration true", nil, boolPtr(true), true},
+		{"global true, migration omitted", boolPtr(true), nil, true},
+		{"global true, migration false", boolPtr(true), boolPtr(false), false},
+		{"global true, migration true", boolPtr(true), boolPtr(true), true},
+		{"global false, migration omitted", boolPtr(false), nil, false},
+		{"global false, migration false", boolPtr(false), boolPtr(false), false},
+		{"global false, migration true", boolPtr(false), boolPtr(true), true},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the logic from applyGlobalDefaults
-			result := tt.migrationValue
-			if tt.globalDefault != nil && !tt.migrationValue {
-				result = *tt.globalDefault
-			}
+	for _, flag := range flags {
+		for _, tc := range cases {
+			t.Run(flag.key+"/"+tc.name, func(t *testing.T) {
+				if tc.globalDefault == nil {
+					disableSecretsForTest(t)
+				} else {
+					dir := t.TempDir()
+					secretsPath := filepath.Join(dir, "secrets.yaml")
+					secretsYAML := "migration_defaults:\n  " + flag.key + ": " + boolYAML(*tc.globalDefault) + "\n"
+					if err := os.WriteFile(secretsPath, []byte(secretsYAML), 0600); err != nil {
+						t.Fatalf("write secrets: %v", err)
+					}
+					secrets.Reset()
+					t.Setenv(secrets.SecretsFileEnvVar, secretsPath)
+					t.Cleanup(secrets.Reset)
+				}
 
-			if result != tt.expected {
-				t.Errorf("got %v, want %v", result, tt.expected)
-			}
-		})
+				configYAML := minimalConfigYAML()
+				if tc.migrationValue != nil {
+					configYAML += "migration:\n  " + flag.key + ": " + boolYAML(*tc.migrationValue) + "\n"
+				}
+
+				cfg, err := LoadBytes([]byte(configYAML))
+				if err != nil {
+					t.Fatalf("LoadBytes() unexpected error: %v", err)
+				}
+				if got := flag.got(cfg); got != tc.want {
+					t.Fatalf("%s = %v, want %v", flag.key, got, tc.want)
+				}
+			})
+		}
 	}
 }
 
-func TestBooleanGlobalDefaultsDocumentedLimitation(t *testing.T) {
-	// This test explicitly documents the limitation that still applies to
-	// bool fields that do not track YAML key presence.
-
-	boolPtr := func(b bool) *bool { return &b }
-
-	globalDefault := boolPtr(true)
-	migrationExplicitlyFalse := false // User wants false, but we can't tell
-
-	// Apply the logic
-	result := migrationExplicitlyFalse
-	if globalDefault != nil && !migrationExplicitlyFalse {
-		result = *globalDefault
+func boolYAML(v bool) string {
+	if v {
+		return "true"
 	}
+	return "false"
+}
 
-	// The limitation: global true overrides migration false
-	if result != true {
-		t.Error("Expected limitation: global true should override migration false")
-	}
-
-	// Document this is a known limitation, not a bug
-	t.Log("Known limitation: cannot override global 'true' to 'false' per-migration")
+func minimalConfigYAML() string {
+	return `
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: source
+  user: user
+  password: pass
+target:
+  type: postgres
+  schema: public
+`
 }
 
 // #91 — a target with exactly one of host/database set is a typo, not a
@@ -1513,11 +1529,11 @@ func TestValidateRejectsPartialTargetConnection(t *testing.T) {
 	}
 }
 
-// #67 — migration.ai_verify / ai_verifier_model are deprecated aliases for
-// the ai_review block. Using them must warn (so users migrate off), an
-// omitted key must stay silent, and an explicit ai_review value must win
-// over the alias.
-func TestDeprecatedAIVerifyAliasWarns(t *testing.T) {
+// #153 — the deprecated 0.x migration.ai_verify / ai_verifier_model aliases
+// are removed from the v1 config contract. Stale configs must fail with a
+// direct rename instruction instead of silently resolving two names for the
+// same behavior.
+func TestRemovedAIVerifyAliasesError(t *testing.T) {
 	const base = `
 source:
   type: mssql
@@ -1536,30 +1552,31 @@ target:
   password: pass
 `
 	cases := []struct {
-		name      string
-		extra     string
-		wantWarn  []string
-		wantNoLog []string
+		name       string
+		extra      string
+		wantErr    bool
+		wantErrMsg string
 	}{
 		{
-			name:      "no aliases stays silent",
-			extra:     "",
-			wantNoLog: []string{"ai_verify", "ai_verifier_model"},
+			name: "no aliases still loads",
 		},
 		{
-			name:     "ai_verify true warns",
-			extra:    "migration:\n  ai_verify: true\n",
-			wantWarn: []string{"migration.ai_verify is deprecated"},
+			name:       "ai_verify true errors",
+			extra:      "migration:\n  ai_verify: true\n",
+			wantErr:    true,
+			wantErrMsg: "migration.ai_verify was removed in v1; rename it to ai_review.enabled",
 		},
 		{
-			name:     "ai_verify false still warns (explicit use)",
-			extra:    "migration:\n  ai_verify: false\n",
-			wantWarn: []string{"migration.ai_verify is deprecated"},
+			name:       "ai_verify false errors",
+			extra:      "migration:\n  ai_verify: false\n",
+			wantErr:    true,
+			wantErrMsg: "migration.ai_verify was removed in v1; rename it to ai_review.enabled",
 		},
 		{
-			name:     "ai_verifier_model warns",
-			extra:    "migration:\n  ai_verifier_model: strong\n",
-			wantWarn: []string{"migration.ai_verifier_model is deprecated"},
+			name:       "ai_verifier_model errors",
+			extra:      "migration:\n  ai_verifier_model: strong\n",
+			wantErr:    true,
+			wantErrMsg: "migration.ai_verifier_model was removed in v1; rename it to ai_review.model",
 		},
 	}
 	for _, tc := range cases {
@@ -1571,31 +1588,21 @@ target:
 				t.Fatalf("write config: %v", err)
 			}
 
-			var buf bytes.Buffer
-			logging.SetOutput(&buf)
-			defer logging.SetOutput(nil)
-
-			if _, err := Load(configPath); err != nil {
+			_, err := Load(configPath)
+			if !tc.wantErr && err != nil {
 				t.Fatalf("Load() error: %v", err)
 			}
-			out := buf.String()
-			for _, want := range tc.wantWarn {
-				if !strings.Contains(out, want) {
-					t.Errorf("expected warning %q, log was:\n%s", want, out)
-				}
+			if tc.wantErr && err == nil {
+				t.Fatal("Load() succeeded, want error")
 			}
-			for _, no := range tc.wantNoLog {
-				if strings.Contains(out, no) {
-					t.Errorf("did not expect %q in log, log was:\n%s", no, out)
-				}
+			if tc.wantErr && !strings.Contains(err.Error(), tc.wantErrMsg) {
+				t.Fatalf("Load() error = %v, want to contain %q", err, tc.wantErrMsg)
 			}
 		})
 	}
 }
 
-// #67 — an explicit ai_review.enabled must take precedence over the
-// deprecated ai_verify alias, regardless of the alias value.
-func TestAIReviewWinsOverDeprecatedAlias(t *testing.T) {
+func TestAIReviewExplicitFalseLoadsWithoutLegacyAlias(t *testing.T) {
 	t.Setenv(secrets.SecretsFileEnvVar, filepath.Join(t.TempDir(), "missing.yaml"))
 	const cfgYAML = `
 source:
@@ -1613,8 +1620,6 @@ target:
   schema: public
   user: user
   password: pass
-migration:
-  ai_verify: true
 ai_review:
   enabled: false
 `
@@ -1628,6 +1633,6 @@ ai_review:
 		t.Fatalf("Load() error: %v", err)
 	}
 	if cfg.AIReview.Enabled == nil || *cfg.AIReview.Enabled {
-		t.Errorf("explicit ai_review.enabled=false should win over ai_verify=true, got %v", cfg.AIReview.Enabled)
+		t.Errorf("explicit ai_review.enabled=false should load as false, got %v", cfg.AIReview.Enabled)
 	}
 }
