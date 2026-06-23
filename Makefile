@@ -135,7 +135,7 @@ test-dbs-wait:
 	@echo "Waiting for SQL Server..."
 	@i=0; while [ $$i -lt 90 ]; do docker exec mssql-test /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TestPass2024' -C -Q "SELECT 1" >/dev/null 2>&1 && exit 0; i=$$((i + 1)); sleep 2; done; docker logs mssql-test; exit 1
 	@echo "Waiting for MySQL..."
-	@i=0; while [ $$i -lt 90 ]; do docker exec mysql-test mysqladmin ping -uroot -pTestPass2024 --silent >/dev/null 2>&1 && exit 0; i=$$((i + 1)); sleep 2; done; docker logs mysql-test; exit 1
+	@i=0; while [ $$i -lt 90 ]; do docker exec mysql-test mysql -uroot -pTestPass2024 -e "SELECT 1" >/dev/null 2>&1 && exit 0; i=$$((i + 1)); sleep 2; done; docker logs mysql-test; exit 1
 
 mysql-test-down:
 	docker rm -f mysql-test 2>/dev/null || true
