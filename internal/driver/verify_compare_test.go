@@ -234,6 +234,87 @@ func TestDefaultExpressionClass_CrossDialectEquivalence(t *testing.T) {
 	}
 }
 
+func TestDefaultExpressionClassForColumn(t *testing.T) {
+	cases := []struct {
+		name    string
+		expr    string
+		col     Column
+		dialect string
+		want    string
+	}{
+		{
+			name: "decimal zero keeps numeric class",
+			expr: "0.0000000000",
+			col:  Column{DataType: "numeric"},
+			want: "constant0",
+		},
+		{
+			name: "jsonb empty object",
+			expr: "'{}'::jsonb",
+			col:  Column{DataType: "jsonb"},
+			want: "empty_json_object",
+		},
+		{
+			name:    "mysql empty json object",
+			expr:    "JSON_OBJECT()",
+			col:     Column{DataType: "json"},
+			dialect: "mysql",
+			want:    "empty_json_object",
+		},
+		{
+			name: "postgres empty array",
+			expr: "'{}'::text[]",
+			col:  Column{DataType: "ARRAY"},
+			want: "empty_array",
+		},
+		{
+			name:    "mysql empty json array",
+			expr:    "JSON_ARRAY()",
+			col:     Column{DataType: "json"},
+			dialect: "mysql",
+			want:    "empty_array",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultExpressionClassForColumn(tc.expr, tc.col, tc.dialect); got != tc.want {
+				t.Fatalf("defaultExpressionClassForColumn(%q, %q) = %q, want %q", tc.expr, tc.col.DataType, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompareColumns_DefaultClassColumnAware(t *testing.T) {
+	cases := []struct {
+		name       string
+		src, tgt   Column
+		srcDialect string
+		tgtDialect string
+	}{
+		{
+			name:       "decimal zero scale is equivalent",
+			src:        Column{Name: "amount", DataType: "numeric", Precision: 18, Scale: 2, DefaultExpression: "0"},
+			tgt:        Column{Name: "amount", DataType: "decimal", Precision: 18, Scale: 2, DefaultExpression: "0.00"},
+			srcDialect: "postgres",
+			tgtDialect: "mysql",
+		},
+		{
+			name:       "empty json object default is equivalent",
+			src:        Column{Name: "settings", DataType: "jsonb", DefaultExpression: "'{}'::jsonb"},
+			tgt:        Column{Name: "settings", DataType: "json", DefaultExpression: "json_object()"},
+			srcDialect: "postgres",
+			tgtDialect: "mysql",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if d := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, tc.srcDialect, tc.tgtDialect); len(d) != 0 {
+				t.Fatalf("expected zero deltas, got %v", d)
+			}
+		})
+	}
+}
+
 // TestCompareColumns_AllPass is the happy path — well-translated mssql→pg
 // columns produce zero deltas. Specifically exercises the cases the
 // AI-auditor era kept getting wrong: nvarchar→varchar, datetime2→TIMESTAMP,
@@ -521,16 +602,25 @@ func TestCompareColumns_ComputedSkipsLengthPrecisionDefault(t *testing.T) {
 	}
 }
 
-// TestCompareColumns_ComputedStillChecksNullability is the negative case of
-// the computed-column skip: nullability still matters even on computed
-// columns (MSSQL PERSISTED-implicit-NOT-NULL is real fidelity), so we don't
-// silently swallow nullable-vs-NOT-NULL mismatches.
-func TestCompareColumns_ComputedStillChecksNullability(t *testing.T) {
+// TestCompareColumns_ComputedSkipsEngineDerivedNullability pins that
+// nullability on computed columns is engine-synthesized metadata. A computed
+// column may be reported nullable on the source but NOT NULL on the target
+// when the target can infer the expression cannot return NULL.
+func TestCompareColumns_ComputedSkipsEngineDerivedNullability(t *testing.T) {
 	src := []Column{{Name: "line_total", DataType: "decimal", IsComputed: true, IsNullable: false}}
 	tgt := []Column{{Name: "line_total", DataType: "numeric", IsComputed: true, IsNullable: true}}
 	deltas := CompareColumns(src, tgt, "mssql", "postgres")
-	if len(deltas) != 1 || deltas[0].Criterion != "nullability" {
-		t.Errorf("expected one nullability delta on computed column, got %v", deltas)
+	if len(deltas) != 0 {
+		t.Errorf("expected zero deltas on computed nullability divergence, got %v", deltas)
+	}
+}
+
+func TestCompareColumns_ComputedStatusMustBePreserved(t *testing.T) {
+	src := []Column{{Name: "line_total", DataType: "decimal", IsComputed: true}}
+	tgt := []Column{{Name: "line_total", DataType: "numeric"}}
+	deltas := CompareColumns(src, tgt, "mssql", "postgres")
+	if len(deltas) == 0 || deltas[0].Criterion != "computed" {
+		t.Errorf("expected computed-status delta, got %v", deltas)
 	}
 }
 

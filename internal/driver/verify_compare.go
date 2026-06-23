@@ -16,6 +16,7 @@ package driver
 
 import (
 	"fmt"
+	"math/big"
 	"regexp"
 	"strings"
 
@@ -88,18 +89,18 @@ func CompareColumns(src, tgt []Column, srcDialect, tgtDialect string) []ColumnDe
 			})
 			continue
 		}
-		// Computed columns short-circuit length/precision/scale and default
-		// checks: their reported max_length and precision/scale come from
-		// the engine's synthesis of the expression's result type (e.g. MSSQL
+		// Computed columns short-circuit engine-derived metadata checks:
+		// reported max_length / precision / scale and nullability come from
+		// each engine's synthesis of the expression's result type (e.g. MSSQL
 		// promotes `decimal(18,2) - decimal(18,2)` to precision=34 internally
-		// for PERSISTED columns), so they don't round-trip across dialects
-		// even when the expression is preserved correctly. The expression
-		// itself IS the contract — verify catches dropped/altered expressions
-		// via the data_type / nullability / TZ checks below. Default-expr
-		// is also skipped since computed columns can't have a separate
-		// DEFAULT clause; the expression carries the value.
+		// for PERSISTED columns, and can infer NOT NULL where MySQL reports
+		// nullable). Those values don't round-trip across dialects even when
+		// the computed column itself is preserved correctly. We still require
+		// computed status, identity, TZ class, enum values, and canonical type
+		// shape to match. Default-expr is skipped since computed columns can't
+		// have a separate DEFAULT clause; the expression carries the value.
 		fns := []func(Column, Column, string, string) *ColumnDelta{
-			cmpNullability,
+			cmpComputed,
 			cmpIdentity,
 			cmpTZClass,
 			cmpEnumValues,
@@ -115,6 +116,7 @@ func CompareColumns(src, tgt []Column, srcDialect, tgtDialect string) []ColumnDe
 		srcClass := dataTypeClass(srcDialect, s)
 		sameFixedClass := srcClass != "" && srcClass == dataTypeClass(tgtDialect, t)
 		if !s.IsComputed && !t.IsComputed {
+			fns = append(fns, cmpNullability)
 			if !sameFixedClass {
 				fns = append(fns, cmpMaxLength, cmpPrecisionScale)
 			}
@@ -389,6 +391,20 @@ func cmpNullability(src, tgt Column, _, _ string) *ColumnDelta {
 	}
 }
 
+// cmpComputed enforces that generated/computed columns remain computed. The
+// expression text and storage class are not a v1 equivalence claim, but a
+// computed column becoming a regular writable column is a real contract loss.
+func cmpComputed(src, tgt Column, _, _ string) *ColumnDelta {
+	if src.IsComputed == tgt.IsComputed {
+		return nil
+	}
+	return &ColumnDelta{
+		Column: src.Name, Criterion: "computed",
+		SourceVal: fmt.Sprintf("%t", src.IsComputed),
+		TargetVal: fmt.Sprintf("%t", tgt.IsComputed),
+	}
+}
+
 // cmpIdentity enforces criterion 5: identity / auto-increment must be
 // preserved. The AI parser is responsible for setting IsIdentity=true on
 // any of: PG GENERATED IDENTITY, PG sequence default (nextval), MSSQL
@@ -457,12 +473,12 @@ func mysqlTimestampMatchesDT(dialect, dataType, otherClass string) bool {
 // mechanism, expressed via IsIdentity rather than DefaultExpression. We skip
 // the default check entirely when either side is an identity column; the
 // identity check (cmpIdentity) covers that semantic.
-func cmpDefaultClass(src, tgt Column, _, _ string) *ColumnDelta {
+func cmpDefaultClass(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	if src.IsIdentity || tgt.IsIdentity {
 		return nil
 	}
-	srcClass := defaultExpressionClass(src.DefaultExpression)
-	tgtClass := defaultExpressionClass(tgt.DefaultExpression)
+	srcClass := defaultExpressionClassForColumn(src.DefaultExpression, src, srcDialect)
+	tgtClass := defaultExpressionClassForColumn(tgt.DefaultExpression, tgt, tgtDialect)
 	if srcClass == tgtClass {
 		return nil
 	}
@@ -471,6 +487,89 @@ func cmpDefaultClass(src, tgt Column, _, _ string) *ColumnDelta {
 		SourceVal: fmt.Sprintf("%s (%q)", srcClass, src.DefaultExpression),
 		TargetVal: fmt.Sprintf("%s (%q)", tgtClass, tgt.DefaultExpression),
 	}
+}
+
+func defaultExpressionClassForColumn(expr string, col Column, dialect string) string {
+	norm := normalizedDefaultLiteral(expr)
+	if isDecimalType(col.DataType) {
+		if n, ok := normalizedNumericLiteral(norm); ok {
+			return "constant" + n
+		}
+	}
+	if dataTypeClass(dialect, col) == "json" && isEmptyJSONObjectDefault(norm) {
+		return "empty_json_object"
+	}
+	if isArrayType(col.DataType) && isEmptyArrayDefault(norm) {
+		return "empty_array"
+	}
+	if dataTypeClass(dialect, col) == "json" && norm == "json_array()" {
+		return "empty_array"
+	}
+	return defaultExpressionClass(expr)
+}
+
+func normalizedDefaultLiteral(expr string) string {
+	norm := strings.ToLower(strings.TrimSpace(expr))
+	for {
+		stripped := strings.TrimSpace(norm)
+		if len(stripped) >= 2 && stripped[0] == '(' && stripped[len(stripped)-1] == ')' {
+			norm = stripped[1 : len(stripped)-1]
+			continue
+		}
+		norm = stripped
+		break
+	}
+	if i := strings.LastIndex(norm, "::"); i >= 0 {
+		norm = strings.TrimSpace(norm[:i])
+	}
+	for len(norm) >= 2 && norm[0] == '(' && norm[len(norm)-1] == ')' {
+		norm = strings.TrimSpace(norm[1 : len(norm)-1])
+	}
+	if strings.HasPrefix(norm, "n'") && strings.HasSuffix(norm, "'") {
+		norm = norm[1:]
+	}
+	return strings.TrimSpace(norm)
+}
+
+func normalizedNumericLiteral(norm string) (string, bool) {
+	if !isNumericLiteral(norm) {
+		return "", false
+	}
+	rat, ok := new(big.Rat).SetString(norm)
+	if !ok {
+		return "", false
+	}
+	if rat.IsInt() {
+		return rat.Num().String(), true
+	}
+	return rat.FloatString(scaleForDecimalLiteral(norm)), true
+}
+
+func scaleForDecimalLiteral(s string) int {
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		scale := len(s) - i - 1
+		for scale > 0 && s[i+scale] == '0' {
+			scale--
+		}
+		return scale
+	}
+	return 0
+}
+
+func isEmptyJSONObjectDefault(norm string) bool {
+	return norm == "'{}'" || norm == "json_object()"
+}
+
+func isEmptyArrayDefault(norm string) bool {
+	return norm == "'{}'" || norm == "'[]'" || norm == "json_array()"
+}
+
+func isArrayType(dt string) bool {
+	dt = strings.ToLower(strings.TrimSpace(dt))
+	if strings.HasSuffix(dt, "[]") || strings.HasPrefix(dt, "_") {
+		return true
+	}
+	return dt == "array"
 }
 
 // cmpEnumValues guards same-family ENUM/SET comparison. Length is no longer

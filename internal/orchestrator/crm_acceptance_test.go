@@ -51,11 +51,13 @@ func TestCRM_DeterministicAcceptanceMatrix(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
-			dataDir := filepath.Join(t.TempDir(), tc.Name)
+			dataDir := t.TempDir()
 			cfg := &config.Config{
 				Source: tc.Source,
 				Target: tc.Target,
 				Migration: config.MigrationConfig{
+					MaxSourceConnections:   2,
+					MaxTargetConnections:   2,
 					CreateIndexes:          true,
 					CreateForeignKeys:      true,
 					CreateCheckConstraints: true,
