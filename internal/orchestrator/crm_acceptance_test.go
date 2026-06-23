@@ -106,81 +106,110 @@ func TestCRM_DeterministicAcceptanceMatrix(t *testing.T) {
 
 func crmAcceptanceCases(t *testing.T) []crmAcceptanceCase {
 	t.Helper()
-	return []crmAcceptanceCase{
-		{
-			Name: "mssql-to-postgres",
-			Source: config.SourceConfig{
-				Type:            "mssql",
-				Host:            env("CRM_MSSQL_HOST", "localhost"),
-				Port:            envInt(t, "CRM_MSSQL_PORT", 1433),
-				Database:        env("CRM_MSSQL_DB", "CRM_MSSQL"),
-				User:            env("CRM_MSSQL_USER", "sa"),
-				Password:        env("CRM_MSSQL_PASS", "TestPass2024"),
-				Schema:          env("CRM_MSSQL_SCHEMA", "dbo"),
-				TrustServerCert: true,
-			},
-			Target: config.TargetConfig{
-				Type:     "postgres",
-				Host:     env("CRM_PG_HOST", "localhost"),
-				Port:     envInt(t, "CRM_PG_PORT", 5432),
-				Database: env("CRM_PG_TARGET_DB", "postgres"),
-				User:     env("CRM_PG_USER", "postgres"),
-				Password: env("CRM_PG_PASS", "TestPass2024"),
-				Schema:   env("CRM_PG_TARGET_SCHEMA", "crm_accept_mssql_to_postgres"),
-				SSLMode:  "disable",
-			},
-			SourceType: "mssql",
-			TargetType: "postgres",
-		},
-		{
-			Name: "postgres-to-mysql",
-			Source: config.SourceConfig{
-				Type:     "postgres",
-				Host:     env("CRM_PG_HOST", "localhost"),
-				Port:     envInt(t, "CRM_PG_PORT", 5432),
-				Database: env("CRM_PG_DB", "crm_pg"),
-				User:     env("CRM_PG_USER", "postgres"),
-				Password: env("CRM_PG_PASS", "TestPass2024"),
-				Schema:   env("CRM_PG_SCHEMA", "public"),
-				SSLMode:  "disable",
-			},
-			Target: config.TargetConfig{
-				Type:     "mysql",
-				Host:     env("CRM_MYSQL_HOST", "localhost"),
-				Port:     envInt(t, "CRM_MYSQL_PORT", 3306),
-				Database: env("CRM_MYSQL_ADMIN_DB", "mysql"),
-				User:     env("CRM_MYSQL_USER", "root"),
-				Password: env("CRM_MYSQL_PASS", "TestPass2024"),
-				Schema:   env("CRM_MYSQL_TARGET_SCHEMA", "crm_accept_postgres_to_mysql"),
-			},
-			SourceType: "postgres",
-			TargetType: "mysql",
-		},
-		{
-			Name: "mysql-to-mssql",
-			Source: config.SourceConfig{
-				Type:     "mysql",
-				Host:     env("CRM_MYSQL_HOST", "localhost"),
-				Port:     envInt(t, "CRM_MYSQL_PORT", 3306),
-				Database: env("CRM_MYSQL_DB", "crm_mysql"),
-				User:     env("CRM_MYSQL_USER", "root"),
-				Password: env("CRM_MYSQL_PASS", "TestPass2024"),
-				Schema:   env("CRM_MYSQL_SCHEMA", "crm_mysql"),
-			},
-			Target: config.TargetConfig{
-				Type:            "mssql",
-				Host:            env("CRM_MSSQL_HOST", "localhost"),
-				Port:            envInt(t, "CRM_MSSQL_PORT", 1433),
-				Database:        env("CRM_MSSQL_TARGET_DB", "tempdb"),
-				User:            env("CRM_MSSQL_USER", "sa"),
-				Password:        env("CRM_MSSQL_PASS", "TestPass2024"),
-				Schema:          env("CRM_MSSQL_TARGET_SCHEMA", "crm_accept_mysql_to_mssql"),
-				TrustServerCert: true,
-			},
-			SourceType: "mysql",
-			TargetType: "mssql",
-		},
+
+	dialects := []string{"mssql", "postgres", "mysql"}
+	cases := make([]crmAcceptanceCase, 0, len(dialects)*len(dialects))
+	for _, sourceType := range dialects {
+		for _, targetType := range dialects {
+			name := sourceType + "-to-" + targetType
+			cases = append(cases, crmAcceptanceCase{
+				Name:       name,
+				Source:     crmSourceConfig(t, sourceType),
+				Target:     crmTargetConfig(t, targetType, name),
+				SourceType: sourceType,
+				TargetType: targetType,
+			})
+		}
 	}
+	return cases
+}
+
+func crmSourceConfig(t *testing.T, dialect string) config.SourceConfig {
+	t.Helper()
+	switch dialect {
+	case "mssql":
+		return config.SourceConfig{
+			Type:            "mssql",
+			Host:            env("CRM_MSSQL_HOST", "localhost"),
+			Port:            envInt(t, "CRM_MSSQL_PORT", 1433),
+			Database:        env("CRM_MSSQL_DB", "CRM_MSSQL"),
+			User:            env("CRM_MSSQL_USER", "sa"),
+			Password:        env("CRM_MSSQL_PASS", "TestPass2024"),
+			Schema:          env("CRM_MSSQL_SCHEMA", "dbo"),
+			TrustServerCert: true,
+		}
+	case "postgres":
+		return config.SourceConfig{
+			Type:     "postgres",
+			Host:     env("CRM_PG_HOST", "localhost"),
+			Port:     envInt(t, "CRM_PG_PORT", 5432),
+			Database: env("CRM_PG_DB", "crm_pg"),
+			User:     env("CRM_PG_USER", "postgres"),
+			Password: env("CRM_PG_PASS", "TestPass2024"),
+			Schema:   env("CRM_PG_SCHEMA", "public"),
+			SSLMode:  "disable",
+		}
+	case "mysql":
+		return config.SourceConfig{
+			Type:     "mysql",
+			Host:     env("CRM_MYSQL_HOST", "localhost"),
+			Port:     envInt(t, "CRM_MYSQL_PORT", 3306),
+			Database: env("CRM_MYSQL_DB", "crm_mysql"),
+			User:     env("CRM_MYSQL_USER", "root"),
+			Password: env("CRM_MYSQL_PASS", "TestPass2024"),
+			Schema:   env("CRM_MYSQL_SCHEMA", "crm_mysql"),
+		}
+	default:
+		t.Fatalf("unsupported CRM source dialect %q", dialect)
+		return config.SourceConfig{}
+	}
+}
+
+func crmTargetConfig(t *testing.T, dialect, caseName string) config.TargetConfig {
+	t.Helper()
+	schema := crmTargetSchema(caseName)
+	switch dialect {
+	case "mssql":
+		return config.TargetConfig{
+			Type:            "mssql",
+			Host:            env("CRM_MSSQL_HOST", "localhost"),
+			Port:            envInt(t, "CRM_MSSQL_PORT", 1433),
+			Database:        env("CRM_MSSQL_TARGET_DB", "tempdb"),
+			User:            env("CRM_MSSQL_USER", "sa"),
+			Password:        env("CRM_MSSQL_PASS", "TestPass2024"),
+			Schema:          schema,
+			TrustServerCert: true,
+		}
+	case "postgres":
+		return config.TargetConfig{
+			Type:     "postgres",
+			Host:     env("CRM_PG_HOST", "localhost"),
+			Port:     envInt(t, "CRM_PG_PORT", 5432),
+			Database: env("CRM_PG_TARGET_DB", "postgres"),
+			User:     env("CRM_PG_USER", "postgres"),
+			Password: env("CRM_PG_PASS", "TestPass2024"),
+			Schema:   schema,
+			SSLMode:  "disable",
+		}
+	case "mysql":
+		return config.TargetConfig{
+			Type:     "mysql",
+			Host:     env("CRM_MYSQL_HOST", "localhost"),
+			Port:     envInt(t, "CRM_MYSQL_PORT", 3306),
+			Database: env("CRM_MYSQL_ADMIN_DB", "mysql"),
+			User:     env("CRM_MYSQL_USER", "root"),
+			Password: env("CRM_MYSQL_PASS", "TestPass2024"),
+			Schema:   schema,
+		}
+	default:
+		t.Fatalf("unsupported CRM target dialect %q", dialect)
+		return config.TargetConfig{}
+	}
+}
+
+func crmTargetSchema(caseName string) string {
+	envName := "CRM_" + strings.ToUpper(strings.ReplaceAll(caseName, "-", "_")) + "_TARGET_SCHEMA"
+	return env(envName, "crm_accept_"+strings.ReplaceAll(caseName, "-", "_"))
 }
 
 func cleanCRMTarget(t *testing.T, ctx context.Context, cfg *config.Config) {

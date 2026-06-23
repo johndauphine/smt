@@ -45,14 +45,19 @@ Artifact:
 
 ## CRM Matrix Gate
 
-This gate exercises each supported engine at least once as a source and once as
-a target:
+This gate exercises every supported source-to-target permutation:
 
 | Case | Source | Target |
 |------|--------|--------|
+| `mssql-to-mssql` | SQL Server | SQL Server |
 | `mssql-to-postgres` | SQL Server | PostgreSQL |
+| `mssql-to-mysql` | SQL Server | MySQL |
+| `postgres-to-mssql` | PostgreSQL | SQL Server |
+| `postgres-to-postgres` | PostgreSQL | PostgreSQL |
 | `postgres-to-mysql` | PostgreSQL | MySQL |
 | `mysql-to-mssql` | MySQL | SQL Server |
+| `mysql-to-postgres` | MySQL | PostgreSQL |
+| `mysql-to-mysql` | MySQL | MySQL |
 
 Start local disposable services:
 
@@ -61,11 +66,15 @@ make test-dbs-up
 make mysql-test-up
 ```
 
-Load the CRM fixtures from `testdata/crm/README.md`, then run:
+Load the CRM fixtures, then run:
 
 ```bash
+make test-dbs-wait
+make test-crm-fixtures-load
 make test-crm-acceptance
 ```
+
+`make test-crm-ci` runs the same sequence from a clean Docker environment.
 
 The Go acceptance harness verifies table presence plus columns, max length,
 precision/scale, nullability, identity, timezone class, default-expression
@@ -75,7 +84,7 @@ review. Computed-column expression and storage-class equivalence is not a v1
 release claim; the legacy shell helper remains a smoke tool for the SQL Server
 to PostgreSQL path.
 
-Manual CLI configs for the same three paths live in `testdata/crm/configs/`.
+Manual CLI configs for representative paths live in `testdata/crm/configs/`.
 
 Artifact:
 

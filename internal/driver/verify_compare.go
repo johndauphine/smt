@@ -479,7 +479,7 @@ func cmpDefaultClass(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelt
 	}
 	srcClass := defaultExpressionClassForColumn(src.DefaultExpression, src, srcDialect)
 	tgtClass := defaultExpressionClassForColumn(tgt.DefaultExpression, tgt, tgtDialect)
-	if srcClass == tgtClass {
+	if srcClass == tgtClass || structuredEmptyDefaultEquivalent(srcClass, tgtClass, src, tgt, srcDialect, tgtDialect) {
 		return nil
 	}
 	return &ColumnDelta{
@@ -506,6 +506,38 @@ func defaultExpressionClassForColumn(expr string, col Column, dialect string) st
 		return "empty_array"
 	}
 	return defaultExpressionClass(expr)
+}
+
+func structuredEmptyDefaultEquivalent(srcClass, tgtClass string, src, tgt Column, srcDialect, tgtDialect string) bool {
+	if !isMSSQLDialect(tgtDialect) || !isTextStorageType(tgt.DataType) {
+		return false
+	}
+	switch srcClass {
+	case "empty_json_object":
+		return dataTypeClass(srcDialect, src) == "json" && tgtClass == "constant'{}'"
+	case "empty_array":
+		return isArrayType(src.DataType) && (tgtClass == "constant'{}'" || tgtClass == "constant'[]'")
+	default:
+		return false
+	}
+}
+
+func isMSSQLDialect(dialect string) bool {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "mssql", "sqlserver", "sql_server":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTextStorageType(dt string) bool {
+	switch strings.ToLower(strings.TrimSpace(dt)) {
+	case "char", "nchar", "varchar", "nvarchar", "text", "ntext", "xml":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizedDefaultLiteral(expr string) string {
