@@ -5,9 +5,16 @@ package main
 // snapshot: extract the current source schema and store it in the SMT state DB
 //   as a source-schema baseline/history artifact.
 //
-// sync: extract the current source schema, introspect the live target schema,
-//   render the structural diff as ALTER statements, and either write the SQL
-//   to a file (default) or apply it against the target (--apply).
+// sync: extract the current source schema, diff it against a baseline, render
+//   the structural diff as ALTER statements, and either write the SQL to a
+//   file (default) or apply it against the target (--apply). The baseline is
+//   selected with --against:
+//     --against target   (default) introspect the live target schema and diff
+//                        desired-vs-existing (needs a target connection).
+//     --against snapshot diff against the latest stored source snapshot —
+//                        "what changed in my source since the last baseline?"
+//                        Fully offline for planning; a target connection is
+//                        only opened for --apply.
 
 import (
 	"context"
@@ -158,8 +165,9 @@ func runSnapshot(c *cli.Context) error {
 func syncCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "sync",
-		Usage: "Diff source schema against the live target and (optionally) apply ALTERs",
+		Usage: "Diff source schema against the live target (or the latest snapshot) and (optionally) apply ALTERs",
 		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "against", Value: "target", Usage: "Baseline to diff against: 'target' (introspect the live target) or 'snapshot' (latest stored snapshot; offline planning)"},
 			&cli.BoolFlag{Name: "apply", Usage: "Execute ALTERs against the target (default: emit SQL for review)"},
 			&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Value: "migration.sql", Usage: "Output file when not applying"},
 			&cli.BoolFlag{Name: "allow-data-loss", Usage: "Permit data-loss-risk statements (column drops, table drops) when applying"},
@@ -170,6 +178,17 @@ func syncCommand() *cli.Command {
 }
 
 func runSync(c *cli.Context) error {
+	switch strings.ToLower(strings.TrimSpace(c.String("against"))) {
+	case "", "target":
+		return runSyncAgainstTarget(c)
+	case "snapshot":
+		return runSyncAgainstSnapshot(c)
+	default:
+		return fmt.Errorf("invalid --against value %q (expected 'target' or 'snapshot')", c.String("against"))
+	}
+}
+
+func runSyncAgainstTarget(c *cli.Context) error {
 	cfg, profileName, configPath, err := loadConfig(c)
 	if err != nil {
 		return err
@@ -270,6 +289,130 @@ func runSync(c *cli.Context) error {
 		fmt.Println("Renderer returned no statements; nothing to apply.")
 		return nil
 	}
+	return finishSyncPlan(c, ctx, orch, plan, state, currSnap)
+}
+
+// runSyncAgainstSnapshot diffs the current source schema against the latest
+// stored snapshot (offline — no target introspection) and renders the delta
+// as deterministic target-dialect ALTERs. The target connection is opened
+// only when --apply is set.
+func runSyncAgainstSnapshot(c *cli.Context) error {
+	if c.String("state-file") != "" {
+		return fmt.Errorf("sync --against snapshot requires the SQLite state backend; it is not available with --state-file")
+	}
+	cfg, profileName, configPath, err := loadConfig(c)
+	if err != nil {
+		return err
+	}
+
+	apply := c.Bool("apply")
+	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
+		StateFile:  c.String("state-file"),
+		SourceOnly: !apply,
+	})
+	if err != nil {
+		return err
+	}
+	defer orch.Close()
+	orch.SetRunContext(profileName, configPath)
+
+	state, ok := orch.State().(*checkpoint.State)
+	if !ok {
+		return fmt.Errorf("sync --against snapshot requires the SQLite state backend; it is not available with --state-file")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	prevSnap, err := loadPreviousSnapshot(state, cfg.Source.Type, cfg.Source.Schema)
+	if err != nil {
+		return err
+	}
+
+	logging.Info("extracting current source schema")
+	currTables, err := orch.Source().ExtractSchema(ctx, cfg.Source.Schema)
+	if err != nil {
+		return fmt.Errorf("extracting current schema: %w", err)
+	}
+	if err := loadAllConstraints(ctx, orch.Source(), currTables); err != nil {
+		return err
+	}
+	currSnap := schemadiff.Snapshot{
+		Version:    schemadiff.CurrentSnapshotVersion,
+		Schema:     cfg.Source.Schema,
+		SourceType: cfg.Source.Type,
+		CapturedAt: time.Now().UTC(),
+		Tables:     currTables,
+	}
+
+	diff, plan, err := buildSnapshotSyncPlan(prevSnap, currSnap, cfg)
+	if err != nil {
+		// Surface what changed even when rendering fails, so the operator
+		// knows which delta the renderer could not express.
+		if !diff.IsEmpty() {
+			fmt.Printf("Diff since snapshot (%s): %s\n", prevSnap.CapturedAt.Format(time.RFC3339), diff.Summary())
+		}
+		return err
+	}
+	if diff.IsEmpty() {
+		fmt.Printf("No schema changes since the last snapshot (captured %s).\n",
+			prevSnap.CapturedAt.Format(time.RFC3339))
+		return nil
+	}
+	fmt.Printf("Diff since snapshot (%s): %s\n", prevSnap.CapturedAt.Format(time.RFC3339), diff.Summary())
+	if plan.IsEmpty() {
+		fmt.Println("Renderer returned no statements; nothing to apply.")
+		return nil
+	}
+	return finishSyncPlan(c, ctx, orch, plan, state, currSnap)
+}
+
+// buildSnapshotSyncPlan computes the offline snapshot-to-snapshot diff and
+// renders it as a deterministic target-dialect ALTER plan. The migration
+// include/exclude scope applies to both snapshots and unmanaged object kinds
+// (create_indexes / create_foreign_keys / create_check_constraints) are
+// dropped, matching the live-target mode's gating; the diff runs on
+// source-side names, then identifiers and schema references are rewritten
+// to the target convention before rendering (same order Normalize's and
+// WithTargetSchema's contracts require). Pure — no database or state I/O,
+// no mutation of either snapshot — which is what keeps snapshot-mode
+// planning offline and the caller's snapshot safe to persist as the next
+// baseline.
+func buildSnapshotSyncPlan(prev, curr schemadiff.Snapshot, cfg *config.Config) (schemadiff.Diff, schemadiff.Plan, error) {
+	include, exclude := cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables
+	prev.Tables = filterDesiredScope(prev.Tables, include, exclude)
+	curr.Tables = filterDesiredScope(curr.Tables, include, exclude)
+
+	diff := schemadiff.Compute(prev, curr).FilterManagedKinds(
+		cfg.Migration.CreateIndexes,
+		cfg.Migration.CreateForeignKeys,
+		cfg.Migration.CreateCheckConstraints,
+	)
+	if diff.IsEmpty() {
+		return diff, schemadiff.Plan{}, nil
+	}
+
+	sourceDialect := driver.Canonicalize(cfg.Source.Type)
+	targetDialect := driver.Canonicalize(cfg.Target.Type)
+	norm := func(name string) string { return driver.NormalizeIdentifier(targetDialect, name) }
+	rendered := diff.Normalize(norm).WithTargetSchema(cfg.Target.Schema)
+
+	plan, err := schemadiff.RenderDeterministicWithOptions(rendered, schemadiff.RenderOptions{
+		TargetSchema:      cfg.Target.Schema,
+		TargetDialect:     targetDialect,
+		SourceDialect:     sourceDialect,
+		UnknownTypePolicy: cfg.SchemaGeneration.UnknownTypePolicy,
+	})
+	if err != nil {
+		return diff, schemadiff.Plan{}, err
+	}
+	return diff, plan, nil
+}
+
+// finishSyncPlan is the shared tail of both sync modes: write the plan to
+// --out for review, or gate (unsupported changes, data-loss risk) and apply
+// it against the target, optionally saving the new baseline snapshot.
+func finishSyncPlan(c *cli.Context, ctx context.Context, orch *orchestrator.Orchestrator, plan schemadiff.Plan, state *checkpoint.State, currSnap schemadiff.Snapshot) error {
 	printPlanSummary(plan)
 
 	if !c.Bool("apply") {
@@ -287,13 +430,8 @@ func runSync(c *cli.Context) error {
 		return fmt.Errorf("refusing to apply plan with unsupported change(s)")
 	}
 
-	if !c.Bool("allow-data-loss") {
-		filtered := plan.FilterByRisk(schemadiff.RiskRebuildNeeded)
-		if len(filtered.Statements) < len(plan.Statements) {
-			fmt.Printf("Refusing to apply %d data-loss-risk statement(s) without --allow-data-loss.\n",
-				len(plan.Statements)-len(filtered.Statements))
-			return fmt.Errorf("aborted")
-		}
+	if err := gatePlanForApply(plan, c.Bool("allow-data-loss")); err != nil {
+		return err
 	}
 
 	if err := applyPlan(ctx, orch.Target(), plan); err != nil {
@@ -312,9 +450,24 @@ func runSync(c *cli.Context) error {
 	return nil
 }
 
+// gatePlanForApply refuses to apply a plan containing data-loss-risk
+// statements unless the operator passed --allow-data-loss.
+func gatePlanForApply(plan schemadiff.Plan, allowDataLoss bool) error {
+	if allowDataLoss {
+		return nil
+	}
+	filtered := plan.FilterByRisk(schemadiff.RiskRebuildNeeded)
+	if len(filtered.Statements) < len(plan.Statements) {
+		fmt.Printf("Refusing to apply %d data-loss-risk statement(s) without --allow-data-loss.\n",
+			len(plan.Statements)-len(filtered.Statements))
+		return fmt.Errorf("aborted")
+	}
+	return nil
+}
+
 // loadPreviousSnapshot returns the most recent stored snapshot for this
-// (sourceType, schema). Kept for snapshot-history callers and tests; live
-// target sync planning does not require a previous snapshot.
+// (sourceType, schema). It is the baseline loader for `sync --against
+// snapshot`; live target sync planning does not require a previous snapshot.
 func loadPreviousSnapshot(state *checkpoint.State, sourceType, schema string) (schemadiff.Snapshot, error) {
 	snapRow, err := state.GetLatestSnapshot(sourceType, schema)
 	if err != nil {

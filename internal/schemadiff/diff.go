@@ -156,40 +156,99 @@ func (d Diff) WithTargetSchema(targetSchema string) Diff {
 		Unsupported:    append([]UnsupportedChange(nil), d.Unsupported...),
 	}
 	for _, t := range d.AddedTables {
-		retargetTable(&t, targetSchema)
-		out.AddedTables = append(out.AddedTables, t)
+		out.AddedTables = append(out.AddedTables, retargetTable(t, targetSchema))
 	}
 	for _, t := range d.RemovedTables {
-		retargetTable(&t, targetSchema)
-		out.RemovedTables = append(out.RemovedTables, t)
+		out.RemovedTables = append(out.RemovedTables, retargetTable(t, targetSchema))
 	}
 	for _, td := range d.ChangedTables {
 		td.Schema = targetSchema
-		retargetTable(&td.Curr, targetSchema)
-		retargetForeignKeys(td.AddedForeignKeys, targetSchema)
-		retargetForeignKeys(td.RemovedForeignKeys, targetSchema)
+		td.Curr = retargetTable(td.Curr, targetSchema)
+		td.AddedForeignKeys = retargetForeignKeys(td.AddedForeignKeys, targetSchema)
+		td.RemovedForeignKeys = retargetForeignKeys(td.RemovedForeignKeys, targetSchema)
 		out.ChangedTables = append(out.ChangedTables, td)
 	}
 	return out
 }
 
-// retargetTable rewrites the table's own Schema and the RefSchema on
-// every inline foreign key. Operates in place on the supplied pointer.
-func retargetTable(t *driver.Table, targetSchema string) {
-	t.Schema = targetSchema
-	retargetForeignKeys(t.ForeignKeys, targetSchema)
+// FilterManagedKinds drops index / foreign-key / check deltas — and the
+// corresponding side objects on added tables — for object kinds the
+// migration does not manage, mirroring the create_* gating that `create` and
+// the live-target sync apply. Returns copies; inputs are not mutated.
+func (d Diff) FilterManagedKinds(indexes, fks, checks bool) Diff {
+	if indexes && fks && checks {
+		return d
+	}
+	out := Diff{
+		PrevCapturedAt: d.PrevCapturedAt,
+		CurrCapturedAt: d.CurrCapturedAt,
+		Unsupported:    append([]UnsupportedChange(nil), d.Unsupported...),
+	}
+	strip := func(t driver.Table) driver.Table {
+		if !indexes {
+			t.Indexes = nil
+		}
+		if !fks {
+			t.ForeignKeys = nil
+		}
+		if !checks {
+			t.CheckConstraints = nil
+		}
+		return t
+	}
+	for _, t := range d.AddedTables {
+		out.AddedTables = append(out.AddedTables, strip(t))
+	}
+	for _, t := range d.RemovedTables {
+		out.RemovedTables = append(out.RemovedTables, strip(t))
+	}
+	for _, td := range d.ChangedTables {
+		td.Curr = strip(td.Curr)
+		if !indexes {
+			td.AddedIndexes, td.RemovedIndexes = nil, nil
+		}
+		if !fks {
+			td.AddedForeignKeys, td.RemovedForeignKeys = nil, nil
+		}
+		if !checks {
+			td.AddedChecks, td.RemovedChecks = nil, nil
+		}
+		if !td.IsEmpty() {
+			out.ChangedTables = append(out.ChangedTables, td)
+		}
+	}
+	return out
 }
 
-// retargetForeignKeys rewrites RefSchema on every entry in the supplied
-// slice. Slice elements are mutated directly (FKs are values, not
-// pointers, so a `for _, fk := range` loop would not stick).
-func retargetForeignKeys(fks []driver.ForeignKey, targetSchema string) {
-	for i := range fks {
-		fks[i].RefSchema = targetSchema
+// retargetTable returns a deep copy of the table with its own Schema and the
+// RefSchema of every inline foreign key rewritten. A copy, not in-place: the
+// table's slices share backing arrays with the snapshot the diff came from,
+// which callers persist as the next baseline.
+func retargetTable(t driver.Table, targetSchema string) driver.Table {
+	t = deepCopyTable(t)
+	t.Schema = targetSchema
+	for i := range t.ForeignKeys {
+		t.ForeignKeys[i].RefSchema = targetSchema
 	}
+	return t
+}
+
+// retargetForeignKeys returns a copy of the slice with RefSchema rewritten on
+// every entry (copy for the same aliasing reason as retargetTable).
+func retargetForeignKeys(fks []driver.ForeignKey, targetSchema string) []driver.ForeignKey {
+	out := append([]driver.ForeignKey(nil), fks...)
+	for i := range out {
+		out[i].RefSchema = targetSchema
+	}
+	return out
 }
 
 func normalizeTable(t driver.Table, norm func(string) string) driver.Table {
+	// The in-place rewrites below would otherwise reach through the slice
+	// backing arrays into the caller's tables — Compute's diff shares them
+	// with the snapshot it was built from, and callers persist that snapshot
+	// as the next baseline (sync --save-snapshot).
+	t = deepCopyTable(t)
 	t.Name = norm(t.Name)
 	for i := range t.Columns {
 		t.Columns[i].Name = norm(t.Columns[i].Name)
@@ -244,6 +303,7 @@ func normalizeTableDiff(td TableDiff, norm func(string) string) TableDiff {
 	}
 	for _, idx := range td.AddedIndexes {
 		idx.Name = norm(idx.Name)
+		idx.Columns = append([]string(nil), idx.Columns...)
 		for j := range idx.Columns {
 			idx.Columns[j] = norm(idx.Columns[j])
 		}
@@ -256,9 +316,11 @@ func normalizeTableDiff(td TableDiff, norm func(string) string) TableDiff {
 	for _, fk := range td.AddedForeignKeys {
 		fk.Name = norm(fk.Name)
 		fk.RefTable = norm(fk.RefTable)
+		fk.Columns = append([]string(nil), fk.Columns...)
 		for j := range fk.Columns {
 			fk.Columns[j] = norm(fk.Columns[j])
 		}
+		fk.RefColumns = append([]string(nil), fk.RefColumns...)
 		for j := range fk.RefColumns {
 			fk.RefColumns[j] = norm(fk.RefColumns[j])
 		}

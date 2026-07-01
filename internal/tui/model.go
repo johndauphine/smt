@@ -96,7 +96,7 @@ type commandInfo struct {
 var availableCommands = []commandInfo{
 	{"/init", "Create a config.yaml with a guided wizard"},
 	{"/create", "Generate target DDL from the source"},
-	{"/sync", "Diff source vs snapshot and emit/apply ALTERs"},
+	{"/sync", "Diff source vs target (or snapshot) and emit/apply ALTERs"},
 	{"/snapshot", "Capture current source schema for future diffing"},
 	{"/config", "Show configuration details"},
 	{"/history", "Show migration history"},
@@ -698,7 +698,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /create --apply         Execute generated DDL against the target
   /create --profile NAME  Generate using a saved profile
   /snapshot [@config]     Capture current source schema for future diffing
-  /sync [@config]         Diff source vs snapshot, emit/apply ALTERs
+  /sync [@config]         Diff source vs target (or --against snapshot), emit/apply ALTERs
   /config [config_file]   Show configuration details
   /history                Show schema-run history
   /profile save NAME      Save an encrypted profile

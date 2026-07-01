@@ -29,7 +29,8 @@ make build
 ./smt create --apply                # execute DDL against the configured target
 ./smt snapshot                      # capture source schema as a baseline
 # ...time passes, source schema evolves...
-./smt sync                          # diff vs snapshot, render ALTERs to migration.sql
+./smt sync                          # diff source vs live target, render ALTERs to migration.sql
+./smt sync --against snapshot       # diff source vs last snapshot instead (offline planning)
 ./smt sync --apply                  # execute the ALTERs against the target
 ```
 
@@ -44,7 +45,8 @@ Run `./smt` with no arguments to launch the TUI. See `./smt --help` for command 
 | `smt create --apply` | also execute the generated DDL against the configured target |
 | `smt snapshot` | save the current source schema as a baseline for future diffing |
 | `smt snapshot list` | list stored snapshots (id, source, schema, table count, captured-at); `--limit N` |
-| `smt sync` | diff source against last snapshot; generate target-dialect SQL; emit to `migration.sql` for review |
+| `smt sync` | diff source against the live target schema; generate target-dialect SQL; emit to `migration.sql` for review |
+| `smt sync --against snapshot` | diff source against the latest stored snapshot instead — planning is fully offline (no target connection) |
 | `smt sync --apply` | also execute the generated SQL against the target |
 | `smt sync --apply --allow-data-loss` | permit column/table drops |
 | `smt sync --apply --save-snapshot` | save the new schema as the next baseline after success |
@@ -115,10 +117,17 @@ SMT's core schema path is deterministic: introspect schemas, map types, compute 
 
 ## How `sync` works
 
+`smt sync` extracts the current source schema and diffs it against a baseline selected with `--against`:
+
+- `--against target` (default): introspect the live target schema and diff desired-vs-existing — "how does my target differ from what the source says it should be?" Requires a target connection.
+- `--against snapshot`: load the latest stored snapshot (captured with `smt snapshot`) and diff current-vs-baseline — "what changed in my source since the last baseline?" Planning is fully offline; a target connection is only opened for `--apply`.
+
+Either way:
+
 1. `smt snapshot` extracts the current source schema (tables + columns + indexes + FKs + check constraints) and stores the JSON in the SQLite state DB at `~/.smt/state.db`.
-2. `smt sync` extracts the current source schema again, loads the latest snapshot, and computes a structural diff (added / removed / changed tables and per-table column/index/FK/check deltas).
+2. `smt sync` computes a structural diff (added / removed / changed tables and per-table column/index/FK/check deltas) against the chosen baseline.
 3. SMT renders a target-dialect plan locally using deterministic rules.
-4. By default the SQL is written to `migration.sql` for review and no target connection is opened. With `--apply` the statements are executed against the target in order. `data-loss-risk` statements (column drops, table drops) are refused unless `--allow-data-loss` is also passed.
+4. By default the SQL is written to `migration.sql` for review. With `--apply` the statements are executed against the target in order. `data-loss-risk` statements (column drops, table drops) are refused unless `--allow-data-loss` is also passed.
 
 The stable v1 sync support and refusal behavior is documented in [docs/sync-contract.md](docs/sync-contract.md).
 Apply failure and rerun behavior for `create --apply` and `sync --apply` is

@@ -4,6 +4,18 @@
 and the live target schema. The default mode writes `migration.sql` for review.
 `smt sync --apply` executes the plan statement by statement.
 
+This contract describes the default `--against target` mode (live-target
+introspection). `smt sync --against snapshot` diffs the source against the
+latest stored snapshot instead — same renderer, risk labels, and apply
+gating — with these deltas from the target-mode contract:
+
+- the baseline is the stored snapshot, so drift introduced directly on the
+  target is invisible to it (use `--against target` or `smt drift` for that);
+- primary-key and identity changes between snapshots are not detected (the
+  snapshot diff compares columns, indexes, FKs, and checks by name);
+- a computed-column change between snapshots fails the render with an error
+  instead of an `-- [unsupported]` plan entry.
+
 ## Supported Changes
 
 SMT v1 can render these sync changes:

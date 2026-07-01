@@ -97,6 +97,7 @@ change in any 1.x release.
 
 | flag | status | description |
 |---|---|---|
+| `--against` | stable | Baseline to diff against: `target` (default; introspect the live target) or `snapshot` (latest stored snapshot; offline planning, target connection only for `--apply`). |
 | `--apply` | stable | Execute ALTERs against the target. |
 | `--out`, `-o` | stable | Output file when not applying; default `migration.sql`. |
 | `--allow-data-loss` | stable | Permit data-loss-risk statements while applying. |
