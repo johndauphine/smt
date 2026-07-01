@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"smt/internal/checkpoint"
+	"smt/internal/config"
 	"smt/internal/driver"
 	"smt/internal/schemadiff"
 )
@@ -230,6 +231,140 @@ func TestLoadPreviousSnapshot_RoundTrip(t *testing.T) {
 	}
 	if len(got.Tables) != 1 || got.Tables[0].Name != "Users" {
 		t.Errorf("table list not preserved: got %+v", got.Tables)
+	}
+}
+
+// snapshotSyncCfg builds the minimal config buildSnapshotSyncPlan needs:
+// mssql source, postgres target, no scope filters unless set by the test.
+func snapshotSyncCfg() *config.Config {
+	cfg := &config.Config{}
+	cfg.Source.Type = "mssql"
+	cfg.Source.Schema = "dbo"
+	cfg.Target.Type = "postgres"
+	cfg.Target.Schema = "public"
+	cfg.SchemaGeneration.UnknownTypePolicy = "fail"
+	return cfg
+}
+
+func snapshotWith(tables ...driver.Table) schemadiff.Snapshot {
+	return schemadiff.Snapshot{
+		Version:    schemadiff.CurrentSnapshotVersion,
+		Schema:     "dbo",
+		SourceType: "mssql",
+		CapturedAt: time.Now().UTC(),
+		Tables:     tables,
+	}
+}
+
+func TestBuildSnapshotSyncPlan_AddedColumn(t *testing.T) {
+	prev := snapshotWith(driver.Table{
+		Schema:  "dbo",
+		Name:    "Users",
+		Columns: []driver.Column{{Name: "ID", DataType: "int", IsNullable: false}},
+	})
+	curr := snapshotWith(driver.Table{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []driver.Column{
+			{Name: "ID", DataType: "int", IsNullable: false},
+			{Name: "Age", DataType: "int", IsNullable: true},
+		},
+	})
+
+	diff, plan, err := buildSnapshotSyncPlan(prev, curr, snapshotSyncCfg())
+	if err != nil {
+		t.Fatalf("expected no err, got %v", err)
+	}
+	if diff.IsEmpty() {
+		t.Fatal("expected a non-empty diff for an added column")
+	}
+	if len(plan.Statements) != 1 {
+		t.Fatalf("expected 1 statement, got %d: %+v", len(plan.Statements), plan.Statements)
+	}
+	sql := plan.Statements[0].SQL
+	// Identifiers must be normalized to the postgres convention and the
+	// schema retargeted, so the ALTER hits the table that exists there.
+	if !strings.Contains(sql, "users") || !strings.Contains(sql, "age") {
+		t.Errorf("statement should reference normalized identifiers, got: %s", sql)
+	}
+	if !strings.Contains(sql, "public") {
+		t.Errorf("statement should be qualified with the target schema, got: %s", sql)
+	}
+	if strings.Contains(sql, "dbo") {
+		t.Errorf("statement must not reference the source schema, got: %s", sql)
+	}
+	if plan.Statements[0].Risk != schemadiff.RiskSafe {
+		t.Errorf("adding a nullable column should be RiskSafe, got %s", plan.Statements[0].Risk)
+	}
+}
+
+func TestBuildSnapshotSyncPlan_NoChanges(t *testing.T) {
+	table := driver.Table{
+		Schema:  "dbo",
+		Name:    "Users",
+		Columns: []driver.Column{{Name: "ID", DataType: "int", IsNullable: false}},
+	}
+	diff, plan, err := buildSnapshotSyncPlan(snapshotWith(table), snapshotWith(table), snapshotSyncCfg())
+	if err != nil {
+		t.Fatalf("expected no err, got %v", err)
+	}
+	if !diff.IsEmpty() {
+		t.Errorf("identical snapshots should diff empty, got: %s", diff.Summary())
+	}
+	if !plan.IsEmpty() {
+		t.Errorf("identical snapshots should render no statements, got %d", len(plan.Statements))
+	}
+}
+
+func TestBuildSnapshotSyncPlan_ExcludedTableIgnored(t *testing.T) {
+	prev := snapshotWith(driver.Table{
+		Schema:  "dbo",
+		Name:    "Audit",
+		Columns: []driver.Column{{Name: "ID", DataType: "int"}},
+	})
+	curr := snapshotWith(driver.Table{
+		Schema: "dbo",
+		Name:   "Audit",
+		Columns: []driver.Column{
+			{Name: "ID", DataType: "int"},
+			{Name: "Extra", DataType: "int", IsNullable: true},
+		},
+	})
+
+	cfg := snapshotSyncCfg()
+	cfg.Migration.ExcludeTables = []string{"Audit"}
+	diff, plan, err := buildSnapshotSyncPlan(prev, curr, cfg)
+	if err != nil {
+		t.Fatalf("expected no err, got %v", err)
+	}
+	if !diff.IsEmpty() {
+		t.Errorf("change in an excluded table should not appear in the diff, got: %s", diff.Summary())
+	}
+	if !plan.IsEmpty() {
+		t.Errorf("excluded table produced statements: %+v", plan.Statements)
+	}
+}
+
+func TestGatePlanForApply_RefusesDataLossWithoutFlag(t *testing.T) {
+	plan := schemadiff.Plan{Statements: []schemadiff.Statement{
+		{SQL: "ALTER TABLE public.users ADD COLUMN age integer", Risk: schemadiff.RiskSafe},
+		{SQL: "DROP TABLE public.audit", Risk: schemadiff.RiskDataLoss},
+	}}
+
+	if err := gatePlanForApply(plan, false); err == nil {
+		t.Fatal("expected data-loss plan to be refused without --allow-data-loss")
+	}
+	if err := gatePlanForApply(plan, true); err != nil {
+		t.Fatalf("expected data-loss plan to pass with --allow-data-loss, got %v", err)
+	}
+}
+
+func TestGatePlanForApply_SafePlanPasses(t *testing.T) {
+	plan := schemadiff.Plan{Statements: []schemadiff.Statement{
+		{SQL: "ALTER TABLE public.users ADD COLUMN age integer", Risk: schemadiff.RiskSafe},
+	}}
+	if err := gatePlanForApply(plan, false); err != nil {
+		t.Fatalf("safe plan should pass the gate, got %v", err)
 	}
 }
 
