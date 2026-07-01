@@ -21,20 +21,8 @@ import (
 	"strings"
 
 	"smt/internal/canonical"
+	exprir "smt/internal/expr"
 )
-
-// fspNowArgPattern matches a bare function name with a single numeric
-// (fractional-seconds) argument, e.g. "current_timestamp(6)" or "now(3)",
-// capturing the function name so the precision arg can be dropped for
-// default-class comparison.
-var fspNowArgPattern = regexp.MustCompile(`^([a-z_]+)\([0-9]+\)$`)
-
-// convertTemporalRE matches the MSSQL CONVERT(date|time, <expr>) coercion,
-// capturing the target temporal type and the inner expression. The date/time
-// type name may be bracketed or quoted (date / [date] / "date"). This lets a
-// CONVERT(date, GETDATE()) default classify by its result (a date) rather than
-// the inner now-function, mirroring a PG <expr>::date cast.
-var convertTemporalRE = regexp.MustCompile(`(?i)^convert\(\s*[\["]?\s*(date|time)\s*[\]"]?\s*,\s*(.+?)\s*\)$`)
 
 var renderedTypeArgsRE = regexp.MustCompile(`\([^)]*\)`)
 
@@ -772,197 +760,26 @@ func dataTypeClass(dialect string, c Column) string {
 // match exactly — safety floor for unknown defaults.
 // DefaultExpressionsEquivalent reports whether two default expressions resolve
 // to the same semantic class — the deterministic equivalence check the drift /
-// AI-review comparator uses (defaultExpressionClass). It is used to verify that
-// an AI-translated default preserves the source's default class. A "review"
-// (false) result does not mean the translation is wrong, only that SMT cannot
-// mechanically prove it equivalent (the comparator can't equate, say,
+// AI-review comparator uses. Since #175 it is structural: both sides parse
+// into the expression IR (internal/expr) and compare with expr.Equal, which
+// preserves the historical class semantics (GETUTCDATE() ≡ CURRENT_TIMESTAMP,
+// NEWID() ≡ gen_random_uuid(), ((0)) ≡ false, CONVERT(date, GETDATE()) ≡
+// CURRENT_DATE ≢ CURRENT_TIMESTAMP, casts/N-prefix/fsp-args stripped). A
+// false result does not mean the translation is wrong, only that SMT cannot
+// mechanically prove it equivalent (it can't equate, say,
 // DATEADD(year,1,GETDATE()) with NOW() + INTERVAL '1 year').
 func DefaultExpressionsEquivalent(source, target string) bool {
-	return defaultExpressionClass(source) == defaultExpressionClass(target)
+	return exprir.Equal(exprir.ParseDefault(source, ""), exprir.ParseDefault(target, ""))
 }
 
+// defaultExpressionClass labels a raw default with its equivalence class via
+// the expression IR: "", current_dt, current_date, current_t, uuid_gen,
+// null, true/false, constant<N>, constant'<s>', other:<normalized>. Kept as
+// the base layer under defaultExpressionClassForColumn, which adds the
+// column-type-aware classes (empty_json_object / empty_array / decimal
+// normalization) on top.
 func defaultExpressionClass(expr string) string {
-	expr = strings.TrimSpace(expr)
-	if expr == "" {
-		return ""
-	}
-
-	// Normalize: lowercase, repeatedly strip outer parens (MSSQL renders
-	// constants as ((0))), trim whitespace.
-	norm := strings.ToLower(expr)
-	for {
-		stripped := strings.TrimSpace(norm)
-		if len(stripped) >= 2 && stripped[0] == '(' && stripped[len(stripped)-1] == ')' {
-			norm = stripped[1 : len(stripped)-1]
-			continue
-		}
-		norm = stripped
-		break
-	}
-	norm = strings.TrimSpace(norm)
-	// Strip PG cast suffixes: 'foo'::text → 'foo', gen_random_uuid()::char(36)
-	// → gen_random_uuid(), '{}'::jsonb → '{}'. PG's introspection returns
-	// defaults with explicit casts; most casts don't change semantic class.
-	// The cast type can itself contain parens (`char(36)`) so consume the
-	// whole tail after the last `::`. A ::date / ::time cast IS class-relevant
-	// (it coerces a datetime to a date/time, e.g. (CURRENT_TIMESTAMP)::date is a
-	// today's-date default) — remember it and apply it after classifying the
-	// inner expression.
-	coerceDate, coerceTime := false, false
-	if i := strings.LastIndex(norm, "::"); i >= 0 {
-		switch strings.TrimSpace(norm[i+2:]) {
-		case "date":
-			coerceDate = true
-		case "time", "time without time zone", "timetz", "time with time zone":
-			coerceTime = true
-		}
-		norm = strings.TrimSpace(norm[:i])
-	}
-	// Removing a cast can expose parens the first pass left behind, e.g.
-	// (CURRENT_TIMESTAMP)::date → (current_timestamp). Strip them again.
-	for len(norm) >= 2 && norm[0] == '(' && norm[len(norm)-1] == ')' {
-		norm = strings.TrimSpace(norm[1 : len(norm)-1])
-	}
-	// Strip MSSQL N-prefix on string literals: N'foo' ≡ 'foo'
-	if strings.HasPrefix(norm, "n'") && strings.HasSuffix(norm, "'") {
-		norm = norm[1:]
-	}
-	// Strip a trailing "at time zone 'utc'" wrapper only. PG renders MSSQL
-	// GETUTCDATE() / SYSUTCDATETIME() as `CURRENT_TIMESTAMP AT TIME ZONE
-	// 'UTC'`, which is still a current-datetime (UTC) default — the TZ
-	// conversion is a class detail checked separately via cmpTZClass on
-	// data_type. A NON-UTC zone (e.g. 'America/Chicago') changes the inserted
-	// value, so it must stay part of the class and not collapse to a bare
-	// current_timestamp.
-	if i := strings.Index(norm, " at time zone "); i >= 0 {
-		zone := strings.TrimSpace(norm[i+len(" at time zone "):])
-		// PG may render the zone literal with a cast, e.g. 'utc'::text.
-		if j := strings.LastIndex(zone, "::"); j >= 0 {
-			zone = strings.TrimSpace(zone[:j])
-		}
-		if zone == "'utc'" {
-			norm = strings.TrimSpace(norm[:i])
-		}
-	}
-	// Strip a fractional-seconds precision argument from a now-function:
-	// CURRENT_TIMESTAMP(6) ≡ CURRENT_TIMESTAMP, NOW(3) ≡ NOW(). The precision
-	// is a column-level detail (DatetimePrecision), not a default class — MySQL
-	// reports `CURRENT_TIMESTAMP(6)` while a PG target renders bare
-	// `CURRENT_TIMESTAMP`. Only a bare function-name with a numeric arg is
-	// reduced, so literals and multi-arg calls are untouched.
-	if m := fspNowArgPattern.FindStringSubmatch(norm); m != nil {
-		norm = m[1]
-	}
-
-	// MSSQL CONVERT(date|time, <expr>) coerces <expr> to a date/time, exactly
-	// like a PG ::date / ::time cast. Reduce to the inner expression and flag
-	// the coercion so the class reflects the result type, not the inner
-	// now-function — so CONVERT(date, GETDATE()) ≡ CURRENT_DATE.
-	if m := convertTemporalRE.FindStringSubmatch(norm); m != nil {
-		switch strings.ToLower(m[1]) {
-		case "date":
-			coerceDate = true
-		case "time":
-			coerceTime = true
-		}
-		norm = strings.TrimSpace(m[2])
-		for len(norm) >= 2 && norm[0] == '(' && norm[len(norm)-1] == ')' {
-			norm = strings.TrimSpace(norm[1 : len(norm)-1])
-		}
-	}
-
-	// "Now-style" function families. Split into three classes by what the
-	// function actually returns: full date+time (current_dt), date-only
-	// (current_date), or time-only (current_t). The single class the
-	// pre-#55-review code had ("current_time") silently equated all three —
-	// so a source `DEFAULT CURRENT_DATE` would match a target `DEFAULT
-	// CURRENT_TIMESTAMP`, hiding a real fidelity loss. This split is
-	// explicit and keeps cross-dialect translations honest.
-	switch norm {
-	// Full date+time. Includes both TZ-naive and TZ-aware variants — the
-	// function's own TZ-awareness is dialect-defined and not load-bearing
-	// here; the column's TZ class is checked separately via cmpTZClass on
-	// data_type. What matters for default class is that "this column gets a
-	// fresh date+time on insert" matches across dialects.
-	case "current_timestamp", "now()", "now",
-		"getdate()", "getdate", "getutcdate()", "getutcdate",
-		"sysdatetime()", "sysdatetime",
-		"sysutcdatetime()", "sysutcdatetime",
-		"sysdatetimeoffset()", "sysdatetimeoffset",
-		"systimestamp",
-		"localtimestamp", "localtimestamp()":
-		if coerceDate {
-			return "current_date"
-		}
-		if coerceTime {
-			return "current_t"
-		}
-		return "current_dt"
-	case "current_date", "current_date()":
-		return "current_date"
-	case "current_time", "current_time()", "localtime", "localtime()":
-		return "current_t"
-	case "newid()", "newid",
-		"gen_random_uuid()", "gen_random_uuid",
-		"uuid()", "uuid",
-		"newsequentialid()", "newsequentialid":
-		return "uuid_gen"
-	case "null":
-		return "null"
-	case "true", "1":
-		return "true"
-	case "false", "0":
-		return "false"
-	}
-
-	// Numeric literal — normalize to the digits.
-	if isNumericLiteral(norm) {
-		return "constant" + norm
-	}
-
-	// String literal — strip enclosing quotes and treat content as the class.
-	if len(norm) >= 2 && norm[0] == '\'' && norm[len(norm)-1] == '\'' {
-		return "constant'" + norm[1:len(norm)-1] + "'"
-	}
-
-	// Bare-word identifier shape — MySQL's information_schema returns ENUM
-	// and string defaults UNQUOTED (e.g. DEFAULT 'draft' is reported as
-	// `draft`). Without normalization these would land in "other:" and never
-	// match a quoted-string default on a cross-dialect target. Treating any
-	// pure [a-z0-9_]+ bare word as a string constant covers ENUM values,
-	// SET enumerators, and lower-case keyword-shaped defaults — false-
-	// positives (a real bare-keyword identifier we should treat as a
-	// function reference) are negligible since the keyword family above
-	// already catches the meaningful ones (NULL, true/false).
-	if isBareWord(norm) {
-		return "constant'" + norm + "'"
-	}
-
-	// Anything else: keep the normalized form so two "other:" results compare
-	// by exact normalized text. False negatives are preferred over false
-	// positives — exec-fail will catch a missed real bug, a false positive
-	// cascades through retries.
-	return "other:" + norm
-}
-
-// isBareWord reports whether s is a non-empty string of lowercase ASCII
-// letters, digits, and underscores. Used to recognize MySQL-style unquoted
-// string defaults (ENUM values, SET enumerators) that introspection returns
-// without surrounding quotes.
-func isBareWord(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		switch {
-		case c >= 'a' && c <= 'z':
-		case c >= '0' && c <= '9':
-		case c == '_':
-		default:
-			return false
-		}
-	}
-	return true
+	return exprir.ClassLabel(exprir.ParseDefault(expr, ""))
 }
 
 // isDecimalType — precision/scale matter only for these types. Integer

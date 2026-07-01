@@ -11,6 +11,7 @@ import (
 	"smt/internal/canonical"
 	"smt/internal/driver"
 	pgddl "smt/internal/driver/postgres"
+	exprir "smt/internal/expr"
 	"smt/internal/logging"
 )
 
@@ -28,7 +29,12 @@ import (
 // "3": canonical spatial rendering and mapping warnings (#121/#122).
 // "4": TZ-aware timestamp sources (pg timestamptz, mssql datetimeoffset) now
 // render to MySQL TIMESTAMP (time-zone-aware) instead of naive DATETIME (#169).
-const RendererVersion = "4"
+// "5": DEFAULT/CHECK expressions render through the expression IR
+// (internal/expr, #175). All three targets share one source→IR→target
+// translation with a common fail-closed gate; output normalizes spacing and
+// spellings (e.g. UTC now-defaults become UTC_TIMESTAMP() on MySQL, pg's
+// = ANY (ARRAY[...]) checks become IN (...), lexical ::casts are stripped).
+const RendererVersion = "5"
 
 type Renderer struct {
 	target            string
@@ -217,95 +223,91 @@ func (r Renderer) ColumnType(col driver.Column) (string, error) {
 	}
 }
 
+// ColumnDefault renders a column DEFAULT through the expression IR (#175):
+// one parse, one per-target renderer, identical coverage to the postgres
+// path. Forms outside the IR grammar fall back to the legacy string-rewrite
+// pipeline, which for cross-dialect runs ends in the shared fail-closed
+// function gate — a foreign function that the renderer cannot translate is
+// an error, never a silent passthrough.
 func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 	if r.target == "postgres" {
 		return pgddl.RenderColumnDefaultDDLWithSource(col, r.unknownTypePolicy, r.source)
 	}
-	expr := unwrapDefaultParens(col.DefaultExpression)
-	if expr == "" {
+	raw := strings.TrimSpace(col.DefaultExpression)
+	if raw == "" {
 		return "", nil
 	}
-	expr = stripPostgresCasts(expr)
-	if isBooleanColumn(col) {
-		switch strings.ToLower(expr) {
-		case "true":
-			return boolLiteral(r.target, true), nil
-		case "false":
-			return boolLiteral(r.target, false), nil
-		case "1":
-			return boolLiteral(r.target, true), nil
-		case "0":
-			return boolLiteral(r.target, false), nil
-		}
-	}
-	if isTextualSourceType(col.DataType) && isBareSQLWord(expr) {
-		lit := "'" + escapeSQLString(expr) + "'"
-		if r.target == "mysql" {
-			lit = r.mysqlDefaultForm(lit, col)
-		}
-		return lit, nil
-	}
-	lower := strings.ToLower(expr)
-	switch r.target {
-	case "mssql":
-		// MSSQL-native functions pass through unchanged; foreign now-style
-		// functions translate to the equivalent with the same local-vs-UTC
-		// class (now()/current_timestamp are local time, never UTC).
-		if strings.HasPrefix(lower, "current_timestamp(") || strings.HasPrefix(lower, "now(") {
-			return "SYSDATETIME()", nil
-		}
-		if strings.HasPrefix(lower, "utc_timestamp") {
-			return "SYSUTCDATETIME()", nil
-		}
-		switch lower {
-		case "current_timestamp", "now()":
-			return "SYSDATETIME()", nil
-		case "getdate()":
-			return "GETDATE()", nil
-		case "getutcdate()":
-			return "GETUTCDATE()", nil
-		case "sysdatetime()":
-			return "SYSDATETIME()", nil
-		case "sysutcdatetime()":
-			return "SYSUTCDATETIME()", nil
-		case "sysdatetimeoffset()":
-			return "SYSDATETIMEOFFSET()", nil
-		case "gen_random_uuid()", "uuid_generate_v4()", "uuid()", "newid()":
-			return "NEWID()", nil
-		}
-	case "mysql":
-		if strings.HasPrefix(lower, "current_timestamp(") || strings.HasPrefix(lower, "now(") {
-			return mysqlNowDefault(col), nil
-		}
-		if isArraySourceType(col.DataType) {
-			switch lower {
-			case "'{}'", "{}":
-				return "(JSON_ARRAY())", nil
-			}
-		}
-		if isJSONSourceType(col.DataType) {
-			switch lower {
-			case "'{}'", "{}":
-				return "(JSON_OBJECT())", nil
-			case "'[]'", "[]":
-				return "(JSON_ARRAY())", nil
-			}
-		}
-		switch lower {
-		case "current_timestamp", "now()", "getdate()", "getutcdate()", "sysdatetime()", "sysutcdatetime()", "sysdatetimeoffset()":
-			return mysqlNowDefault(col), nil
-		case "gen_random_uuid()", "uuid_generate_v4()", "newid()", "uuid()":
-			return "(UUID())", nil
-		}
-	}
-	out, err := r.Expression(expr, nil)
+	out, err := exprir.Render(exprir.ParseDefault(raw, r.source), r.exprOpts("default", col, nil))
 	if err != nil {
-		return "", err
+		if !errors.Is(err, exprir.ErrUnsupported) {
+			return "", err
+		}
+		out, err = r.legacyDefault(raw)
+		if err != nil {
+			return "", err
+		}
 	}
 	if r.target == "mysql" {
 		out = r.mysqlDefaultForm(out, col)
 	}
 	return out, nil
+}
+
+// legacyDefault is the pre-IR fallthrough for defaults outside the IR
+// grammar, gated fail-closed for cross-dialect runs.
+func (r Renderer) legacyDefault(raw string) (string, error) {
+	expr := stripPostgresCasts(unwrapDefaultParens(raw))
+	out, err := r.Expression(expr, nil)
+	if err != nil {
+		return "", err
+	}
+	if r.crossDialect() {
+		if err := exprir.RejectUnknownFunctions(out, r.target); err != nil {
+			return "", err
+		}
+	}
+	return out, nil
+}
+
+// crossDialect reports whether the renderer knows it is translating between
+// dialects. Same-dialect (and unknown-source) runs keep verbatim semantics:
+// the source expression is definitionally valid on the target.
+func (r Renderer) crossDialect() bool {
+	return r.source != "" && r.source != r.target
+}
+
+// exprOpts assembles the IR render options for this target, with column
+// context resolved through the same lexical helpers the legacy path used.
+func (r Renderer) exprOpts(kind string, col driver.Column, tableCols []driver.Column) exprir.Opts {
+	o := exprir.Opts{
+		Target:     r.target,
+		Source:     r.source,
+		Kind:       kind,
+		Col:        r.exprColInfo(col),
+		QuoteIdent: func(name string) string { return r.quote(r.normalize(name)) },
+	}
+	if len(tableCols) > 0 {
+		o.Columns = make(map[string]exprir.ColInfo, len(tableCols))
+		for _, c := range tableCols {
+			o.Columns[strings.ToLower(c.Name)] = r.exprColInfo(c)
+		}
+	}
+	return o
+}
+
+func (r Renderer) exprColInfo(col driver.Column) exprir.ColInfo {
+	dt := strings.ToLower(strings.TrimSpace(col.DataType))
+	if dt == "" {
+		return exprir.ColInfo{}
+	}
+	return exprir.ColInfo{
+		Boolean:           isBooleanColumn(col),
+		Textual:           isTextualSourceType(col.DataType),
+		TZAware:           dt == "datetimeoffset" || dt == "timestamptz" || dt == "timestamp with time zone",
+		JSON:              isJSONSourceType(col.DataType),
+		Array:             isArraySourceType(col.DataType),
+		DatetimePrecision: col.DatetimePrecision,
+	}
 }
 
 var (
@@ -434,7 +436,15 @@ func (r Renderer) CreateCheckConstraintDDL(t *driver.Table, chk *driver.CheckCon
 	if def == "" {
 		return "", fmt.Errorf("check constraint %s has no definition", chk.Name)
 	}
-	expr, err := r.Expression(def, t.Columns)
+	// Expression IR first (#175); forms outside its grammar fall back to the
+	// legacy string-rewrite pipeline with the shared cross-dialect gate.
+	expr, err := exprir.Render(exprir.ParseCheck(def, r.source), r.exprOpts("check", driver.Column{}, t.Columns))
+	if err != nil && errors.Is(err, exprir.ErrUnsupported) {
+		expr, err = r.Expression(def, t.Columns)
+		if err == nil && r.crossDialect() {
+			err = exprir.RejectUnknownFunctions(expr, r.target)
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("mapping check constraint %s: %w", chk.Name, err)
 	}
@@ -712,23 +722,6 @@ func normalizeTypeName(dt string) string {
 	return dt
 }
 
-// mysqlNowDefault renders the CURRENT_TIMESTAMP default with the same fsp the
-// column type will carry — MySQL rejects a default whose fsp differs from the
-// column's.
-func mysqlNowDefault(col driver.Column) string {
-	p := 6
-	if col.DatetimePrecision != nil && *col.DatetimePrecision >= 0 {
-		p = *col.DatetimePrecision
-		if p > 6 {
-			p = 6
-		}
-	}
-	if p == 0 {
-		return "CURRENT_TIMESTAMP"
-	}
-	return fmt.Sprintf("CURRENT_TIMESTAMP(%d)", p)
-}
-
 func isBooleanColumn(col driver.Column) bool {
 	switch normalizeTypeName(col.DataType) {
 	case "bit", "bool", "boolean", "tinyint(1)":
@@ -792,25 +785,6 @@ func isArraySourceType(dt string) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func isBareSQLWord(expr string) bool {
-	if expr == "" {
-		return false
-	}
-	for i, r := range expr {
-		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9') {
-			continue
-		}
-		return false
-	}
-	lower := strings.ToLower(expr)
-	switch lower {
-	case "null", "true", "false", "current_timestamp":
-		return false
-	default:
-		return true
 	}
 }
 

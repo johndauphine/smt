@@ -89,7 +89,7 @@ func TestDeterministicFinalizationDDL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createCheckConstraint: %v", err)
 	}
-	assertContains(t, checkDDL, `ALTER TABLE "public"."votes" ADD CONSTRAINT "ck_votes_bountyamount" CHECK ("bountyamount">(0))`)
+	assertContains(t, checkDDL, `ALTER TABLE "public"."votes" ADD CONSTRAINT "ck_votes_bountyamount" CHECK ("bountyamount" > (0))`)
 }
 
 func TestDeterministicFilteredIndexBitComparison(t *testing.T) {
@@ -155,7 +155,7 @@ func TestDeterministicPostgresNativeAliases(t *testing.T) {
 	if arrayType != "text[]" {
 		t.Fatalf("array type = %q", arrayType)
 	}
-	assertContains(t, arrayDef, `"skills" text[] NOT NULL DEFAULT '{}'::text[]`)
+	assertContains(t, arrayDef, `"skills" text[] NOT NULL DEFAULT '{}'`)
 	if strings.Contains(arrayDef, `"col_"`) {
 		t.Fatalf("array default was rewritten as a bracket identifier:\n%s", arrayDef)
 	}
@@ -478,11 +478,15 @@ func TestDeterministicMSSQLCheckBooleanKeywords(t *testing.T) {
 		t.Fatalf("createCheckConstraint: %v", err)
 	}
 	assertContains(t, ddl, `ALTER TABLE "public"."customers" ADD CONSTRAINT "ck_cust_identity" CHECK (`)
-	assertContains(t, ddl, `"customer_type"='individual' AND "first_name" IS NOT NULL`)
-	assertContains(t, ddl, `OR ("customer_type"='government' OR "customer_type"='company')`)
+	assertContains(t, ddl, `"customer_type" = 'individual' AND "first_name" IS NOT NULL`)
+	assertContains(t, ddl, `OR ("customer_type" = 'government' OR "customer_type" = 'company')`)
 }
 
-func TestDeterministicPostgresCheckArrayAnyPassThrough(t *testing.T) {
+// The expression IR normalizes pg's = ANY (ARRAY[...]) idiom to the portable
+// IN form (values preserved, element casts stripped); the historical failure
+// mode this test pins — mangling the ARRAY[...] body into a bracket
+// identifier — must stay impossible.
+func TestDeterministicPostgresCheckArrayAnyToIn(t *testing.T) {
 	renderer := newDeterministicDDL()
 	ddl, err := renderer.createCheckConstraint(&driver.Table{Name: "CustomerAddresses"}, &driver.CheckConstraint{
 		Name:       "chk_addr_type",
@@ -491,7 +495,7 @@ func TestDeterministicPostgresCheckArrayAnyPassThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createCheckConstraint: %v", err)
 	}
-	assertContains(t, ddl, `ANY ((ARRAY['billing'::character varying, 'shipping'::character varying])::text[])`)
+	assertContains(t, ddl, `IN ('billing', 'shipping')`)
 	if strings.Contains(ddl, `"col_"`) {
 		t.Fatalf("ARRAY[] expression was rewritten as bracket identifier:\n%s", ddl)
 	}

@@ -51,7 +51,7 @@ func TestRenderer_CreateTableMySQL(t *testing.T) {
 		"`CompanyId` INT AUTO_INCREMENT NOT NULL",
 		"`Name` VARCHAR(80) NOT NULL",
 		"`IsActive` TINYINT(1) NOT NULL DEFAULT 1",
-		"`CreatedAt` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP",
+		"`CreatedAt` DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6))",
 		"CONSTRAINT `pk_Companies` PRIMARY KEY (`CompanyId`)",
 		"ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 	} {
@@ -88,7 +88,7 @@ func TestRenderer_FinalizationMSSQL(t *testing.T) {
 
 	assertEqualSQL(t, idxSQL, `CREATE UNIQUE INDEX [IX_Companies_Name] ON [dbo].[Companies] ([Name])`)
 	assertEqualSQL(t, fkSQL, `ALTER TABLE [dbo].[Contacts] ADD CONSTRAINT [FK_Contacts_Companies] FOREIGN KEY ([CompanyId]) REFERENCES [dbo].[Companies] ([CompanyId]) ON DELETE CASCADE`)
-	assertEqualSQL(t, checkSQL, `ALTER TABLE [dbo].[Companies] ADD CONSTRAINT [CK_Companies_Active] CHECK ([IsActive]=1)`)
+	assertEqualSQL(t, checkSQL, `ALTER TABLE [dbo].[Companies] ADD CONSTRAINT [CK_Companies_Active] CHECK ([IsActive] = 1)`)
 }
 
 func TestRenderer_FinalizationMySQL(t *testing.T) {
@@ -115,7 +115,7 @@ func TestRenderer_FinalizationMySQL(t *testing.T) {
 
 	assertEqualSQL(t, idxSQL, "CREATE UNIQUE INDEX `IX_Companies_Name` ON `crm`.`Companies` (`Name`)")
 	assertEqualSQL(t, fkSQL, "ALTER TABLE `crm`.`Contacts` ADD CONSTRAINT `FK_Contacts_Companies` FOREIGN KEY (`CompanyId`) REFERENCES `crm`.`Companies` (`CompanyId`) ON DELETE CASCADE")
-	assertEqualSQL(t, checkSQL, "ALTER TABLE `crm`.`Companies` ADD CONSTRAINT `CK_Companies_Active` CHECK (`IsActive`=1)")
+	assertEqualSQL(t, checkSQL, "ALTER TABLE `crm`.`Companies` ADD CONSTRAINT `CK_Companies_Active` CHECK (`IsActive` = 1)")
 }
 
 func TestRenderer_DropIndexPostgresWithoutSchema(t *testing.T) {
@@ -498,7 +498,7 @@ func TestRenderer_DefaultsNormalizePostgresCastsAndTimestampPrecision(t *testing
 	if err != nil {
 		t.Fatalf("ColumnDefault mysql timestamp: %v", err)
 	}
-	assertEqualSQL(t, mysqlTime, "CURRENT_TIMESTAMP(6)")
+	assertEqualSQL(t, mysqlTime, "(UTC_TIMESTAMP(6))")
 }
 
 func crmCompanyTable() driver.Table {

@@ -8,6 +8,7 @@ import (
 
 	"smt/internal/canonical"
 	"smt/internal/driver"
+	exprir "smt/internal/expr"
 	"smt/internal/logging"
 )
 
@@ -285,14 +286,22 @@ func (r deterministicDDL) createCheckConstraint(t *driver.Table, chk *driver.Che
 
 	expr := strings.TrimSpace(chk.DefinitionOverride)
 	if expr == "" {
-		var err error
-		expr, err = r.sqlServerExpression(def)
+		// Expression IR first (#175); forms outside its grammar fall back to
+		// the legacy string-rewrite pipeline, which ends in the same
+		// fail-closed function gate.
+		out, err := exprir.Render(exprir.ParseCheck(def, r.sourceDialect), r.exprOpts("check", driver.Column{}, t.Columns))
+		if err != nil && errors.Is(err, exprir.ErrUnsupported) {
+			out, err = r.sqlServerExpression(def)
+			if err == nil {
+				out = r.rewriteBooleanComparisons(out, t.Columns)
+			}
+		}
 		if err != nil {
 			return "", &driver.ExpressionRenderError{
 				Column: chk.Name, Kind: "check", SourceExpr: chk.Definition, Err: err,
 			}
 		}
-		expr = r.rewriteBooleanComparisons(expr, t.Columns)
+		expr = out
 	}
 
 	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
@@ -365,55 +374,59 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 	return typ, nil
 }
 
+// defaultExpression renders a column DEFAULT through the expression IR
+// (#175): parse once, render for postgres. Forms outside the IR grammar fall
+// back to the legacy string-rewrite pipeline, which ends in the same
+// fail-closed function gate — never a silent passthrough.
 func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
 	raw := strings.TrimSpace(col.DefaultExpression)
 	if raw == "" {
 		return "", nil
 	}
-	expr := unwrapDefaultParens(raw)
-	lower := strings.ToLower(expr)
+	out, err := exprir.Render(exprir.ParseDefault(raw, r.sourceDialect), r.exprOpts("default", col, nil))
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, exprir.ErrUnsupported) {
+		return "", err
+	}
+	return r.sqlServerExpression(unwrapDefaultParens(raw))
+}
 
-	switch lower {
-	case "getdate()", "current_timestamp":
-		return "CURRENT_TIMESTAMP", nil
-	case "getutcdate()":
-		return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')", nil
-	case "sysdatetime()":
-		return "CURRENT_TIMESTAMP", nil
-	case "sysdatetimeoffset()":
-		return "CURRENT_TIMESTAMP", nil
-	case "sysutcdatetime()":
-		if strings.EqualFold(strings.TrimSpace(col.DataType), "datetimeoffset") {
-			return "CURRENT_TIMESTAMP", nil
-		}
-		return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')", nil
-	case "newid()", "uuid()":
-		return "gen_random_uuid()", nil
+// exprOpts assembles the IR render options: postgres target conventions plus
+// the column context (boolean/textual/TZ classification through the same
+// canonical mapping the type renderer uses). tableCols populates identifier
+// context for CHECK predicates.
+func (r deterministicDDL) exprOpts(kind string, col driver.Column, tableCols []driver.Column) exprir.Opts {
+	o := exprir.Opts{
+		Target: exprir.Postgres,
+		Source: r.sourceDialect,
+		Kind:   kind,
+		Col:    r.exprColInfo(col),
+		QuoteIdent: func(name string) string {
+			return r.dialect.QuoteIdentifier(sanitizePGIdentifier(name))
+		},
 	}
-	if strings.HasPrefix(lower, "current_timestamp(") || strings.HasPrefix(lower, "now(") {
-		return "CURRENT_TIMESTAMP", nil
-	}
-	if pg, ok := convertDateDefault(expr); ok {
-		return pg, nil
-	}
-
-	// A column that maps to pg boolean needs boolean default literals: pg
-	// rejects DEFAULT 1 on a boolean. This covers MSSQL bit and MySQL tinyint(1)
-	// (the boolean convention) alike, via the same source-aware canonical
-	// classification the type mapping uses.
-	if canonical.ToCanonical(strings.ToLower(strings.TrimSpace(col.DataType)), driver.MetaOf(col), r.sourceDialect).Kind == canonical.Boolean {
-		switch expr {
-		case "0":
-			return "false", nil
-		case "1":
-			return "true", nil
+	if len(tableCols) > 0 {
+		o.Columns = make(map[string]exprir.ColInfo, len(tableCols))
+		for _, c := range tableCols {
+			o.Columns[strings.ToLower(c.Name)] = r.exprColInfo(c)
 		}
 	}
-	if isTextualSourceType(col.DataType) && isBareSQLWord(expr) {
-		return "'" + strings.ReplaceAll(expr, "'", "''") + "'", nil
-	}
+	return o
+}
 
-	return r.sqlServerExpression(expr)
+func (r deterministicDDL) exprColInfo(col driver.Column) exprir.ColInfo {
+	dt := strings.ToLower(strings.TrimSpace(col.DataType))
+	if dt == "" {
+		return exprir.ColInfo{}
+	}
+	return exprir.ColInfo{
+		Boolean:           canonical.ToCanonical(dt, driver.MetaOf(col), r.sourceDialect).Kind == canonical.Boolean,
+		Textual:           isTextualSourceType(col.DataType),
+		TZAware:           dt == "datetimeoffset" || dt == "timestamptz" || dt == "timestamp with time zone",
+		DatetimePrecision: col.DatetimePrecision,
+	}
 }
 
 func (r deterministicDDL) sqlServerExpression(expr string) (string, error) {
@@ -449,73 +462,12 @@ func (r deterministicDDL) sqlServerExpression(expr string) (string, error) {
 	return out, nil
 }
 
-var expressionFunctionRE = regexp.MustCompile(`(?i)\b([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)\s*\(`)
-
-// convertDateDefaultRE matches the MSSQL idiom CONVERT(date, <now>) — a
-// "today's date" default — tolerating extra whitespace and an optionally
-// bracketed/quoted date type name (date / [date] / "date"). The argument is
-// captured loosely and classified by convertDateDefault, so only the now-family
-// argument is rewritten; any other CONVERT(...) form is left to fail.
-var convertDateDefaultRE = regexp.MustCompile(`(?i)^CONVERT\(\s*[\["]?\s*date\s*[\]"]?\s*,\s*(.+?)\s*\)$`)
-
-// convertDateDefault rewrites CONVERT(date, <now-family>) into the Postgres
-// equivalent for a date column default. It returns ok=false for any other
-// CONVERT argument so unsupported forms still fail rather than being silently
-// reinterpreted.
-func convertDateDefault(expr string) (string, bool) {
-	m := convertDateDefaultRE.FindStringSubmatch(expr)
-	if m == nil {
-		return "", false
-	}
-	switch strings.ReplaceAll(strings.ToLower(m[1]), " ", "") {
-	case "getdate()", "current_timestamp", "sysdatetime()", "sysdatetimeoffset()":
-		return "CURRENT_DATE", true
-	case "getutcdate()", "sysutcdatetime()":
-		return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date", true
-	}
-	return "", false
-}
-
+// rejectUnsupportedSQLServerExpression is the fail-closed tail of the legacy
+// string-rewrite pipeline. It delegates to the shared per-target gate in
+// internal/expr (#175) so all three targets reject unknown functions
+// identically. (CONVERT(date, <now>) handling moved into the expression IR.)
 func rejectUnsupportedSQLServerExpression(expr string) error {
-	scan := stripSingleQuotedStrings(expr)
-	for _, match := range expressionFunctionRE.FindAllStringSubmatch(scan, -1) {
-		if len(match) != 2 {
-			continue
-		}
-		name := strings.ToLower(match[1])
-		switch name {
-		case "and", "or", "case", "when", "then", "else", "end", "coalesce", "gen_random_uuid", "nullif", "lower", "upper", "in", "not", "exists", "any":
-			continue
-		default:
-			return fmt.Errorf("unsupported SQL expression function %q in %q", match[1], expr)
-		}
-	}
-	return nil
-}
-
-func stripSingleQuotedStrings(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	inSingleQuote := false
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if ch == '\'' {
-			b.WriteByte(' ')
-			if inSingleQuote && i+1 < len(s) && s[i+1] == '\'' {
-				i++
-				b.WriteByte(' ')
-				continue
-			}
-			inSingleQuote = !inSingleQuote
-			continue
-		}
-		if inSingleQuote {
-			b.WriteByte(' ')
-			continue
-		}
-		b.WriteByte(ch)
-	}
-	return b.String()
+	return exprir.RejectUnknownFunctions(expr, exprir.Postgres)
 }
 
 func pgReferentialAction(rule string) string {
@@ -769,29 +721,6 @@ func isTextualSourceType(dataType string) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func isBareSQLWord(expr string) bool {
-	if expr == "" {
-		return false
-	}
-	for i, r := range expr {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' {
-			continue
-		}
-		if i > 0 && r >= '0' && r <= '9' {
-			continue
-		}
-		return false
-	}
-	// SQL keywords that must stay unquoted: DEFAULT (NULL) means SQL NULL,
-	// not the string 'NULL'.
-	switch strings.ToLower(expr) {
-	case "null", "true", "false", "current_timestamp":
-		return false
-	default:
-		return true
 	}
 }
 
