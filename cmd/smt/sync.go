@@ -297,6 +297,9 @@ func runSyncAgainstTarget(c *cli.Context) error {
 // as deterministic target-dialect ALTERs. The target connection is opened
 // only when --apply is set.
 func runSyncAgainstSnapshot(c *cli.Context) error {
+	if c.String("state-file") != "" {
+		return fmt.Errorf("sync --against snapshot requires the SQLite state backend; it is not available with --state-file")
+	}
 	cfg, profileName, configPath, err := loadConfig(c)
 	if err != nil {
 		return err
@@ -344,6 +347,11 @@ func runSyncAgainstSnapshot(c *cli.Context) error {
 
 	diff, plan, err := buildSnapshotSyncPlan(prevSnap, currSnap, cfg)
 	if err != nil {
+		// Surface what changed even when rendering fails, so the operator
+		// knows which delta the renderer could not express.
+		if !diff.IsEmpty() {
+			fmt.Printf("Diff since snapshot (%s): %s\n", prevSnap.CapturedAt.Format(time.RFC3339), diff.Summary())
+		}
 		return err
 	}
 	if diff.IsEmpty() {
@@ -361,17 +369,25 @@ func runSyncAgainstSnapshot(c *cli.Context) error {
 
 // buildSnapshotSyncPlan computes the offline snapshot-to-snapshot diff and
 // renders it as a deterministic target-dialect ALTER plan. The migration
-// include/exclude scope applies to both snapshots; the diff runs on
+// include/exclude scope applies to both snapshots and unmanaged object kinds
+// (create_indexes / create_foreign_keys / create_check_constraints) are
+// dropped, matching the live-target mode's gating; the diff runs on
 // source-side names, then identifiers and schema references are rewritten
 // to the target convention before rendering (same order Normalize's and
-// WithTargetSchema's contracts require). Pure — no database or state I/O —
-// which is what keeps snapshot-mode planning offline.
+// WithTargetSchema's contracts require). Pure — no database or state I/O,
+// no mutation of either snapshot — which is what keeps snapshot-mode
+// planning offline and the caller's snapshot safe to persist as the next
+// baseline.
 func buildSnapshotSyncPlan(prev, curr schemadiff.Snapshot, cfg *config.Config) (schemadiff.Diff, schemadiff.Plan, error) {
 	include, exclude := cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables
 	prev.Tables = filterDesiredScope(prev.Tables, include, exclude)
 	curr.Tables = filterDesiredScope(curr.Tables, include, exclude)
 
-	diff := schemadiff.Compute(prev, curr)
+	diff := schemadiff.Compute(prev, curr).FilterManagedKinds(
+		cfg.Migration.CreateIndexes,
+		cfg.Migration.CreateForeignKeys,
+		cfg.Migration.CreateCheckConstraints,
+	)
 	if diff.IsEmpty() {
 		return diff, schemadiff.Plan{}, nil
 	}

@@ -235,7 +235,8 @@ func TestLoadPreviousSnapshot_RoundTrip(t *testing.T) {
 }
 
 // snapshotSyncCfg builds the minimal config buildSnapshotSyncPlan needs:
-// mssql source, postgres target, no scope filters unless set by the test.
+// mssql source, postgres target, all object kinds managed (the loaded-config
+// default), no scope filters unless set by the test.
 func snapshotSyncCfg() *config.Config {
 	cfg := &config.Config{}
 	cfg.Source.Type = "mssql"
@@ -243,6 +244,9 @@ func snapshotSyncCfg() *config.Config {
 	cfg.Target.Type = "postgres"
 	cfg.Target.Schema = "public"
 	cfg.SchemaGeneration.UnknownTypePolicy = "fail"
+	cfg.Migration.CreateIndexes = true
+	cfg.Migration.CreateForeignKeys = true
+	cfg.Migration.CreateCheckConstraints = true
 	return cfg
 }
 
@@ -342,6 +346,75 @@ func TestBuildSnapshotSyncPlan_ExcludedTableIgnored(t *testing.T) {
 	}
 	if !plan.IsEmpty() {
 		t.Errorf("excluded table produced statements: %+v", plan.Statements)
+	}
+}
+
+// buildSnapshotSyncPlan must never mutate its input snapshots: the caller
+// persists currSnap as the next baseline (--apply --save-snapshot), and the
+// diff's tables share slice backing arrays with it. A regression here means
+// the saved baseline carries target-normalized names and the next sync
+// proposes drop+re-add of every column.
+func TestBuildSnapshotSyncPlan_DoesNotMutateInputSnapshots(t *testing.T) {
+	mkSnap := func() schemadiff.Snapshot {
+		return snapshotWith(
+			driver.Table{
+				Schema:     "dbo",
+				Name:       "Users",
+				PrimaryKey: []string{"ID"},
+				Columns:    []driver.Column{{Name: "ID", DataType: "int", IsNullable: false}},
+				Indexes:    []driver.Index{{Name: "IX_Users_ID", Columns: []string{"ID"}}},
+				ForeignKeys: []driver.ForeignKey{{
+					Name: "FK_Users_Orgs", Columns: []string{"OrgID"},
+					RefSchema: "dbo", RefTable: "Orgs", RefColumns: []string{"ID"},
+				}},
+			},
+		)
+	}
+	prev := snapshotWith() // empty baseline: Users becomes an added table
+	curr := mkSnap()
+	want := mkSnap()
+
+	if _, _, err := buildSnapshotSyncPlan(prev, curr, snapshotSyncCfg()); err != nil {
+		t.Fatalf("buildSnapshotSyncPlan: %v", err)
+	}
+
+	// Compare Tables only: CapturedAt differs between the two constructions.
+	got, wantJSON := mustJSON(t, curr.Tables), mustJSON(t, want.Tables)
+	if got != wantJSON {
+		t.Errorf("input snapshot mutated by plan build:\ngot:  %s\nwant: %s", got, wantJSON)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}
+
+// Unmanaged object kinds must not produce statements: create_indexes etc.
+// gate snapshot-mode deltas exactly like the live-target mode.
+func TestBuildSnapshotSyncPlan_UnmanagedKindsGated(t *testing.T) {
+	base := driver.Table{
+		Schema:  "dbo",
+		Name:    "Users",
+		Columns: []driver.Column{{Name: "ID", DataType: "int", IsNullable: false}},
+	}
+	withIndex := base
+	withIndex.Indexes = []driver.Index{{Name: "IX_Users_ID", Columns: []string{"ID"}}}
+
+	cfg := snapshotSyncCfg()
+	cfg.Migration.CreateIndexes = false
+
+	diff, plan, err := buildSnapshotSyncPlan(snapshotWith(base), snapshotWith(withIndex), cfg)
+	if err != nil {
+		t.Fatalf("buildSnapshotSyncPlan: %v", err)
+	}
+	if !diff.IsEmpty() || !plan.IsEmpty() {
+		t.Errorf("index-only change with create_indexes=false should gate to empty; diff=%s statements=%d",
+			diff.Summary(), len(plan.Statements))
 	}
 }
 

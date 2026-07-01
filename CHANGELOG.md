@@ -9,11 +9,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Snapshot-mode sync** ([#167]) — `smt sync --against snapshot` diffs the
-  current source schema against the latest stored snapshot (the pre-#143
-  offline workflow, now an explicit mode) and renders deterministic ALTERs
-  with the same risk gating as the default live-target mode. Planning opens
-  no target connection; `--apply` does. `--against target` remains the
-  default and is unchanged.
+  current source schema against the latest stored snapshot (the offline
+  question the pre-#143 sync answered, now an explicit mode with scope
+  filtering, create_* object-kind gating, plan summary, and
+  unsupported-change refusal) and renders deterministic ALTERs with the same
+  risk gating as the default live-target mode. Planning opens no target
+  connection; `--apply` does. `--against target` remains the default and is
+  unchanged. Fixed in passing: `Diff.Normalize` / `Diff.WithTargetSchema`
+  mutated table data shared with the caller's snapshot through slice backing
+  arrays — both now deep-copy, so `--apply --save-snapshot` persists a clean
+  baseline.
 
 ### Changed
 
