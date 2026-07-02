@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -162,6 +163,21 @@ func TestAnthropicRequestUsesConfiguredMaxTokens(t *testing.T) {
 
 	if req.MaxTokens != 24000 {
 		t.Fatalf("parser max_tokens = %d, want configured 24000", req.MaxTokens)
+	}
+}
+
+func TestAnthropicRequestUsesJSONBudgetForShortJSONPrompt(t *testing.T) {
+	provider := testProvider("test-key")
+	provider.Model = "claude-sonnet-5"
+	mapper := testMapperWithTempCache(t, "anthropic", provider)
+
+	req := mapper.buildAnthropicRequest(`Return ONLY valid JSON: {"columns":[]}`)
+
+	if req.MaxTokens != anthropicJSONPromptMaxTokens {
+		t.Fatalf("short JSON max_tokens = %d, want %d", req.MaxTokens, anthropicJSONPromptMaxTokens)
+	}
+	if req.Thinking == nil || req.Thinking.Type != "disabled" {
+		t.Fatalf("short JSON thinking = %#v, want disabled", req.Thinking)
 	}
 }
 
@@ -458,6 +474,15 @@ func TestAnthropicResponseText(t *testing.T) {
 			want: `{"columns": []}`,
 		},
 		{
+			name: "concatenates multiple text blocks",
+			blocks: []anthropicContentBlock{
+				{Type: "text", Text: `{"columns":[`},
+				{Type: "thinking", Text: "ignored"},
+				{Type: "text", Text: `{"name":"id"}]}`},
+			},
+			want: `{"columns":[{"name":"id"}]}`,
+		},
+		{
 			name: "all empty",
 			blocks: []anthropicContentBlock{
 				{Type: "thinking"},
@@ -473,6 +498,16 @@ func TestAnthropicResponseText(t *testing.T) {
 				t.Fatalf("anthropicResponseText() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAnthropicStopReasonError(t *testing.T) {
+	err := anthropicStopReasonError(" max_tokens ")
+	if !errors.Is(err, errAnthropicMaxTokens) {
+		t.Fatalf("anthropicStopReasonError(max_tokens) = %v, want errAnthropicMaxTokens", err)
+	}
+	if err := anthropicStopReasonError("end_turn"); err != nil {
+		t.Fatalf("anthropicStopReasonError(end_turn) = %v, want nil", err)
 	}
 }
 

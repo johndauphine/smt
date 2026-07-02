@@ -487,6 +487,15 @@ type anthropicContentBlock struct {
 	Text string `json:"text"`
 }
 
+var errAnthropicMaxTokens = errors.New("Anthropic response stopped at max_tokens")
+
+func anthropicStopReasonError(stopReason string) error {
+	if strings.EqualFold(strings.TrimSpace(stopReason), "max_tokens") {
+		return fmt.Errorf("%w; response may be truncated, increase max_tokens or retry with a smaller prompt", errAnthropicMaxTokens)
+	}
+	return nil
+}
+
 // sanitizeErrorResponse truncates and sanitizes API error response bodies.
 func sanitizeErrorResponse(body []byte, maxLen int) string {
 	if maxLen <= 0 {
@@ -731,6 +740,9 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 	if anthropicResp.Error != nil {
 		return "", fmt.Errorf("API error: %s", anthropicResp.Error.Message)
 	}
+	if err := anthropicStopReasonError(anthropicResp.StopReason); err != nil {
+		return "", err
+	}
 
 	text := anthropicResponseText(anthropicResp.Content)
 	if text == "" {
@@ -761,26 +773,26 @@ func (m *AITypeMapper) buildAnthropicRequest(prompt string) anthropicRequest {
 }
 
 func (m *AITypeMapper) anthropicMaxTokens(prompt string) int {
-	if len(prompt) <= 500 {
-		return anthropicTypeMappingMaxTokens
-	}
-
 	if m.provider != nil && m.provider.MaxTokens > 0 {
 		return m.provider.MaxTokens
 	}
 	if anthropicPromptWantsJSON(prompt) {
 		return anthropicJSONPromptMaxTokens
 	}
+	if len(prompt) <= 500 {
+		return anthropicTypeMappingMaxTokens
+	}
 	return anthropicGeneralPromptMaxTokens
 }
 
 func anthropicResponseText(blocks []anthropicContentBlock) string {
+	var sb strings.Builder
 	for _, block := range blocks {
-		if strings.TrimSpace(block.Text) != "" {
-			return block.Text
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			sb.WriteString(block.Text)
 		}
 	}
-	return ""
+	return sb.String()
 }
 
 func anthropicSystemPromptFor(prompt string) string {

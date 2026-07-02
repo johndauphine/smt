@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,6 +100,50 @@ func TestParseTargetDDLToColumns_RetriesMalformedJSON(t *testing.T) {
 		`{"columns": [{"name": "id", "data_type": "integer"}`,
 		`{"columns": [{"name": "id", "data_type": "integer", "is_nullable": false}]}`,
 	)
+	cols, err := mapper.parseTargetDDLToColumns(context.Background(), "CREATE TABLE x (id int NOT NULL);", "postgres")
+	if err != nil {
+		t.Fatalf("parseTargetDDLToColumns: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("parser calls = %d, want 2", got)
+	}
+	if len(cols) != 1 || cols[0].Name != "id" {
+		t.Fatalf("expected recovered id column, got %+v", cols)
+	}
+}
+
+func TestParseTargetDDLToColumns_RetriesAnthropicMaxTokensStop(t *testing.T) {
+	provider := testProvider("test-key")
+	provider.Model = "claude-sonnet-5"
+	mapper := testMapperWithTempCache(t, "anthropic", provider)
+	calls := &atomic.Int32{}
+	mapper.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		idx := calls.Add(1)
+		resp := anthropicResponse{
+			Content: []anthropicContentBlock{
+				{Type: "text", Text: `{"columns":[`},
+			},
+			StopReason: "max_tokens",
+		}
+		if idx > 1 {
+			resp = anthropicResponse{
+				Content: []anthropicContentBlock{
+					{Type: "text", Text: `{"columns": [{"name": "id", "data_type": "integer", "is_nullable": false}]}`},
+				},
+				StopReason: "end_turn",
+			}
+		}
+		body, err := json.Marshal(resp)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+		}, nil
+	})}
+
 	cols, err := mapper.parseTargetDDLToColumns(context.Background(), "CREATE TABLE x (id int NOT NULL);", "postgres")
 	if err != nil {
 		t.Fatalf("parseTargetDDLToColumns: %v", err)
@@ -226,4 +271,10 @@ func mockParseServerSequence(t *testing.T, contents ...string) (*AITypeMapper, *
 	})
 	mapper.client = server.Client()
 	return mapper, calls
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }

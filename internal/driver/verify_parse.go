@@ -12,6 +12,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -44,6 +45,10 @@ func (m *AITypeMapper) parseTargetDDLToColumns(ctx context.Context, ddl string, 
 
 		raw, err := m.CallAI(ctx, prompt)
 		if err != nil {
+			if errors.Is(err, errAnthropicMaxTokens) {
+				lastErr = fmt.Errorf("AI parse call failed: %w", err)
+				continue
+			}
 			return nil, fmt.Errorf("AI parse call failed: %w", err)
 		}
 
