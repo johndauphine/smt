@@ -47,6 +47,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Side-object AI review uses structured comparison** ([#177]) — index,
+  foreign-key, and check-constraint finalization review no longer asks a model
+  to judge free text. SMT now parses its generated side-object DDL and compares
+  it deterministically against the source metadata: index uniqueness and
+  ordered column/include/filter shape, FK local/reference pairs and
+  referential actions, and CHECK predicates through the expression IR when
+  feasible. Side-object findings in logs and `manifest.json` now use the
+  `deterministic_comparator` method label; readers should still tolerate older
+  v1 manifests that contain `free_text_auditor`.
 - Documented the published v1.0.0 release status, artifact list, CI status,
   release-blocker closure, and validation artifacts.
 - Added a CI CRM fixture matrix that runs every supported source-to-target
@@ -88,8 +97,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **AI-review finding source is explicit** ([#157]). Table DDL findings are
   labeled as deterministic-comparator results; index, foreign-key, and
   check-constraint findings are labeled as free-text-auditor results in logs and
-  `manifest.json`. Structured side-object comparison is tracked as a 1.x
-  enhancement in [#177].
+  `manifest.json`. Structured side-object comparison later replaces that 1.0
+  side-object method in [#177].
 - **v1 CLI surface documented** ([#155]). `docs/cli.md` enumerates commands,
   flags, stability labels, and exit codes; the only v1 experimental flag is
   marked in help text.

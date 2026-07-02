@@ -423,7 +423,7 @@ func (r createDDLRenderer) reviewFinalization(ctx context.Context, ddlType drive
 	if err != nil {
 		return fmt.Errorf("AI review failed for %s on %s: %w", ddlType, t.FullName(), err)
 	}
-	return r.handleReviewVerdict(fmt.Sprintf("%s on %s", ddlType, t.FullName()), reviewMethodFreeTextAuditor, verdict)
+	return r.handleReviewVerdict(fmt.Sprintf("%s on %s", ddlType, t.FullName()), reviewMethodDeterministicComparator, verdict)
 }
 
 func handleReviewVerdict(mode, label string, verdict *driver.VerifyResult) error {
@@ -461,8 +461,6 @@ func reviewMethodLabel(method string) string {
 	switch method {
 	case reviewMethodDeterministicComparator:
 		return "deterministic comparator"
-	case reviewMethodFreeTextAuditor:
-		return "free-text auditor"
 	default:
 		return "unknown review method"
 	}

@@ -755,9 +755,6 @@ func anthropicSystemPromptFor(prompt string) string {
 	case strings.Contains(upperPrompt, "SQL DDL PARSER") ||
 		strings.Contains(upperPrompt, "=== OUTPUT SCHEMA ==="):
 		return "You are a SQL DDL parser. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
-	case strings.Contains(upperPrompt, "DATABASE MIGRATION AUDITOR") ||
-		strings.Contains(upperPrompt, "=== AUDIT CRITERIA ==="):
-		return "You are a database migration auditor. Return ONLY OK or ISSUES in the requested format. Do not rewrite SQL."
 	case strings.Contains(upperPrompt, "RETURN ONLY VALID JSON"):
 		return "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
 	default:

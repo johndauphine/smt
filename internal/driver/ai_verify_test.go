@@ -6,68 +6,6 @@ import (
 	"testing"
 )
 
-// TestParseVerifyResponse exercises the OK/ISSUES parser against the
-// adversarial inputs we expect from real models — bare OK, OK with trailing
-// prose, ISSUES with markdown fences, lowercase, missing header, empty
-// response. The parser is fail-closed by contract: anything that doesn't
-// clearly say OK is treated as a failure.
-func TestParseVerifyResponse(t *testing.T) {
-	cases := []struct {
-		name      string
-		input     string
-		wantOK    bool
-		wantNonil bool // expect at least one issue when !OK
-	}{
-		// --- OK paths ---
-		{"bare OK", "OK", true, false},
-		{"lowercase ok", "ok", true, false},
-		{"OK with period", "OK.", true, false},
-		{"OK with trailing prose", "OK\n\nNotes: looks fine", true, false},
-		{"OK with em-dash and prose", "OK — every column preserves source semantics", true, false},
-		{"OK with leading whitespace", "  OK\n", true, false},
-		{"OK in markdown fence", "```\nOK\n```", true, false},
-		// Unicode-uppercase-byte-length sanity: ß uppercases to SS, expanding
-		// the byte length of any prefix containing it. With the previous
-		// substring-on-uppercase implementation, the recovered slice index
-		// would mis-align. Verify the line-based parser gets it right:
-		// "OK" stands alone on the first line, prose follows.
-		{"OK with non-ASCII prose", "OK\nWeißbier comment that uppercases to expand bytes", true, false},
-
-		// --- ISSUES paths ---
-		{"ISSUES with one line", "ISSUES\ncode: max_length — 20 vs 10", false, true},
-		{"ISSUES with multiple lines", "ISSUES\ncode: max_length — 20 vs 10\nname: max_length — 200 vs 100", false, true},
-		{"ISSUES with bullet markers", "ISSUES\n- code: max_length — 20 vs 10\n* name: max_length — 200 vs 100", false, true},
-		{"ISSUES in markdown fence", "```\nISSUES\ncode: max_length — 20 vs 10\n```", false, true},
-		{"lowercase issues", "issues\ncode: max_length — 20 vs 10", false, true},
-		{"ISSUES with no body", "ISSUES", false, true},
-		{"ISSUES with only blank lines after", "ISSUES\n\n\n", false, true},
-
-		// --- Malformed / fail-closed paths ---
-		{"empty response", "", false, true},
-		{"only whitespace", "   \n\n  ", false, true},
-		{"random prose", "I think this looks fine, but...", false, true},
-		{"OKAY (not OK)", "OKAY\nlooks fine", false, true},
-
-		// --- Edge: OK followed by issues should still be OK (the model
-		// committed to passing on the first line) — fail-closed parser
-		// would re-flag this, but real models that say OK first don't
-		// then enumerate issues. Keep first-line semantics.
-		{"OK overrides trailing issue-ish text", "OK\nIssues: none worth mentioning", true, false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parseVerifyResponse(tc.input)
-			if got.OK != tc.wantOK {
-				t.Errorf("OK = %v, want %v\nresponse:\n%s\nissues: %v", got.OK, tc.wantOK, tc.input, got.Issues)
-			}
-			if !tc.wantOK && tc.wantNonil && len(got.Issues) == 0 {
-				t.Errorf("expected at least one issue for fail case, got none\nresponse:\n%s", tc.input)
-			}
-		})
-	}
-}
-
 // TestVerifyTableDDL_OK is the happy path under the parse+compare flow
 // (#55): AI parser returns Column[] JSON whose attributes match the source,
 // CompareColumns returns zero deltas, verdict.OK=true. No more "auditor says
@@ -199,100 +137,148 @@ func TestVerifyTableDDL_RequiresProposedDDL(t *testing.T) {
 	}
 }
 
-// TestBuildVerifyFinalizationDDLPrompt_Index pins the index-audit prompt.
-func TestBuildVerifyFinalizationDDLPrompt_Index(t *testing.T) {
+func TestVerifyFinalizationDDL_IndexStructuredComparatorOK(t *testing.T) {
 	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
-
 	req := VerifyFinalizationDDLRequest{
 		Type:         DDLTypeIndex,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Table:        &Table{Name: "orders"},
-		TargetSchema: "public",
+		Table: &Table{Name: "Companies"},
 		Index: &Index{
-			Name: "idx_customer", Columns: []string{"customer_id"},
-			IsUnique: true, Filter: "deleted_at IS NULL",
+			Name:        "IX_Companies_Name_Active",
+			Columns:     []string{"Name", "IsActive"},
+			IsUnique:    true,
+			IncludeCols: []string{"CreatedAt"},
+			Filter:      "([DeletedAt] IS NULL)",
 		},
-		ProposedDDL: "CREATE UNIQUE INDEX idx_customer ON public.orders (customer_id) WHERE deleted_at IS NULL;",
+		ProposedDDL: `CREATE UNIQUE INDEX "ix_companies_name_active" ON "public"."companies" ("name", "isactive") INCLUDE ("createdat") WHERE "deletedat" IS NULL`,
 	}
-	prompt := mapper.buildVerifyIndexDDLPrompt(req)
-
-	for _, needle := range []string{
-		"AUDIT CRITERIA",
-		"exact column list",
-		"UNIQUE-ness",
-		"INCLUDE columns",
-		"Filter / WHERE clause",
-		"OUTPUT FORMAT",
-		"OK",
-		"ISSUES",
-	} {
-		if !strings.Contains(prompt, needle) {
-			t.Errorf("verify index prompt missing required phrase %q", needle)
-		}
+	verdict, err := mapper.VerifyFinalizationDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyFinalizationDDL index: %v", err)
+	}
+	if !verdict.OK {
+		t.Fatalf("index verifier flagged equivalent DDL: %v", verdict.Issues)
 	}
 }
 
-// TestBuildVerifyFinalizationDDLPrompt_FK pins the FK-audit prompt.
-func TestBuildVerifyFinalizationDDLPrompt_FK(t *testing.T) {
+func TestVerifyFinalizationDDL_IndexStructuredComparatorMismatch(t *testing.T) {
 	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+	req := VerifyFinalizationDDLRequest{
+		Type:         DDLTypeIndex,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Table: &Table{Name: "Companies"},
+		Index: &Index{
+			Name:     "IX_Companies_Name_CreatedAt",
+			Columns:  []string{"Name", "CreatedAt"},
+			IsUnique: true,
+		},
+		ProposedDDL: `CREATE UNIQUE INDEX "ix_companies_name_createdat" ON "public"."companies" ("createdat", "name")`,
+	}
+	verdict, err := mapper.VerifyFinalizationDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyFinalizationDDL index mismatch: %v", err)
+	}
+	if verdict.OK {
+		t.Fatal("index verifier passed reversed columns")
+	}
+	if got := strings.Join(verdict.Issues, "\n"); !strings.Contains(got, "columns") {
+		t.Fatalf("index mismatch did not report columns: %v", verdict.Issues)
+	}
+}
 
+func TestVerifyFinalizationDDL_ForeignKeyStructuredComparatorOK(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
 	req := VerifyFinalizationDDLRequest{
 		Type:         DDLTypeForeignKey,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Table:        &Table{Name: "orders"},
-		TargetSchema: "public",
+		Table: &Table{Name: "Orders"},
 		ForeignKey: &ForeignKey{
-			Name: "fk_customer", Columns: []string{"customer_id"},
-			RefSchema: "public", RefTable: "customers", RefColumns: []string{"id"},
-			OnDelete: "CASCADE", OnUpdate: "NO ACTION",
+			Name:       "FK_Orders_Customers",
+			Columns:    []string{"CustomerID", "TenantID"},
+			RefTable:   "Customers",
+			RefColumns: []string{"ID", "TenantID"},
+			OnDelete:   "CASCADE",
+			OnUpdate:   "RESTRICT",
 		},
-		ProposedDDL: "ALTER TABLE public.orders ADD CONSTRAINT fk_customer FOREIGN KEY (customer_id) REFERENCES public.customers (id) ON DELETE CASCADE;",
+		ProposedDDL: `ALTER TABLE "public"."orders" ADD CONSTRAINT "fk_orders_customers" FOREIGN KEY ("customerid", "tenantid") REFERENCES "public"."customers" ("id", "tenantid") ON DELETE CASCADE`,
 	}
-	prompt := mapper.buildVerifyForeignKeyDDLPrompt(req)
-
-	for _, needle := range []string{
-		"AUDIT CRITERIA",
-		"local column list",
-		"referenced column list",
-		"referenced table name",
-		"ON DELETE action",
-		"ON UPDATE action",
-		"NO ACTION and RESTRICT as equivalent",
-		"OUTPUT FORMAT",
-	} {
-		if !strings.Contains(prompt, needle) {
-			t.Errorf("verify FK prompt missing required phrase %q", needle)
-		}
+	verdict, err := mapper.VerifyFinalizationDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyFinalizationDDL FK: %v", err)
+	}
+	if !verdict.OK {
+		t.Fatalf("FK verifier flagged equivalent DDL: %v", verdict.Issues)
 	}
 }
 
-// TestBuildVerifyFinalizationDDLPrompt_Check pins the CHECK-audit prompt.
-func TestBuildVerifyFinalizationDDLPrompt_Check(t *testing.T) {
+func TestVerifyFinalizationDDL_ForeignKeyStructuredComparatorMismatch(t *testing.T) {
 	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+	req := VerifyFinalizationDDLRequest{
+		Type:         DDLTypeForeignKey,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Table: &Table{Name: "Orders"},
+		ForeignKey: &ForeignKey{
+			Name:       "FK_Orders_Customers",
+			Columns:    []string{"CustomerID"},
+			RefTable:   "Customers",
+			RefColumns: []string{"ID"},
+			OnDelete:   "CASCADE",
+		},
+		ProposedDDL: `ALTER TABLE "public"."orders" ADD CONSTRAINT "fk_orders_customers" FOREIGN KEY ("customerid") REFERENCES "public"."customers" ("id")`,
+	}
+	verdict, err := mapper.VerifyFinalizationDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyFinalizationDDL FK mismatch: %v", err)
+	}
+	if verdict.OK {
+		t.Fatal("FK verifier passed missing ON DELETE CASCADE")
+	}
+	if got := strings.Join(verdict.Issues, "\n"); !strings.Contains(got, "on_delete") {
+		t.Fatalf("FK mismatch did not report on_delete: %v", verdict.Issues)
+	}
+}
 
+func TestVerifyFinalizationDDL_CheckStructuredComparatorOK(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
 	req := VerifyFinalizationDDLRequest{
 		Type:         DDLTypeCheckConstraint,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Table:        &Table{Name: "orders"},
-		TargetSchema: "public",
+		Table: &Table{Name: "Companies"},
 		CheckConstraint: &CheckConstraint{
-			Name:       "chk_total_positive",
-			Definition: "total >= 0",
+			Name:       "CK_Companies_Active",
+			Definition: "([IsActive]=(1))",
 		},
-		ProposedDDL: "ALTER TABLE public.orders ADD CONSTRAINT chk_total_positive CHECK (total >= 0);",
+		ProposedDDL: `ALTER TABLE "public"."companies" ADD CONSTRAINT "ck_companies_active" CHECK ("isactive" = true)`,
 	}
-	prompt := mapper.buildVerifyCheckConstraintDDLPrompt(req)
+	verdict, err := mapper.VerifyFinalizationDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyFinalizationDDL CHECK: %v", err)
+	}
+	if !verdict.OK {
+		t.Fatalf("CHECK verifier flagged equivalent DDL: %v", verdict.Issues)
+	}
+}
 
-	for _, needle := range []string{
-		"AUDIT CRITERIA",
-		"semantics of the source predicate",
-		"ISNULL(a,b)",
-		"COALESCE(a,b)",
-		"constraint name",
-		"OUTPUT FORMAT",
-	} {
-		if !strings.Contains(prompt, needle) {
-			t.Errorf("verify CHECK prompt missing required phrase %q", needle)
-		}
+func TestVerifyFinalizationDDL_CheckStructuredComparatorMismatch(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+	req := VerifyFinalizationDDLRequest{
+		Type:         DDLTypeCheckConstraint,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Table: &Table{Name: "Companies"},
+		CheckConstraint: &CheckConstraint{
+			Name:       "CK_Companies_Active",
+			Definition: "([IsActive]=(1))",
+		},
+		ProposedDDL: `ALTER TABLE "public"."companies" ADD CONSTRAINT "ck_companies_active" CHECK ("isactive" = false)`,
+	}
+	verdict, err := mapper.VerifyFinalizationDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyFinalizationDDL CHECK mismatch: %v", err)
+	}
+	if verdict.OK {
+		t.Fatal("CHECK verifier passed changed predicate")
+	}
+	if got := strings.Join(verdict.Issues, "\n"); !strings.Contains(got, "predicate") {
+		t.Fatalf("CHECK mismatch did not report predicate: %v", verdict.Issues)
 	}
 }

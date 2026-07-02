@@ -116,21 +116,10 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 	}
 }
 
-func TestAnthropicSystemPromptForReviewPrompts(t *testing.T) {
+func TestAnthropicSystemPromptForParsePrompts(t *testing.T) {
 	parsePrompt := buildVerifyParsePrompt("CREATE TABLE t (id INT)", "mssql") + strings.Repeat("\ncontext", 100)
 	if got := anthropicSystemPromptFor(parsePrompt); !strings.Contains(got, "valid JSON") {
 		t.Fatalf("parse prompt system = %q, want JSON parser guidance", got)
-	}
-
-	mapper := &AITypeMapper{}
-	auditPrompt := mapper.buildVerifyIndexDDLPrompt(VerifyFinalizationDDLRequest{
-		Table:        &Table{Name: "Users"},
-		Index:        &Index{Name: "IX_Users_Email", Columns: []string{"Email"}},
-		TargetDBType: "postgres",
-		ProposedDDL:  "CREATE INDEX ix_users_email ON users (email)",
-	}) + strings.Repeat("\ncontext", 100)
-	if got := anthropicSystemPromptFor(auditPrompt); !strings.Contains(got, "OK or ISSUES") || strings.Contains(got, "raw SQL") {
-		t.Fatalf("audit prompt system = %q, want audit guidance", got)
 	}
 
 	legacyDDLPrompt := "Please generate CREATE TABLE SQL.\n" + strings.Repeat("details\n", 100)

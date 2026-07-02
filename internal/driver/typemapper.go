@@ -158,20 +158,15 @@ type VerifyFinalizationDDLRequest struct {
 	ProposedDDL     string
 }
 
-// VerifyResult is the auditor's verdict.
+// VerifyResult is the reviewer verdict.
 //
-// OK=true means the proposed DDL preserves all six audit criteria
-// (max_length / precision / scale, nullability, identity, timezone-
-// awareness, default-class, type semantics) for every column.
+// OK=true means the proposed DDL preserves the review criteria for the object
+// under review: column criteria for CREATE TABLE DDL, or side-object shape
+// criteria for CREATE INDEX / FOREIGN KEY / CHECK finalization DDL.
 //
 // OK=false means at least one criterion failed; Issues carries one human-
-// readable line per failure ("column_name: criterion — expected vs
-// emitted"). The writer feeds Issues back into the next generation
-// attempt as PreviousAttempt.Error.
-//
-// On a malformed AI response that's neither parseable as OK nor as ISSUES,
-// the parser returns OK=false with a single synthetic issue containing the
-// raw response (truncated). Fail-closed by design.
+// readable line per failure. Parse failures are surfaced as OK=false with a
+// synthetic issue rather than as silent passes. Fail-closed by design.
 type VerifyResult struct {
 	OK     bool
 	Issues []string

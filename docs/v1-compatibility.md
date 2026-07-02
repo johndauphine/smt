@@ -65,10 +65,11 @@ fields are part of the v1 reader contract for downstream tooling:
 1.x releases may add new manifest fields. Downstream readers should ignore
 unknown fields and treat missing optional arrays as empty.
 
-For `ai_review_warnings`, `method` is part of the v1 review contract. Table DDL
-review records `deterministic_comparator`; side-object review for indexes,
-foreign keys, and check constraints records `free_text_auditor`. Replacing the
-side-object free-text auditor with a structured comparator is tracked as [#177].
+For `ai_review_warnings`, `method` is part of the v1 review contract. Current
+table DDL review and side-object review for indexes, foreign keys, and check
+constraints record `deterministic_comparator`. Downstream readers should still
+tolerate historical v1.0 manifests that recorded side-object findings as
+`free_text_auditor`.
 
 ## RendererVersion
 
@@ -82,5 +83,3 @@ stale. Regenerate `schema.sql` or `migration.sql`, inspect the new manifest, and
 compare the old and new DDL before applying. A renderer bump does not by itself
 require re-baselining the source snapshot; re-run `smt snapshot` when the live
 source schema is the new intended baseline.
-
-[#177]: https://github.com/johndauphine/smt/issues/177
