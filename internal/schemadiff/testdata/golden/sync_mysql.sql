@@ -3,7 +3,7 @@ CREATE TABLE `tgt`.`audit_log` (
     `id` BIGINT AUTO_INCREMENT NOT NULL,
     `actor` VARCHAR(100) NOT NULL,
     `action` VARCHAR(30) NOT NULL DEFAULT 'created',
-    `at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    `at` DATETIME(3) NOT NULL DEFAULT (UTC_TIMESTAMP(3)),
     `details` LONGTEXT,
     CONSTRAINT `pk_audit_log` PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -18,7 +18,7 @@ CREATE UNIQUE INDEX `uq_audit_actor_at` ON `tgt`.`audit_log` (`actor`, `at`);
 
 -- [blocking] create check constraint ck_audit_action
 -- note: check validation can scan existing rows
-ALTER TABLE `tgt`.`audit_log` ADD CONSTRAINT `ck_audit_action` CHECK (action IN ('created','updated','deleted'));
+ALTER TABLE `tgt`.`audit_log` ADD CONSTRAINT `ck_audit_action` CHECK (`action` IN ('created', 'updated', 'deleted'));
 
 -- [blocking] create foreign key fk_audit_actor
 -- note: foreign key validation can scan existing rows
@@ -57,7 +57,7 @@ ALTER TABLE `tgt`.`users` ADD CONSTRAINT `fk_users_org` FOREIGN KEY (`org_id`) R
 
 -- [blocking] create check constraint ck_users_username
 -- note: check validation can scan existing rows
-ALTER TABLE `tgt`.`users` ADD CONSTRAINT `ck_users_username` CHECK (username <> '');
+ALTER TABLE `tgt`.`users` ADD CONSTRAINT `ck_users_username` CHECK (`username` <> '');
 
 -- [data-loss-risk] drop table line_items
 -- note: drops the table and its data

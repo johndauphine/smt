@@ -20,8 +20,9 @@ func TestCheckConstraint_IdentifierStartingWithCheck(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateCheckConstraintDDL %s: %v", target, err)
 		}
-		if !strings.Contains(got, "checked_in > 0") {
-			t.Fatalf("%s check DDL mangled the identifier: %q", target, got)
+		want := map[string]string{"mssql": "[checked_in] > 0", "mysql": "`checked_in` > 0"}[target]
+		if !strings.Contains(got, want) {
+			t.Fatalf("%s check DDL mangled the identifier (want %q): %q", target, want, got)
 		}
 	}
 }

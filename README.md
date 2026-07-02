@@ -101,11 +101,10 @@ notifications:
 
 The same secrets file is read by both the CLI and the TUI. File mode 0600 is enforced.
 
-In v1, table DDL review uses an AI parser plus SMT's deterministic Go
-comparator. Index, foreign-key, and check-constraint review remains a
-best-effort free-text auditor. Warnings in logs and `manifest.json` identify
-which method produced each finding. Structured side-object comparison is tracked
-as a 1.x enhancement in [#177](https://github.com/johndauphine/smt/issues/177).
+Table DDL review uses an AI parser plus SMT's deterministic Go comparator.
+Index, foreign-key, and check-constraint review uses SMT's deterministic
+side-object parser/comparator over the generated DDL. Warnings in logs and
+`manifest.json` identify which method produced each finding.
 
 Use the `ai_review.enabled` and `ai_review.model` keys for optional AI review.
 The 0.x aliases `migration.ai_verify` and `migration.ai_verifier_model` are

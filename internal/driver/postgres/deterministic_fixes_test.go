@@ -91,10 +91,10 @@ func TestCreateCheckConstraint_EnsuresOuterParens(t *testing.T) {
 		def  string
 		want string
 	}{
-		{"is_active", `CHECK (is_active)`},
-		{"amount > 0", `CHECK (amount > 0)`},
-		{"(amount > 0)", `CHECK (amount > 0)`},
-		{"(a > 0) AND (b > 0)", `CHECK ((a > 0) AND (b > 0))`},
+		{"is_active", `CHECK ("is_active")`},
+		{"amount > 0", `CHECK ("amount" > 0)`},
+		{"(amount > 0)", `CHECK ("amount" > 0)`},
+		{"(a > 0) AND (b > 0)", `CHECK (("a" > 0) AND ("b" > 0))`},
 	}
 	for _, tc := range cases {
 		ddl, err := RenderCreateCheckConstraintDDL(tbl, &driver.CheckConstraint{Name: "ck_x", Definition: tc.def}, "public")

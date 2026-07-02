@@ -8,6 +8,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Expression IR for DEFAULT / CHECK translation** ([#175]) — new
+  `internal/expr` package: a source default or CHECK predicate is parsed once
+  into a small dialect-neutral tree (`ParseDefault` / `ParseCheck`), rendered
+  to any of the three targets from that one parse (`Render`), and compared
+  structurally (`Equal`). All three targets — not just PostgreSQL — now share
+  one translation with equal coverage (now/UTC-now/uuid families,
+  `CONVERT(date, …)`/`::date` casts, `ISNULL ≡ COALESCE ≡ IFNULL`,
+  `CONCAT ≡ ||`, boolean 0/1 rewrites, `IN` lists, LIKE-bracket-class and
+  regex forms, MySQL fsp-matched now-defaults) and one **fail-closed
+  invariant**: an unparseable or unknown-function expression is rejected on
+  every target (`expr.RejectUnknownFunctions`, lifted from the pg-only gate)
+  instead of silently passed through — previously a cross-dialect
+  `DATEADD(...)` default reached MySQL targets verbatim. The string-literal
+  corruption hole is closed: function-name text inside a string literal
+  round-trips unchanged (the old pipeline's blind `ReplaceAll` corrupted it).
+  The default classifier (`defaultExpressionClass`) and
+  `DefaultExpressionsEquivalent` now delegate to `expr.Equal`/`ClassLabel`
+  with the historical class vocabulary preserved. `RendererVersion` 4 → 5:
+  output normalizes spacing/quoting, MSSQL/MySQL boolean CHECK comparisons
+  render as `[IsActive] = 1`, UTC now-defaults on MySQL render as
+  `(UTC_TIMESTAMP(n))` instead of losing UTC-ness to `CURRENT_TIMESTAMP(n)`,
+  pg's `= ANY (ARRAY[...])` checks normalize to portable `IN (...)`, and
+  lexical `::casts` are stripped. Forms outside the IR grammar (CASE,
+  subqueries, vendor functions) keep their legacy per-target pipeline,
+  now uniformly gated.
 - **Snapshot-mode sync** ([#167]) — `smt sync --against snapshot` diffs the
   current source schema against the latest stored snapshot (the offline
   question the pre-#143 sync answered, now an explicit mode with scope
@@ -22,6 +47,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Side-object AI review uses structured comparison** ([#177]) — index,
+  foreign-key, and check-constraint finalization review no longer asks a model
+  to judge free text. SMT now parses its generated side-object DDL and compares
+  it deterministically against the source metadata: index uniqueness and
+  ordered column/include/filter shape, FK local/reference pairs and
+  referential actions, and CHECK predicates through the expression IR when
+  feasible. Side-object findings in logs and `manifest.json` now use the
+  `deterministic_comparator` method label; readers should still tolerate older
+  v1 manifests that contain `free_text_auditor`.
 - Documented the published v1.0.0 release status, artifact list, CI status,
   release-blocker closure, and validation artifacts.
 - Added a CI CRM fixture matrix that runs every supported source-to-target
@@ -63,8 +97,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **AI-review finding source is explicit** ([#157]). Table DDL findings are
   labeled as deterministic-comparator results; index, foreign-key, and
   check-constraint findings are labeled as free-text-auditor results in logs and
-  `manifest.json`. Structured side-object comparison is tracked as a 1.x
-  enhancement in [#177].
+  `manifest.json`. Structured side-object comparison later replaces that 1.0
+  side-object method in [#177].
 - **v1 CLI surface documented** ([#155]). `docs/cli.md` enumerates commands,
   flags, stability labels, and exit codes; the only v1 experimental flag is
   marked in help text.
@@ -254,6 +288,7 @@ history since v0.9.0:
 [0.12.1]: https://github.com/johndauphine/smt/releases/tag/v0.12.1
 [0.12.0]: https://github.com/johndauphine/smt/releases/tag/v0.12.0
 [0.11.0]: https://github.com/johndauphine/smt/releases/tag/v0.11.0
+[#175]: https://github.com/johndauphine/smt/issues/175
 [#167]: https://github.com/johndauphine/smt/issues/167
 [#141]: https://github.com/johndauphine/smt/issues/141
 [#160]: https://github.com/johndauphine/smt/issues/160

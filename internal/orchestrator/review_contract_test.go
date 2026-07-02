@@ -172,7 +172,7 @@ func TestReview_WarnModeRecordsWarningsForManifest(t *testing.T) {
 	}
 }
 
-func TestReview_FinalizationWarnModeRecordsFreeTextAuditor(t *testing.T) {
+func TestReview_FinalizationWarnModeRecordsDeterministicComparator(t *testing.T) {
 	f := &fakeReviewer{verdict: &driver.VerifyResult{OK: false, Issues: []string{"predicate may differ"}}}
 	r := reviewerFor(f, true, "warn")
 	err := r.reviewFinalization(
@@ -191,8 +191,8 @@ func TestReview_FinalizationWarnModeRecordsFreeTextAuditor(t *testing.T) {
 	if len(warnings) != 1 {
 		t.Fatalf("recorded warnings = %d, want 1", len(warnings))
 	}
-	if warnings[0].Method != reviewMethodFreeTextAuditor {
-		t.Fatalf("warning method = %q, want %q", warnings[0].Method, reviewMethodFreeTextAuditor)
+	if warnings[0].Method != reviewMethodDeterministicComparator {
+		t.Fatalf("warning method = %q, want %q", warnings[0].Method, reviewMethodDeterministicComparator)
 	}
 	if !strings.Contains(warnings[0].Label, string(driver.DDLTypeCheckConstraint)) {
 		t.Fatalf("warning label = %q, want check-constraint label", warnings[0].Label)

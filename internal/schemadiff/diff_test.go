@@ -247,7 +247,7 @@ func TestRenderDeterministic_AddedTableIncludesSideObjects(t *testing.T) {
 		`CREATE TABLE "public"."auditlog"`,
 		`CREATE INDEX "ix_auditlog_userid" ON "public"."auditlog" ("userid")`,
 		`ALTER TABLE "public"."auditlog" ADD CONSTRAINT "fk_auditlog_users" FOREIGN KEY ("userid") REFERENCES "public"."users" ("id")`,
-		`ALTER TABLE "public"."auditlog" ADD CONSTRAINT "ck_auditlog_action" CHECK ("action" IN ('create','update'))`,
+		`ALTER TABLE "public"."auditlog" ADD CONSTRAINT "ck_auditlog_action" CHECK ("action" IN ('create', 'update'))`,
 	} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("expected SQL to contain %q, got:\n%s", want, sql)

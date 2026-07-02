@@ -4,7 +4,6 @@ import "sync"
 
 const (
 	reviewMethodDeterministicComparator = "deterministic_comparator"
-	reviewMethodFreeTextAuditor         = "free_text_auditor"
 )
 
 type aiReviewWarning struct {
