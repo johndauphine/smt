@@ -76,6 +76,19 @@ make test-crm-acceptance
 
 `make test-crm-ci` runs the same sequence from a clean Docker environment.
 
+Optional live AI review for the CRM matrix:
+
+```bash
+SMT_E2E_CRM=1 \
+SMT_E2E_CRM_AI=1 \
+SMT_E2E_CRM_AI_PROVIDER=anthropic-sonnet5 \
+go test -timeout 45m -count=1 -v -run TestCRM_DeterministicAcceptanceMatrix ./internal/orchestrator/
+```
+
+Use `SMT_E2E_CRM_CASE=mssql-to-mssql` to run one representative path and
+`SMT_E2E_CRM_AI_MODE=fail` to exercise fail-mode review without forcing known
+semantic-warning cases to block the entire matrix.
+
 The Go acceptance harness verifies table presence plus columns, max length,
 precision/scale, nullability, identity, timezone class, default-expression
 class, primary keys, secondary indexes, foreign keys, and check-constraint
@@ -107,6 +120,11 @@ ai:
     anthropic:
       api_key: "..."
       model: claude-sonnet-4-6
+    anthropic-sonnet5:
+      provider: anthropic
+      api_key: "..."
+      model: claude-sonnet-5
+      max_tokens: 16384
 ```
 
 Command:

@@ -115,6 +115,32 @@ func TestVerifyTableDDL_BadJSONIsRetryable(t *testing.T) {
 	}
 }
 
+func TestVerifyTableDDL_RetriesMalformedParserJSONBeforeVerdict(t *testing.T) {
+	mapper, calls := mockParseServerSequence(t,
+		`{"columns": [{"name": "id", "data_type": "integer"}`,
+		`{"columns": [{"name": "id", "data_type": "integer", "is_nullable": false}]}`,
+	)
+
+	req := VerifyTableDDLRequest{
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		SourceTable: &Table{
+			Schema: "dbo", Name: "Companies",
+			Columns: []Column{{Name: "id", DataType: "int", IsNullable: false}},
+		},
+		ProposedDDL: "CREATE TABLE x (id integer NOT NULL);",
+	}
+	verdict, err := mapper.VerifyTableDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyTableDDL: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("parser calls = %d, want 2", got)
+	}
+	if !verdict.OK {
+		t.Fatalf("expected retry recovery to produce OK verdict, got issues: %v", verdict.Issues)
+	}
+}
+
 // TestVerifyTableDDL_RequiresTable + TestVerifyTableDDL_RequiresProposedDDL
 // pin the input-validation contract.
 func TestVerifyTableDDL_RequiresTable(t *testing.T) {

@@ -410,6 +410,11 @@ func containsCI(haystack []string, needle string) bool {
 // records the current renderer version and a plan fingerprint (#64).
 func assertManifestWritten(t *testing.T, dataDir string) {
 	t.Helper()
+	assertManifestWrittenWithAIReview(t, dataDir, false)
+}
+
+func assertManifestWrittenWithAIReview(t *testing.T, dataDir string, wantAIReview bool) {
+	t.Helper()
 	var found string
 	_ = filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && d.Name() == "manifest.json" {
@@ -434,8 +439,8 @@ func assertManifestWritten(t *testing.T, dataDir string) {
 	if !strings.HasPrefix(m.PlanFingerprint, "sha256:") || !strings.HasPrefix(m.SourceFingerprint, "sha256:") {
 		t.Errorf("manifest fingerprints malformed: plan=%q source=%q", m.PlanFingerprint, m.SourceFingerprint)
 	}
-	if m.AIReviewEnabled {
-		t.Error("manifest reports ai_review_enabled=true in the no-AI acceptance run")
+	if m.AIReviewEnabled != wantAIReview {
+		t.Errorf("manifest ai_review_enabled=%v, want %v", m.AIReviewEnabled, wantAIReview)
 	}
 }
 

@@ -32,6 +32,9 @@ ai_review:
   enabled: false                       # optional review of deterministic DDL
   mode: warn                           # warn | fail
   # model: strong-reviewer             # provider entry in ~/.secrets/smt-config.yaml
+  # For Claude Sonnet 5, define an Anthropic provider entry such as
+  # anthropic-sonnet5 with model: claude-sonnet-5 and optional max_tokens: 16384,
+  # then set model: anthropic-sonnet5 here.
   diagnose_failures: false             # advise the user on extract/render failures
                                        # (cause + suggestions only — never edits or
                                        #  retries DDL); uses the model above

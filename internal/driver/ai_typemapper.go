@@ -460,6 +460,7 @@ type anthropicRequest struct {
 	Model     string             `json:"model"`
 	MaxTokens int                `json:"max_tokens"`
 	System    string             `json:"system,omitempty"`
+	Thinking  *anthropicThinking `json:"thinking,omitempty"`
 	Messages  []anthropicMessage `json:"messages"`
 }
 
@@ -468,15 +469,31 @@ type anthropicMessage struct {
 	Content string `json:"content"`
 }
 
+type anthropicThinking struct {
+	Type string `json:"type"`
+}
+
 type anthropicResponse struct {
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-	Error *struct {
+	Content    []anthropicContentBlock `json:"content"`
+	StopReason string                  `json:"stop_reason,omitempty"`
+	Error      *struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+type anthropicContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+var errAnthropicMaxTokens = errors.New("Anthropic response stopped at max_tokens")
+
+func anthropicStopReasonError(stopReason string) error {
+	if strings.EqualFold(strings.TrimSpace(stopReason), "max_tokens") {
+		return fmt.Errorf("%w; response may be truncated, increase max_tokens or retry with a smaller prompt", errAnthropicMaxTokens)
+	}
+	return nil
 }
 
 // sanitizeErrorResponse truncates and sanitizes API error response bodies.
@@ -689,22 +706,7 @@ func calculateBackoff(attempt int) time.Duration {
 }
 
 func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (string, error) {
-	model := m.provider.GetEffectiveModel(m.providerType)
-
-	maxTokens := 1024
-	if len(prompt) > 500 {
-		maxTokens = 4096
-	}
-	systemPrompt := anthropicSystemPromptFor(prompt)
-
-	reqBody := anthropicRequest{
-		Model:     model,
-		MaxTokens: maxTokens,
-		System:    systemPrompt,
-		Messages: []anthropicMessage{
-			{Role: "user", Content: prompt},
-		},
-	}
+	reqBody := m.buildAnthropicRequest(prompt)
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -738,28 +740,102 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 	if anthropicResp.Error != nil {
 		return "", fmt.Errorf("API error: %s", anthropicResp.Error.Message)
 	}
+	if err := anthropicStopReasonError(anthropicResp.StopReason); err != nil {
+		return "", err
+	}
 
-	if len(anthropicResp.Content) == 0 || anthropicResp.Content[0].Text == "" {
+	text := anthropicResponseText(anthropicResp.Content)
+	if text == "" {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return anthropicResp.Content[0].Text, nil
+	return text, nil
+}
+
+const (
+	anthropicTypeMappingMaxTokens   = 1024
+	anthropicGeneralPromptMaxTokens = 4096
+	anthropicJSONPromptMaxTokens    = 16384
+)
+
+func (m *AITypeMapper) buildAnthropicRequest(prompt string) anthropicRequest {
+	model := m.provider.GetEffectiveModel(m.providerType)
+
+	return anthropicRequest{
+		Model:     model,
+		MaxTokens: m.anthropicMaxTokens(prompt),
+		System:    anthropicSystemPromptFor(prompt),
+		Thinking:  anthropicThinkingForPrompt(model, prompt),
+		Messages: []anthropicMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
+}
+
+func (m *AITypeMapper) anthropicMaxTokens(prompt string) int {
+	if m.provider != nil && m.provider.MaxTokens > 0 {
+		return m.provider.MaxTokens
+	}
+	if anthropicPromptWantsJSON(prompt) {
+		return anthropicJSONPromptMaxTokens
+	}
+	if len(prompt) <= 500 {
+		return anthropicTypeMappingMaxTokens
+	}
+	return anthropicGeneralPromptMaxTokens
+}
+
+func anthropicResponseText(blocks []anthropicContentBlock) string {
+	var sb strings.Builder
+	for _, block := range blocks {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			sb.WriteString(block.Text)
+		}
+	}
+	return sb.String()
 }
 
 func anthropicSystemPromptFor(prompt string) string {
 	if len(prompt) <= 500 {
 		return ""
 	}
-	upperPrompt := strings.ToUpper(prompt[:min(len(prompt), 1200)])
-	switch {
-	case strings.Contains(upperPrompt, "SQL DDL PARSER") ||
-		strings.Contains(upperPrompt, "=== OUTPUT SCHEMA ==="):
+	if anthropicPromptLooksLikeVerifyParser(prompt) {
 		return "You are a SQL DDL parser. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
-	case strings.Contains(upperPrompt, "RETURN ONLY VALID JSON"):
-		return "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
-	default:
-		return ""
 	}
+	if anthropicPromptWantsJSON(prompt) {
+		return "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
+	}
+	return ""
+}
+
+func anthropicThinkingForPrompt(model, prompt string) *anthropicThinking {
+	if !anthropicModelUsesAdaptiveThinkingByDefault(model) || !anthropicPromptWantsJSON(prompt) {
+		return nil
+	}
+	return &anthropicThinking{Type: "disabled"}
+}
+
+func anthropicModelUsesAdaptiveThinkingByDefault(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(normalized, "sonnet-5")
+}
+
+func anthropicPromptWantsJSON(prompt string) bool {
+	upperPrompt := anthropicPromptPrefix(prompt)
+	return anthropicPromptLooksLikeVerifyParser(prompt) ||
+		strings.Contains(upperPrompt, "RETURN ONLY VALID JSON") ||
+		strings.Contains(upperPrompt, "OUTPUT ONLY THE JSON") ||
+		strings.Contains(upperPrompt, "SINGLE JSON OBJECT")
+}
+
+func anthropicPromptLooksLikeVerifyParser(prompt string) bool {
+	upperPrompt := anthropicPromptPrefix(prompt)
+	return strings.Contains(upperPrompt, "SQL DDL PARSER") ||
+		strings.Contains(upperPrompt, "=== OUTPUT SCHEMA ===")
+}
+
+func anthropicPromptPrefix(prompt string) string {
+	return strings.ToUpper(prompt[:min(len(prompt), 1200)])
 }
 
 // OpenAI API types

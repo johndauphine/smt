@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -94,6 +95,67 @@ func TestParseTargetDDLToColumns_MalformedJSON(t *testing.T) {
 	}
 }
 
+func TestParseTargetDDLToColumns_RetriesMalformedJSON(t *testing.T) {
+	mapper, calls := mockParseServerSequence(t,
+		`{"columns": [{"name": "id", "data_type": "integer"}`,
+		`{"columns": [{"name": "id", "data_type": "integer", "is_nullable": false}]}`,
+	)
+	cols, err := mapper.parseTargetDDLToColumns(context.Background(), "CREATE TABLE x (id int NOT NULL);", "postgres")
+	if err != nil {
+		t.Fatalf("parseTargetDDLToColumns: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("parser calls = %d, want 2", got)
+	}
+	if len(cols) != 1 || cols[0].Name != "id" {
+		t.Fatalf("expected recovered id column, got %+v", cols)
+	}
+}
+
+func TestParseTargetDDLToColumns_RetriesAnthropicMaxTokensStop(t *testing.T) {
+	provider := testProvider("test-key")
+	provider.Model = "claude-sonnet-5"
+	mapper := testMapperWithTempCache(t, "anthropic", provider)
+	calls := &atomic.Int32{}
+	mapper.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		idx := calls.Add(1)
+		resp := anthropicResponse{
+			Content: []anthropicContentBlock{
+				{Type: "text", Text: `{"columns":[`},
+			},
+			StopReason: "max_tokens",
+		}
+		if idx > 1 {
+			resp = anthropicResponse{
+				Content: []anthropicContentBlock{
+					{Type: "text", Text: `{"columns": [{"name": "id", "data_type": "integer", "is_nullable": false}]}`},
+				},
+				StopReason: "end_turn",
+			}
+		}
+		body, err := json.Marshal(resp)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+		}, nil
+	})}
+
+	cols, err := mapper.parseTargetDDLToColumns(context.Background(), "CREATE TABLE x (id int NOT NULL);", "postgres")
+	if err != nil {
+		t.Fatalf("parseTargetDDLToColumns: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("parser calls = %d, want 2", got)
+	}
+	if len(cols) != 1 || cols[0].Name != "id" {
+		t.Fatalf("expected recovered id column, got %+v", cols)
+	}
+}
+
 // TestParseTargetDDLToColumns_EmptyColumns is also a retryable failure —
 // either the AI misread the DDL or the DDL is empty. Either way the writer
 // should retry.
@@ -168,9 +230,21 @@ func TestBuildVerifyParsePrompt_PinsExtractionRules(t *testing.T) {
 // an AITypeMapper to it. Mirrors verifyMockServer in ai_verify_test.go.
 func mockParseServer(t *testing.T, content string) *AITypeMapper {
 	t.Helper()
+	mapper, _ := mockParseServerSequence(t, content)
+	return mapper
+}
+
+func mockParseServerSequence(t *testing.T, contents ...string) (*AITypeMapper, *atomic.Int32) {
+	t.Helper()
+	if len(contents) == 0 {
+		t.Fatal("mockParseServerSequence requires at least one response")
+	}
 	calls := &atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
+		idx := int(calls.Add(1)) - 1
+		if idx >= len(contents) {
+			idx = len(contents) - 1
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(openAIResponse{
 			Choices: []struct {
@@ -184,7 +258,7 @@ func mockParseServer(t *testing.T, content string) *AITypeMapper {
 					Message: struct {
 						Content          string `json:"content"`
 						ReasoningContent string `json:"reasoning_content"`
-					}{Content: content},
+					}{Content: contents[idx]},
 					FinishReason: "stop",
 				},
 			},
@@ -196,5 +270,11 @@ func mockParseServer(t *testing.T, content string) *AITypeMapper {
 		APIKey: "", Model: "test-model", BaseURL: server.URL,
 	})
 	mapper.client = server.Client()
-	return mapper
+	return mapper, calls
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
