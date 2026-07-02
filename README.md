@@ -89,6 +89,11 @@ ai:
     anthropic:
       api_key: "your-anthropic-api-key"
       model: claude-sonnet-4-6
+    anthropic-sonnet5:
+      provider: anthropic
+      api_key: "your-anthropic-api-key"
+      model: claude-sonnet-5
+      max_tokens: 16384
     google:
       api_key: "your-google-api-key"
       model: gemini-2.0-flash
@@ -107,6 +112,11 @@ side-object parser/comparator over the generated DDL. Warnings in logs and
 `manifest.json` identify which method produced each finding.
 
 Use the `ai_review.enabled` and `ai_review.model` keys for optional AI review.
+For Claude Sonnet 5, define a named Anthropic provider such as
+`anthropic-sonnet5` and set `ai_review.model: anthropic-sonnet5`. SMT disables
+Sonnet 5 thinking on strict JSON parser calls and gives Anthropic JSON parser
+prompts a `16384` token output budget by default; `max_tokens` in the secrets
+provider can raise that further for unusually large DDL.
 The 0.x aliases `migration.ai_verify` and `migration.ai_verifier_model` are
 removed from the v1 config contract and fail with rename guidance.
 

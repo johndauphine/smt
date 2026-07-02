@@ -95,7 +95,7 @@ type Provider struct {
 	BaseURL          string   `yaml:"base_url,omitempty"`          // Required for local providers, optional for cloud
 	Model            string   `yaml:"model,omitempty"`             // Optional, uses smart defaults
 	ContextWindow    int      `yaml:"context_window,omitempty"`    // Optional, context window size in tokens (for Ollama/local providers)
-	MaxTokens        int      `yaml:"max_tokens,omitempty"`        // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
+	MaxTokens        int      `yaml:"max_tokens,omitempty"`        // Optional, max output tokens (default: 16000 for local, 4000 for cloud; Anthropic JSON parser prompts use 16384)
 	TimeoutSeconds   int      `yaml:"timeout_seconds,omitempty"`   // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
 	ModelTemperature *float64 `yaml:"model_temperature,omitempty"` // Optional sampling temperature for the model. Defaults to 0 (deterministic). Some providers reject 0 for certain models — e.g. OpenAI reasoning models (o-series, gpt-5.x) require model_temperature: 1.
 }
@@ -517,6 +517,14 @@ ai:
     anthropic:
       api_key: ""  # Get from https://console.anthropic.com/
       model: "claude-sonnet-4-6"  # optional
+
+    # For Claude Sonnet 5 AI review, use a named provider entry and point
+    # ai_review.model at it in config.yaml.
+    # anthropic-sonnet5:
+    #   provider: anthropic
+    #   api_key: ""
+    #   model: "claude-sonnet-5"
+    #   max_tokens: 16384  # optional; default for Anthropic JSON parser prompts
 
     openai:
       api_key: ""  # Get from https://platform.openai.com/

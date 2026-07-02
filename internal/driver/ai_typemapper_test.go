@@ -30,10 +30,16 @@ func testMapperWithTempCache(t *testing.T, providerName string, provider *secret
 	t.Helper()
 	tmpDir := t.TempDir()
 	cacheFile := filepath.Join(tmpDir, "type-cache.json")
+	providerType := provider.EffectiveType(providerName)
+	if normalized := NormalizeAIProvider(providerType); normalized != "" {
+		providerType = normalized
+	}
 
 	mapper := &AITypeMapper{
 		providerName:   providerName,
+		providerType:   providerType,
 		provider:       provider,
+		client:         http.DefaultClient,
 		cache:          NewTypeMappingCache(),
 		cacheFile:      cacheFile,
 		timeoutSeconds: 30,
@@ -125,6 +131,52 @@ func TestAnthropicSystemPromptForParsePrompts(t *testing.T) {
 	legacyDDLPrompt := "Please generate CREATE TABLE SQL.\n" + strings.Repeat("details\n", 100)
 	if got := anthropicSystemPromptFor(legacyDDLPrompt); got != "" {
 		t.Fatalf("legacy DDL-looking prompt system = %q, want no raw-SQL generation guidance", got)
+	}
+}
+
+func TestAnthropicRequestForSonnet5ParserPrompt(t *testing.T) {
+	provider := testProvider("test-key")
+	provider.Model = "claude-sonnet-5"
+	mapper := testMapperWithTempCache(t, "anthropic", provider)
+
+	req := mapper.buildAnthropicRequest(buildVerifyParsePrompt("CREATE TABLE t (id INT)", "mssql"))
+
+	if req.MaxTokens != anthropicJSONPromptMaxTokens {
+		t.Fatalf("parser max_tokens = %d, want %d", req.MaxTokens, anthropicJSONPromptMaxTokens)
+	}
+	if req.Thinking == nil || req.Thinking.Type != "disabled" {
+		t.Fatalf("parser thinking = %#v, want disabled", req.Thinking)
+	}
+	if !strings.Contains(req.System, "valid JSON") {
+		t.Fatalf("parser system prompt = %q, want JSON guidance", req.System)
+	}
+}
+
+func TestAnthropicRequestUsesConfiguredMaxTokens(t *testing.T) {
+	provider := testProvider("test-key")
+	provider.Model = "claude-sonnet-5"
+	provider.MaxTokens = 24000
+	mapper := testMapperWithTempCache(t, "anthropic", provider)
+
+	req := mapper.buildAnthropicRequest(buildVerifyParsePrompt("CREATE TABLE t (id INT)", "mssql"))
+
+	if req.MaxTokens != 24000 {
+		t.Fatalf("parser max_tokens = %d, want configured 24000", req.MaxTokens)
+	}
+}
+
+func TestAnthropicRequestKeepsTypeMappingSmall(t *testing.T) {
+	provider := testProvider("test-key")
+	provider.Model = "claude-sonnet-5"
+	mapper := testMapperWithTempCache(t, "anthropic", provider)
+
+	req := mapper.buildAnthropicRequest("Map int to postgres.")
+
+	if req.MaxTokens != anthropicTypeMappingMaxTokens {
+		t.Fatalf("type mapping max_tokens = %d, want %d", req.MaxTokens, anthropicTypeMappingMaxTokens)
+	}
+	if req.Thinking != nil {
+		t.Fatalf("type mapping thinking = %#v, want nil", req.Thinking)
 	}
 }
 
@@ -372,10 +424,7 @@ func TestAITypeMapper_AnthropicAPI(t *testing.T) {
 		}
 
 		response := anthropicResponse{
-			Content: []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			}{
+			Content: []anthropicContentBlock{
 				{Type: "text", Text: "bytea"},
 			},
 		}
@@ -385,6 +434,46 @@ func TestAITypeMapper_AnthropicAPI(t *testing.T) {
 
 	// This test validates the response parsing logic
 	// In a real test, we'd inject the mock server URL
+}
+
+func TestAnthropicResponseText(t *testing.T) {
+	tests := []struct {
+		name   string
+		blocks []anthropicContentBlock
+		want   string
+	}{
+		{
+			name: "first block text",
+			blocks: []anthropicContentBlock{
+				{Type: "text", Text: `{"ok": true}`},
+			},
+			want: `{"ok": true}`,
+		},
+		{
+			name: "skips non-text or empty leading block",
+			blocks: []anthropicContentBlock{
+				{Type: "thinking"},
+				{Type: "text", Text: `{"columns": []}`},
+			},
+			want: `{"columns": []}`,
+		},
+		{
+			name: "all empty",
+			blocks: []anthropicContentBlock{
+				{Type: "thinking"},
+				{Type: "text", Text: "  "},
+			},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := anthropicResponseText(tt.blocks); got != tt.want {
+				t.Fatalf("anthropicResponseText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestAITypeMapper_OpenAIAPI(t *testing.T) {

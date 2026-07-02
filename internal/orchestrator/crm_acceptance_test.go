@@ -42,8 +42,11 @@ func TestCRM_DeterministicAcceptanceMatrix(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live CRM acceptance under -short")
 	}
-	// A host secrets file must not influence the no-AI CRM release gate.
-	t.Setenv("SMT_SECRETS_FILE", os.DevNull+".missing")
+	aiReview := os.Getenv("SMT_E2E_CRM_AI") == "1"
+	if !aiReview {
+		// A host secrets file must not influence the no-AI CRM release gate.
+		t.Setenv("SMT_SECRETS_FILE", os.DevNull+".missing")
+	}
 
 	cases := crmAcceptanceCases(t)
 	matrix := crmMatrixReport{}
@@ -67,7 +70,7 @@ func TestCRM_DeterministicAcceptanceMatrix(t *testing.T) {
 					Mode:              driver.SchemaGenerationDeterministic,
 					UnknownTypePolicy: "fail",
 				},
-				AIReview: config.AIReviewConfig{Enabled: boolPtr(false)},
+				AIReview: crmAIReviewConfig(aiReview),
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -84,7 +87,7 @@ func TestCRM_DeterministicAcceptanceMatrix(t *testing.T) {
 			if err := orch.Run(ctx); err != nil {
 				t.Fatalf("orchestrator Run (CRM %s): %v", tc.Name, err)
 			}
-			assertManifestWritten(t, dataDir)
+			assertManifestWrittenWithAIReview(t, dataDir, aiReview)
 
 			srcTables := extractAll(t, ctx, &cfg.Source, cfg.Source.Schema)
 			tgtTables := extractAll(t, ctx, sourceForTarget(cfg), cfg.Target.Schema)
@@ -108,10 +111,14 @@ func crmAcceptanceCases(t *testing.T) []crmAcceptanceCase {
 	t.Helper()
 
 	dialects := []string{"mssql", "postgres", "mysql"}
+	filter := strings.TrimSpace(os.Getenv("SMT_E2E_CRM_CASE"))
 	cases := make([]crmAcceptanceCase, 0, len(dialects)*len(dialects))
 	for _, sourceType := range dialects {
 		for _, targetType := range dialects {
 			name := sourceType + "-to-" + targetType
+			if filter != "" && name != filter {
+				continue
+			}
 			cases = append(cases, crmAcceptanceCase{
 				Name:       name,
 				Source:     crmSourceConfig(t, sourceType),
@@ -120,6 +127,9 @@ func crmAcceptanceCases(t *testing.T) []crmAcceptanceCase {
 				TargetType: targetType,
 			})
 		}
+	}
+	if filter != "" && len(cases) == 0 {
+		t.Fatalf("SMT_E2E_CRM_CASE=%q did not match any CRM acceptance case", filter)
 	}
 	return cases
 }
@@ -137,6 +147,7 @@ func crmSourceConfig(t *testing.T, dialect string) config.SourceConfig {
 			Password:        env("CRM_MSSQL_PASS", "TestPass2024"),
 			Schema:          env("CRM_MSSQL_SCHEMA", "dbo"),
 			TrustServerCert: true,
+			Encrypt:         boolPtr(false),
 		}
 	case "postgres":
 		return config.SourceConfig{
@@ -179,6 +190,7 @@ func crmTargetConfig(t *testing.T, dialect, caseName string) config.TargetConfig
 			Password:        env("CRM_MSSQL_PASS", "TestPass2024"),
 			Schema:          schema,
 			TrustServerCert: true,
+			Encrypt:         boolPtr(false),
 		}
 	case "postgres":
 		return config.TargetConfig{
@@ -210,6 +222,17 @@ func crmTargetConfig(t *testing.T, dialect, caseName string) config.TargetConfig
 func crmTargetSchema(caseName string) string {
 	envName := "CRM_" + strings.ToUpper(strings.ReplaceAll(caseName, "-", "_")) + "_TARGET_SCHEMA"
 	return env(envName, "crm_accept_"+strings.ReplaceAll(caseName, "-", "_"))
+}
+
+func crmAIReviewConfig(enabled bool) config.AIReviewConfig {
+	if !enabled {
+		return config.AIReviewConfig{Enabled: boolPtr(false)}
+	}
+	return config.AIReviewConfig{
+		Enabled: boolPtr(true),
+		Mode:    env("SMT_E2E_CRM_AI_MODE", "warn"),
+		Model:   strings.TrimSpace(os.Getenv("SMT_E2E_CRM_AI_PROVIDER")),
+	}
 }
 
 func cleanCRMTarget(t *testing.T, ctx context.Context, cfg *config.Config) {
