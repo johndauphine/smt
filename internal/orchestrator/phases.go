@@ -110,11 +110,13 @@ func (o *Orchestrator) runAllPhases(ctx context.Context, runID string) error {
 }
 
 // executePlan runs the rendered statements in order. Statements whose target
-// object already exists are skipped, so re-runs after a partial failure are
-// idempotent (the pre-#87 writer paths had the same semantics). Execution is
-// sequential: rendering (the expensive part) already happened concurrently,
-// plan order encodes dependencies, and serial DDL sidesteps the InnoDB
-// metadata-lock deadlocks concurrent CHECK creation used to hit (#25).
+// object already exists are skipped as a re-run aid, but the executor only has
+// name-level existence probes here, not a full shape comparison. Each skip is
+// warned as unverified so an existing object of a different shape is not
+// silently blessed. Execution is sequential: rendering (the expensive part)
+// already happened concurrently, plan order encodes dependencies, and serial
+// DDL sidesteps the InnoDB metadata-lock deadlocks concurrent CHECK creation
+// used to hit (#25).
 func (o *Orchestrator) executePlan(ctx context.Context, runID string, plan schemadiff.Plan) error {
 	_ = o.state.UpdatePhase(runID, string(TaskExecuteDDL))
 	total := len(plan.Statements)
@@ -125,7 +127,7 @@ func (o *Orchestrator) executePlan(ctx context.Context, runID string, plan schem
 			return fmt.Errorf("checking existence for %s: %w", stmt.Description, err)
 		}
 		if exists {
-			logging.Info("  ✓ [%d/%d] %s — already exists, skipping", i+1, total, stmt.Description)
+			logUnverifiedExistingObjectSkip(i+1, total, stmt)
 			continue
 		}
 		if _, err := o.target.ExecRaw(ctx, stmt.SQL); err != nil {
@@ -134,6 +136,17 @@ func (o *Orchestrator) executePlan(ctx context.Context, runID string, plan schem
 		logging.Info("  ✓ [%d/%d] %s", i+1, total, stmt.Description)
 	}
 	return nil
+}
+
+func logUnverifiedExistingObjectSkip(n, total int, stmt schemadiff.Statement) {
+	object := stmt.Object
+	if object == "" {
+		object = stmt.Table
+	}
+	if object == "" {
+		object = stmt.Description
+	}
+	logging.Warn("  ! [%d/%d] %s — %s already exists; skipped without verifying shape. Run `smt drift` to confirm the target matches schema.sql.", n, total, stmt.Description, object)
 }
 
 // planObjectExists consults the target catalog for the object a statement

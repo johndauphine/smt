@@ -17,11 +17,13 @@ If a statement fails:
 - the error includes the statement description, database error, and SQL text;
 - later statements are not attempted.
 
-Create re-runs are intended to be idempotent for objects SMT can identify in the
-target catalog. Before executing create statements, SMT checks whether tables,
-indexes, foreign keys, and check constraints already exist and skips existing
-objects. Schema statements are rendered with `IF NOT EXISTS` semantics where the
-target dialect supports it.
+Create re-runs are intended to be idempotent for objects SMT can identify by
+name in the target catalog. Before executing create statements, SMT checks
+whether tables, indexes, foreign keys, and check constraints already exist and
+skips existing objects. Existing-object skips are logged as shape-unverified;
+run `smt drift` after recovery to confirm the target matches `schema.sql`.
+Schema statements are rendered with `IF NOT EXISTS` semantics where the target
+dialect supports it.
 
 ## `smt sync --apply`
 
