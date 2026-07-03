@@ -114,6 +114,8 @@ func deepCopyTable(t driver.Table) driver.Table {
 	t.Indexes = append([]driver.Index(nil), t.Indexes...)
 	for i := range t.Indexes {
 		t.Indexes[i].Columns = append([]string(nil), t.Indexes[i].Columns...)
+		t.Indexes[i].ColumnExpressions = append([]bool(nil), t.Indexes[i].ColumnExpressions...)
+		t.Indexes[i].ColumnPrefixLengths = append([]int(nil), t.Indexes[i].ColumnPrefixLengths...)
 		t.Indexes[i].IncludeCols = append([]string(nil), t.Indexes[i].IncludeCols...)
 	}
 	t.ForeignKeys = append([]driver.ForeignKey(nil), t.ForeignKeys...)
@@ -363,10 +365,11 @@ func indexKeys(idxs []driver.Index) []string {
 func indexColumnsKey(ix driver.Index) string {
 	parts := make([]string, len(ix.Columns))
 	for i, c := range ix.Columns {
-		part := strings.ToLower(c)
 		if i < len(ix.ColumnExpressions) && ix.ColumnExpressions[i] {
-			part = "expr:" + part
+			parts[i] = "expr:" + strings.TrimSpace(c)
+			continue
 		}
+		part := strings.ToLower(c)
 		if i < len(ix.ColumnPrefixLengths) && ix.ColumnPrefixLengths[i] > 0 {
 			part += "(" + strconv.Itoa(ix.ColumnPrefixLengths[i]) + ")"
 		}

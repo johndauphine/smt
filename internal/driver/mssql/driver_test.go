@@ -45,6 +45,7 @@ func TestReaderLoadIndexesSeparatesKeyAndIncludeColumns(t *testing.T) {
 		"AND ic.is_included_column = 1",
 		"WITHIN GROUP (ORDER BY ic.key_ordinal)",
 		"WITHIN GROUP (ORDER BY ic.index_column_id)",
+		"i.filter_definition",
 	} {
 		if !strings.Contains(body, needle) {
 			t.Errorf("LoadIndexes missing INCLUDE/key-column marker %q", needle)

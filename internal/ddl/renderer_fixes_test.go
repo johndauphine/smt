@@ -183,6 +183,24 @@ func TestCreateIndexDDL_MySQLPrefixAndFunctionalParts(t *testing.T) {
 	}
 }
 
+func TestCreateIndexDDL_MySQLRejectsFilteredIndex(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	_, err = r.CreateIndexDDL(&driver.Table{Name: "users"}, &driver.Index{
+		Name:    "idx_users_active_email",
+		Columns: []string{"email"},
+		Filter:  "deleted_at IS NULL",
+	})
+	if err == nil {
+		t.Fatal("CreateIndexDDL succeeded for filtered index on MySQL target")
+	}
+	if !strings.Contains(err.Error(), "filtered indexes are not supported on mysql target") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // #89 — lengths above the target's maximum degrade to the unbounded form
 // instead of DDL the target rejects.
 func TestColumnType_LengthClamping(t *testing.T) {

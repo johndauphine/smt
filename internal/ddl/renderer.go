@@ -373,7 +373,11 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 	}
 	cols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
-		cols[i] = r.indexKeyPartDDL(idx, i, c)
+		col, err := r.indexKeyPartDDL(idx, i, c)
+		if err != nil {
+			return "", err
+		}
+		cols[i] = col
 	}
 	var b strings.Builder
 	b.WriteString("CREATE ")
@@ -389,6 +393,9 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 		fmt.Fprintf(&b, " INCLUDE (%s)", strings.Join(includeCols, ", "))
 	}
 	if filter := strings.TrimSpace(idx.Filter); filter != "" {
+		if r.target == "mysql" {
+			return "", fmt.Errorf("filtered indexes are not supported on mysql target: %s", idx.Name)
+		}
 		expr, err := r.Expression(filter, t.Columns)
 		if err != nil {
 			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
@@ -399,20 +406,23 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 	return b.String(), nil
 }
 
-func (r Renderer) indexKeyPartDDL(idx *driver.Index, i int, column string) string {
+func (r Renderer) indexKeyPartDDL(idx *driver.Index, i int, column string) (string, error) {
 	isExpression := i < len(idx.ColumnExpressions) && idx.ColumnExpressions[i]
 	if isExpression {
+		if r.target != "mysql" {
+			return "", fmt.Errorf("expression indexes are not supported on %s target: %s", r.target, idx.Name)
+		}
 		expr := strings.TrimSpace(column)
 		if r.target == "mysql" && !(strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")")) {
 			expr = "(" + expr + ")"
 		}
-		return expr
+		return expr, nil
 	}
 	part := r.quote(r.normalize(column))
 	if r.target == "mysql" && i < len(idx.ColumnPrefixLengths) && idx.ColumnPrefixLengths[i] > 0 {
 		part += fmt.Sprintf("(%d)", idx.ColumnPrefixLengths[i])
 	}
-	return part
+	return part, nil
 }
 
 func (r Renderer) CreateForeignKeyDDL(t *driver.Table, fk *driver.ForeignKey) (string, error) {

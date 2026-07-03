@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -75,6 +76,65 @@ func TestLoadCheckConstraintsSQL_UsesPgGetExpr(t *testing.T) {
 		if !strings.Contains(body, needle) {
 			t.Errorf("LoadCheckConstraints code missing required marker %q", needle)
 		}
+	}
+}
+
+func TestLoadPrimaryKeySQL_UsesIndnkeyattsBoundary(t *testing.T) {
+	body := readReaderSource(t)
+	for _, needle := range []string{
+		"CROSS JOIN LATERAL unnest(i.indkey)",
+		"k.ordinality <= i.indnkeyatts",
+		"ORDER BY k.ordinality",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("loadPrimaryKey code missing INCLUDE-boundary marker %q", needle)
+		}
+	}
+}
+
+func TestLoadIndexesSQL_CapturesExpressionsIncludeAndFilters(t *testing.T) {
+	body := readReaderSource(t)
+	for _, needle := range []string{
+		"LEFT JOIN pg_attribute",
+		"k.ordinality <= ix.indnkeyatts AS is_key",
+		"pg_get_indexdef(ix.indexrelid",
+		"pg_get_expr(ix.indpred",
+		"appendPostgresIndexPart",
+		"idx.IncludeCols",
+		"idx.ColumnExpressions",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("LoadIndexes code missing expression/include/filter marker %q", needle)
+		}
+	}
+}
+
+func TestAppendPostgresIndexPartCapturesExpressionIncludeAndFilter(t *testing.T) {
+	idx := driver.Index{Name: "idx_users_email"}
+	filter := "(deleted_at IS NULL)"
+	parts := []postgresIndexPart{
+		{indexName: idx.Name, isKey: true, columnName: sql.NullString{String: "email", Valid: true}, filter: filter},
+		{indexName: idx.Name, isKey: true, expression: "lower(email)", filter: filter},
+		{indexName: idx.Name, isKey: false, columnName: sql.NullString{String: "name", Valid: true}, filter: filter},
+	}
+	for _, part := range parts {
+		if err := appendPostgresIndexPart(&idx, part); err != nil {
+			t.Fatalf("appendPostgresIndexPart: %v", err)
+		}
+	}
+	compactPostgresIndexKeyPartMetadata(&idx)
+
+	if got, want := strings.Join(idx.Columns, ","), "email,lower(email)"; got != want {
+		t.Fatalf("Columns = %q, want %q", got, want)
+	}
+	if len(idx.ColumnExpressions) != 2 || idx.ColumnExpressions[0] || !idx.ColumnExpressions[1] {
+		t.Fatalf("ColumnExpressions = %#v, want [false true]", idx.ColumnExpressions)
+	}
+	if got, want := strings.Join(idx.IncludeCols, ","), "name"; got != want {
+		t.Fatalf("IncludeCols = %q, want %q", got, want)
+	}
+	if idx.Filter != filter {
+		t.Fatalf("Filter = %q, want %q", idx.Filter, filter)
 	}
 }
 

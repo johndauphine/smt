@@ -259,6 +259,9 @@ func normalizeTable(t driver.Table, norm func(string) string) driver.Table {
 	for i := range t.Indexes {
 		t.Indexes[i].Name = norm(t.Indexes[i].Name)
 		for j := range t.Indexes[i].Columns {
+			if j < len(t.Indexes[i].ColumnExpressions) && t.Indexes[i].ColumnExpressions[j] {
+				continue
+			}
 			t.Indexes[i].Columns[j] = norm(t.Indexes[i].Columns[j])
 		}
 		for j := range t.Indexes[i].IncludeCols {

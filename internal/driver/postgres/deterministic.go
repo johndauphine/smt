@@ -203,7 +203,11 @@ func (r deterministicDDL) createIndex(t *driver.Table, idx *driver.Index, target
 
 	cols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
-		cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+		if i < len(idx.ColumnExpressions) && idx.ColumnExpressions[i] {
+			cols[i] = strings.TrimSpace(c)
+		} else {
+			cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+		}
 	}
 
 	var b strings.Builder

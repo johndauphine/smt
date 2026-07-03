@@ -375,7 +375,8 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 			i.is_unique,
 			i.type_desc,
 			ISNULL(key_cols.columns, '') AS columns,
-			ISNULL(include_cols.columns, '') AS include_columns
+			ISNULL(include_cols.columns, '') AS include_columns,
+			ISNULL(i.filter_definition, '') AS filter_definition
 		FROM sys.indexes i
 		JOIN sys.tables tb ON i.object_id = tb.object_id
 		JOIN sys.schemas s ON tb.schema_id = s.schema_id
@@ -409,7 +410,7 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var idx driver.Index
 		var typeDesc, colsStr, includeStr string
-		if err := rows.Scan(&idx.Name, &idx.IsUnique, &typeDesc, &colsStr, &includeStr); err != nil {
+		if err := rows.Scan(&idx.Name, &idx.IsUnique, &typeDesc, &colsStr, &includeStr, &idx.Filter); err != nil {
 			return err
 		}
 		idx.IsClustered = typeDesc == "CLUSTERED"
