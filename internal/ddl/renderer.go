@@ -47,7 +47,10 @@ import (
 // "10": PostgreSQL ALTER COLUMN ... TYPE renders only the bare type for
 // identity columns; GENERATED ... AS IDENTITY is not valid in that clause
 // (#202).
-const RendererVersion = "10"
+// "11": MSSQL/MySQL computed column definitions preserve NOT NULL inside the
+// generated-column branch instead of returning before nullability is appended
+// (#203).
+const RendererVersion = "11"
 
 type Renderer struct {
 	target            string
@@ -170,13 +173,20 @@ func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.C
 			if col.ComputedPersisted {
 				suffix = " PERSISTED"
 			}
+			if !col.IsNullable {
+				suffix += " NOT NULL"
+			}
 			return fmt.Sprintf("%s AS (%s)%s", r.quote(colName), expr, suffix), colType, nil
 		case "mysql":
 			storage := "VIRTUAL"
 			if col.ComputedPersisted {
 				storage = "STORED"
 			}
-			return fmt.Sprintf("%s %s GENERATED ALWAYS AS (%s) %s", r.quote(colName), colType, expr, storage), colType, nil
+			nullability := ""
+			if !col.IsNullable {
+				nullability = " NOT NULL"
+			}
+			return fmt.Sprintf("%s %s GENERATED ALWAYS AS (%s) %s%s", r.quote(colName), colType, expr, storage, nullability), colType, nil
 		}
 	}
 

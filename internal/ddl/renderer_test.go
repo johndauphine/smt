@@ -458,6 +458,57 @@ func TestRenderer_PostgresAlterIdentityColumnTypeOmitsIdentityClause(t *testing.
 	}
 }
 
+func TestRenderer_ComputedColumnPreservesNotNull(t *testing.T) {
+	cases := []struct {
+		target     string
+		schema     string
+		wantSuffix string
+	}{
+		{"mssql", "dbo", " PERSISTED NOT NULL"},
+		{"mysql", "crm", " STORED NOT NULL"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.target, func(t *testing.T) {
+			renderer, err := NewRenderer(tc.target, tc.schema, "fail")
+			if err != nil {
+				t.Fatalf("NewRenderer: %v", err)
+			}
+			renderer = renderer.WithSource("mssql")
+
+			def, _, err := renderer.ColumnDefinition(driver.Column{
+				Name:               "LineTotal",
+				DataType:           "int",
+				IsNullable:         false,
+				IsComputed:         true,
+				ComputedExpression: "([Quantity]*[UnitPrice])",
+				ComputedPersisted:  true,
+			})
+			if err != nil {
+				t.Fatalf("ColumnDefinition: %v", err)
+			}
+			if !strings.HasSuffix(def, tc.wantSuffix) {
+				t.Fatalf("computed column lost NOT NULL suffix %q:\n%s", tc.wantSuffix, def)
+			}
+
+			nullableDef, _, err := renderer.ColumnDefinition(driver.Column{
+				Name:               "LineTotal",
+				DataType:           "int",
+				IsNullable:         true,
+				IsComputed:         true,
+				ComputedExpression: "([Quantity]*[UnitPrice])",
+				ComputedPersisted:  true,
+			})
+			if err != nil {
+				t.Fatalf("ColumnDefinition nullable: %v", err)
+			}
+			if strings.Contains(nullableDef, " NOT NULL") {
+				t.Fatalf("nullable computed column should not render NOT NULL:\n%s", nullableDef)
+			}
+		})
+	}
+}
+
 func TestRenderer_MySQLExpressionNormalizesForMSSQL(t *testing.T) {
 	renderer, err := NewRenderer("mssql", "dbo", "fail")
 	if err != nil {
