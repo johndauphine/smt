@@ -41,7 +41,10 @@ import (
 // mapper, so bigint[] stays bigint[] and varchar(N)[] keeps N (#198).
 // "8": Multi-bit MySQL/PostgreSQL bit-string columns no longer collapse to
 // boolean and render with their bit width where supported (#199).
-const RendererVersion = "8"
+// "9": Decimal/numeric rendering preserves MySQL UNSIGNED, clamps invalid
+// target precision/scale, and avoids scale-zero defaults for bare numeric
+// on fixed-precision targets (#200).
+const RendererVersion = "9"
 
 type Renderer struct {
 	target            string

@@ -128,6 +128,71 @@ func TestBitStringRoundTripPreservesWidth(t *testing.T) {
 	}
 }
 
+func TestNumericFidelity(t *testing.T) {
+	unsignedDecimal := ToCanonical("decimal", TypeMeta{Precision: 10, Scale: 2, IsUnsigned: true}, "mysql")
+	if unsignedDecimal.Kind != Decimal || !unsignedDecimal.Unsigned {
+		t.Fatalf("unsigned decimal canonical = %+v, want unsigned decimal", unsignedDecimal)
+	}
+	got, err := FromCanonical(unsignedDecimal, "mysql", RenderOpts{})
+	if err != nil {
+		t.Fatalf("FromCanonical unsigned decimal: %v", err)
+	}
+	if got != "DECIMAL(10,2) UNSIGNED" {
+		t.Fatalf("unsigned decimal rendered as %q", got)
+	}
+
+	for _, tc := range []struct {
+		name string
+		ct   CanonicalType
+		want string
+	}{
+		{"unsigned float", ToCanonical("float", TypeMeta{IsUnsigned: true}, "mysql"), "FLOAT UNSIGNED"},
+		{"unsigned double", ToCanonical("double", TypeMeta{IsUnsigned: true}, "mysql"), "DOUBLE UNSIGNED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FromCanonical(tc.ct, "mysql", RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonical: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("rendered type = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNumericTargetLimitsWarnAndClamp(t *testing.T) {
+	cases := []struct {
+		name       string
+		ct         CanonicalType
+		target     string
+		wantType   string
+		wantReason string
+	}{
+		{"bare numeric to mysql", CanonicalType{Kind: Decimal}, "mysql", "DECIMAL(65,30)", "unconstrained"},
+		{"bare numeric to mssql", CanonicalType{Kind: Decimal}, "mssql", "DECIMAL(38,18)", "unconstrained"},
+		{"over precision to mssql", CanonicalType{Kind: Decimal, Precision: 50, Scale: 10}, "mssql", "DECIMAL(38,10)", "precision 50"},
+		{"over precision scale to mysql", CanonicalType{Kind: Decimal, Precision: 70, Scale: 40}, "mysql", "DECIMAL(65,30)", "precision 70"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, warnings, err := FromCanonicalWithWarnings(tc.ct, tc.target, RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonicalWithWarnings: %v", err)
+			}
+			if got != tc.wantType {
+				t.Fatalf("rendered type = %q, want %q", got, tc.wantType)
+			}
+			if len(warnings) == 0 {
+				t.Fatalf("expected warning, got none")
+			}
+			if !strings.Contains(warnings[0].Reason, tc.wantReason) {
+				t.Fatalf("warning reason = %q, want substring %q", warnings[0].Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestFromCanonical_Spatial(t *testing.T) {
 	ct := CanonicalType{Kind: Spatial, SpatialType: "geometry", SpatialSubType: "point", SRID: 4326}
 	cases := []struct {

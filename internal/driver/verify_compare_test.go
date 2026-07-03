@@ -543,11 +543,20 @@ func TestCompareColumns_CanonicalTypeMismatch(t *testing.T) {
 }
 
 func TestCompareColumns_CanonicalTypeCatchesMySQLUnsigned(t *testing.T) {
-	src := []Column{{Name: "n", DataType: "int", IsUnsigned: true}}
-	tgt := []Column{{Name: "n", DataType: "int"}}
-	deltas := CompareColumns(src, tgt, "mysql", "mysql")
-	if len(deltas) != 1 || deltas[0].Criterion != "type" {
-		t.Fatalf("expected one canonical type delta for lost unsigned flag, got %v", deltas)
+	cases := []struct {
+		name     string
+		src, tgt Column
+	}{
+		{"integer", Column{Name: "n", DataType: "int", IsUnsigned: true}, Column{Name: "n", DataType: "int"}},
+		{"decimal", Column{Name: "n", DataType: "decimal", Precision: 10, Scale: 2, IsUnsigned: true}, Column{Name: "n", DataType: "decimal", Precision: 10, Scale: 2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, "mysql", "mysql")
+			if len(deltas) != 1 || deltas[0].Criterion != "type" {
+				t.Fatalf("expected one canonical type delta for lost unsigned flag, got %v", deltas)
+			}
+		})
 	}
 }
 

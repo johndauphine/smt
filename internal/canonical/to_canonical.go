@@ -59,7 +59,7 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 
 	// ---- exact / approximate numeric -----------------------------------
 	case "decimal", "numeric", "number":
-		return CanonicalType{Kind: Decimal, Precision: m.Precision, Scale: m.Scale}
+		return CanonicalType{Kind: Decimal, Precision: m.Precision, Scale: m.Scale, Unsigned: m.IsUnsigned}
 	case "money":
 		return CanonicalType{Kind: Decimal, Precision: 19, Scale: 4}
 	case "smallmoney":
@@ -69,20 +69,20 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 		// FLOAT (no precision) is 64-bit double. (PostgreSQL never reports a
 		// bare "float" — it uses real / double precision / float4 / float8.)
 		if mysql {
-			return CanonicalType{Kind: Real}
+			return CanonicalType{Kind: Real, Unsigned: m.IsUnsigned}
 		}
-		return CanonicalType{Kind: Double}
+		return CanonicalType{Kind: Double, Unsigned: m.IsUnsigned}
 	case "double", "double precision", "float8":
-		return CanonicalType{Kind: Double}
+		return CanonicalType{Kind: Double, Unsigned: m.IsUnsigned}
 	case "real":
 		// MySQL REAL is a synonym for DOUBLE (8-byte); MSSQL/PG REAL is 4-byte
 		// single. (MySQL's REAL_AS_FLOAT sql_mode is non-default and ignored.)
 		if mysql {
-			return CanonicalType{Kind: Double}
+			return CanonicalType{Kind: Double, Unsigned: m.IsUnsigned}
 		}
-		return CanonicalType{Kind: Real}
+		return CanonicalType{Kind: Real, Unsigned: m.IsUnsigned}
 	case "float4":
-		return CanonicalType{Kind: Real}
+		return CanonicalType{Kind: Real, Unsigned: m.IsUnsigned}
 
 	// ---- character ------------------------------------------------------
 	case "varchar", "character varying":

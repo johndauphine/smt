@@ -348,6 +348,38 @@ func TestRenderer_MySQLTargetPreservesLargeTextAndOnUpdate(t *testing.T) {
 	assertEqualSQL(t, def, "`UpdatedAt` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)")
 }
 
+func TestRenderer_NumericFidelity(t *testing.T) {
+	mysqlRenderer, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer mysql: %v", err)
+	}
+	mssqlRenderer, err := NewRenderer("mssql", "dbo", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer mssql: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		r    Renderer
+		col  driver.Column
+		want string
+	}{
+		{"mysql unsigned decimal", mysqlRenderer.WithSource("mysql"), driver.Column{DataType: "decimal", Precision: 10, Scale: 2, IsUnsigned: true}, "DECIMAL(10,2) UNSIGNED"},
+		{"mysql bare pg numeric", mysqlRenderer.WithSource("postgres"), driver.Column{DataType: "numeric"}, "DECIMAL(65,30)"},
+		{"mssql bare pg numeric", mssqlRenderer.WithSource("postgres"), driver.Column{DataType: "numeric"}, "DECIMAL(38,18)"},
+		{"mssql over precision", mssqlRenderer.WithSource("postgres"), driver.Column{DataType: "numeric", Precision: 50, Scale: 10}, "DECIMAL(38,10)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.r.ColumnType(tc.col)
+			if err != nil {
+				t.Fatalf("ColumnType: %v", err)
+			}
+			assertEqualSQL(t, got, tc.want)
+		})
+	}
+}
+
 func TestRenderer_RowversionAndUnsignedTypes(t *testing.T) {
 	mssqlRenderer, err := NewRenderer("mssql", "dbo", "fail")
 	if err != nil {

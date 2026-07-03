@@ -110,10 +110,7 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 		}
 		return "bigint", nil
 	case Decimal:
-		if ct.Precision > 0 {
-			return fmt.Sprintf("numeric(%d,%d)", ct.Precision, ct.Scale), nil
-		}
-		return "numeric", nil
+		return decimalDDL("numeric", ct, "postgres"), nil
 	case Real:
 		return "real", nil
 	case Double:
@@ -216,7 +213,7 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		}
 		return "BIGINT", nil
 	case Decimal:
-		return decimalDDL("DECIMAL", ct), nil
+		return decimalDDL("DECIMAL", ct, "mssql"), nil
 	case Real:
 		return "REAL", nil
 	case Double:
@@ -297,11 +294,11 @@ func fromCanonicalMySQL(ct CanonicalType, opts RenderOpts) (string, error) {
 	case BigInt:
 		return u("BIGINT"), nil
 	case Decimal:
-		return u(decimalDDL("DECIMAL", ct)), nil
+		return u(decimalDDL("DECIMAL", ct, "mysql")), nil
 	case Real:
-		return "FLOAT", nil
+		return u("FLOAT"), nil
 	case Double:
-		return "DOUBLE", nil
+		return u("DOUBLE"), nil
 	case Varchar:
 		return mysqlVarchar(ct.Length), nil
 	case Char:
@@ -374,11 +371,51 @@ func sizedCapped(name string, length, max int) string {
 	return sized(name, length, "MAX")
 }
 
-func decimalDDL(name string, ct CanonicalType) string {
-	if ct.Precision > 0 {
-		return fmt.Sprintf("%s(%d,%d)", name, ct.Precision, ct.Scale)
+func decimalDDL(name string, ct CanonicalType, target string) string {
+	precision, scale := decimalShape(ct, target)
+	if precision > 0 {
+		return fmt.Sprintf("%s(%d,%d)", name, precision, scale)
 	}
 	return name
+}
+
+func decimalShape(ct CanonicalType, target string) (precision, scale int) {
+	if ct.Precision <= 0 {
+		switch target {
+		case "mysql":
+			return 65, 30
+		case "mssql":
+			return 38, 18
+		default:
+			return 0, 0
+		}
+	}
+
+	precision = ct.Precision
+	scale = ct.Scale
+	if scale < 0 {
+		scale = 0
+	}
+	switch target {
+	case "mysql":
+		if precision > 65 {
+			precision = 65
+		}
+		if scale > 30 {
+			scale = 30
+		}
+	case "mssql":
+		if precision > 38 {
+			precision = 38
+		}
+		if scale > 38 {
+			scale = 38
+		}
+	}
+	if scale > precision {
+		scale = precision
+	}
+	return precision, scale
 }
 
 func bitStringDDL(name string, length int) string {
@@ -622,6 +659,34 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 	case BigInt:
 		if ct.Unsigned && target != "mysql" && !opts.IsIdentity {
 			add("target has no unsigned 64-bit integer; rendered as " + rendered)
+		}
+	case Decimal:
+		if ct.Precision <= 0 && target != "postgres" {
+			add("target has no unconstrained decimal type; rendered as " + rendered)
+		}
+		if target == "mysql" {
+			if ct.Precision > 65 {
+				add(fmt.Sprintf("decimal precision %d exceeds MySQL max 65; rendered as %s", ct.Precision, rendered))
+			}
+			if ct.Scale > 30 {
+				add(fmt.Sprintf("decimal scale %d exceeds MySQL max 30; rendered as %s", ct.Scale, rendered))
+			}
+		}
+		if target == "mssql" && ct.Precision > 38 {
+			add(fmt.Sprintf("decimal precision %d exceeds SQL Server max 38; rendered as %s", ct.Precision, rendered))
+		}
+		if target == "mssql" && ct.Scale > 38 {
+			add(fmt.Sprintf("decimal scale %d exceeds SQL Server max 38; rendered as %s", ct.Scale, rendered))
+		}
+		if ct.Scale > ct.Precision && ct.Precision > 0 {
+			add(fmt.Sprintf("decimal scale %d exceeds precision %d; rendered as %s", ct.Scale, ct.Precision, rendered))
+		}
+		if ct.Unsigned && target != "mysql" {
+			add("target has no unsigned decimal domain; rendered as " + rendered)
+		}
+	case Real, Double:
+		if ct.Unsigned && target != "mysql" {
+			add("target has no unsigned floating-point domain; rendered as " + rendered)
 		}
 	case BitString, VarBitString:
 		if target == "mssql" {
