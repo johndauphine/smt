@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"smt/internal/logging"
 )
@@ -13,10 +14,11 @@ import (
 //  1. AI parse — the proposed target DDL is sent to the AI with a parser
 //     prompt that returns Column[] JSON. This is the AI's only job; it does
 //     not judge or compare.
-//  2. Deterministic compare — Go-side CompareColumns runs the six
-//     per-column criteria (max_length, precision/scale, nullability,
-//     identity, TZ class, default class) against the source. Any deltas
-//     become Issues in the returned VerifyResult.
+//  2. Deterministic compare — Go-side CompareColumns runs the per-column
+//     criteria (type shape, length, precision/scale, nullability, identity,
+//     TZ class, defaults, ON UPDATE, computed status, enum/set members)
+//     against the source. Any deltas become Issues in the returned
+//     VerifyResult.
 //
 // The split eliminates the prose-drift / lexical-vs-class failure modes the
 // free-text auditor (#47, #51, #53) hit at multi-table cross-dialect scale —
@@ -24,8 +26,8 @@ import (
 // what they were worst at, so it moves to deterministic Go.
 //
 // Failure handling:
-//   - AI parse error (network / API / etc.) → returned as error; writer
-//     surfaces and retries generation.
+//   - AI parse call error (network / API / etc.) → returned as error so review
+//     fails closed instead of being downgraded to a warning.
 //   - Bad JSON / zero columns from the AI → returned as a verify-fail
 //     verdict with the parse error in Issues. The writer's retry loop will
 //     re-prompt with the parse failure as PreviousAttempt.Error, the same
@@ -51,6 +53,9 @@ func (m *AITypeMapper) VerifyTableDDL(ctx context.Context, req VerifyTableDDLReq
 
 	parsedCols, err := m.parseTargetDDLToColumns(ctx, req.ProposedDDL, req.TargetDBType)
 	if err != nil {
+		if strings.Contains(err.Error(), "AI parse call failed") {
+			return nil, err
+		}
 		// Bad JSON / no columns / no JSON object — retryable signal. Surface
 		// as a verdict the writer can feed back into the next prompt rather
 		// than as a hard error (which would abort the table immediately).

@@ -347,6 +347,42 @@ func TestCompareColumns_DefaultClassColumnAware(t *testing.T) {
 	}
 }
 
+func TestCompareColumns_OnUpdateExpression(t *testing.T) {
+	src := []Column{{
+		Name:               "updated_at",
+		DataType:           "timestamp",
+		DefaultExpression:  "CURRENT_TIMESTAMP",
+		OnUpdateExpression: "CURRENT_TIMESTAMP",
+	}}
+	same := []Column{{
+		Name:               "updated_at",
+		DataType:           "timestamp",
+		DefaultExpression:  "CURRENT_TIMESTAMP",
+		OnUpdateExpression: "(current_timestamp)",
+	}}
+	if deltas := CompareColumns(src, same, "mysql", "mysql"); len(deltas) != 0 {
+		t.Fatalf("equivalent ON UPDATE expressions should compare cleanly, got %v", deltas)
+	}
+
+	missing := []Column{{
+		Name:              "updated_at",
+		DataType:          "timestamp",
+		DefaultExpression: "CURRENT_TIMESTAMP",
+	}}
+	if deltas := CompareColumns(src, missing, "mysql", "mysql"); !hasCriterion(deltas, "on_update") {
+		t.Fatalf("missing ON UPDATE should flag on_update, got %v", deltas)
+	}
+}
+
+func TestNormalizedDefaultLiteralIgnoresCastInsideQuotedLiteral(t *testing.T) {
+	if got := normalizedDefaultLiteral("'weird::thing'"); got != "'weird::thing'" {
+		t.Fatalf("quoted literal containing :: normalized to %q", got)
+	}
+	if got := normalizedDefaultLiteral("'weird::thing'::jsonb"); got != "'weird::thing'" {
+		t.Fatalf("postgres cast outside literal not stripped correctly: %q", got)
+	}
+}
+
 // TestCompareColumns_AllPass is the happy path — well-translated mssql→pg
 // columns produce zero deltas. Specifically exercises the cases the
 // AI-auditor era kept getting wrong: nvarchar→varchar, datetime2→TIMESTAMP,

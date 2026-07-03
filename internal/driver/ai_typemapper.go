@@ -117,8 +117,12 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 		providerType = normalized
 	}
 
-	// Validate cloud providers have API key
-	if !secrets.IsLocalProvider(providerType) && provider.APIKey == "" {
+	// Validate cloud providers have API key. Unknown provider names with an
+	// explicit base_url use the OpenAI-compatible path, which does not send an
+	// Authorization header and should not require a dummy key (#219).
+	if !secrets.IsLocalProvider(providerType) &&
+		!openAICompatProviderWithoutKey(providerType, provider) &&
+		provider.APIKey == "" {
 		return nil, fmt.Errorf("AI provider %q requires an API key", providerName)
 	}
 
@@ -160,6 +164,18 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 	}
 
 	return mapper, nil
+}
+
+func openAICompatProviderWithoutKey(providerType string, provider *secrets.Provider) bool {
+	if provider == nil || strings.TrimSpace(provider.BaseURL) == "" {
+		return false
+	}
+	switch AIProvider(providerType) {
+	case ProviderAnthropic, ProviderOpenAI, ProviderGoogle, ProviderGemini:
+		return false
+	default:
+		return true
+	}
 }
 
 // NewAITypeMapperFromSecrets creates an AI type mapper from the global secrets configuration.
@@ -1276,6 +1292,8 @@ func (m *AITypeMapper) saveCache() error {
 
 // CacheSize returns the number of cached mappings.
 func (m *AITypeMapper) CacheSize() int {
+	m.cacheMu.RLock()
+	defer m.cacheMu.RUnlock()
 	return len(m.cache.All())
 }
 
@@ -1293,7 +1311,9 @@ func (m *AITypeMapper) ClearCache() error {
 
 // ExportCache exports cached mappings for review or sharing.
 func (m *AITypeMapper) ExportCache(w io.Writer) error {
+	m.cacheMu.RLock()
 	mappings := m.cache.All()
+	m.cacheMu.RUnlock()
 	data, err := json.MarshalIndent(mappings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling cache: %w", err)
@@ -1312,38 +1332,12 @@ func (m *AITypeMapper) ExportCache(w io.Writer) error {
 // goroutine. The HTTP layer's 429 retry handles provider-side rate
 // limits regardless of who's calling.
 func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error) {
-
 	if ctx == nil {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(m.timeoutSeconds)*time.Second)
 		defer cancel()
 	}
-
-	var result string
-	var err error
-
-	switch AIProvider(m.providerType) {
-	case ProviderAnthropic:
-		result, err = m.queryAnthropicAPI(ctx, prompt)
-	case ProviderOpenAI:
-		result, err = m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
-	case ProviderGoogle, ProviderGemini:
-		result, err = m.queryGeminiAPI(ctx, prompt)
-	case ProviderOllama:
-		baseURL := m.provider.GetEffectiveBaseURL(m.providerType)
-		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
-	case ProviderLMStudio:
-		baseURL := m.provider.GetEffectiveBaseURL(m.providerType)
-		result, err = m.queryOpenAICompatAPI(ctx, prompt, baseURL+"/v1/chat/completions")
-	default:
-		if m.provider.BaseURL != "" {
-			result, err = m.queryOpenAICompatAPI(ctx, prompt, m.provider.BaseURL+"/v1/chat/completions")
-		} else {
-			return "", fmt.Errorf("unsupported AI provider: %s (dispatch type %q)", m.providerName, m.providerType)
-		}
-	}
-
-	return result, err
+	return m.dispatch(ctx, prompt)
 }
 
 // ProviderName returns the YAML key of the configured provider entry —
