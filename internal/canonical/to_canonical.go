@@ -22,6 +22,10 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	dt := strings.ToLower(strings.TrimSpace(typeName))
 	source := canonDialect(dialect)
 	mysql := source == "mysql"
+	// pg/mysql character types are Unicode (UTF-8) by default; carry that intent
+	// so an MSSQL target can render NVARCHAR/NCHAR where it preserves both
+	// unicode and exact length (see #224 and FromCanonical's mssql branch).
+	unicodeChars := source == "mysql" || source == "postgres"
 
 	if ct, ok := toArray(dt, m, dialect); ok {
 		return ct
@@ -87,11 +91,11 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 
 	// ---- character ------------------------------------------------------
 	case "varchar", "character varying":
-		return CanonicalType{Kind: Varchar, Length: m.MaxLength}
+		return CanonicalType{Kind: Varchar, Length: m.MaxLength, National: unicodeChars}
 	case "nvarchar":
 		return CanonicalType{Kind: Varchar, Length: m.MaxLength, National: true}
 	case "char", "character", "bpchar":
-		return CanonicalType{Kind: Char, Length: m.MaxLength}
+		return CanonicalType{Kind: Char, Length: m.MaxLength, National: unicodeChars}
 	case "nchar":
 		return CanonicalType{Kind: Char, Length: m.MaxLength, National: true}
 	case "text":
