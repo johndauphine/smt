@@ -53,7 +53,10 @@ import (
 // "12": MySQL ALTER COLUMN ... SET DEFAULT parenthesizes function-valued
 // defaults such as CURRENT_TIMESTAMP, while column definitions keep their
 // engine-specific default form (#204).
-const RendererVersion = "12"
+// "13": MSSQL-to-MySQL computed string concatenation rewrites column-only
+// textual + expressions to CONCAT(...) instead of numeric MySQL addition
+// (#205).
+const RendererVersion = "13"
 
 type Renderer struct {
 	target            string
@@ -163,7 +166,8 @@ func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.C
 	}
 
 	if col.IsComputed {
-		expr, err := r.Expression(col.ComputedExpression, firstColumns(tableColumns))
+		contextColumns := firstColumns(tableColumns)
+		expr, err := r.computedExpression(col.ComputedExpression, col, colType, contextColumns)
 		if err != nil {
 			return "", "", fmt.Errorf("mapping computed column %s: %w", col.Name, err)
 		}
@@ -702,6 +706,14 @@ func logMappingWarning(column, source, target, rendered string, w canonical.Mapp
 }
 
 func (r Renderer) Expression(expr string, tableColumns []driver.Column) (string, error) {
+	return r.expression(expr, tableColumns, false)
+}
+
+func (r Renderer) computedExpression(expr string, col driver.Column, colType string, tableColumns []driver.Column) (string, error) {
+	return r.expression(expr, tableColumns, r.mysqlComputedConcatUsesStrings(expr, col, colType, tableColumns))
+}
+
+func (r Renderer) expression(expr string, tableColumns []driver.Column, forceMySQLStringConcat bool) (string, error) {
 	out := strings.TrimSpace(expr)
 	out = unwrapDefaultParens(out)
 	out = strings.TrimPrefix(strings.TrimSpace(out), "CHECK ")
@@ -724,10 +736,37 @@ func (r Renderer) Expression(expr string, tableColumns []driver.Column) (string,
 		return "", err
 	}
 	if r.target == "mysql" {
-		out = rewriteSQLServerStringConcatToConcat(out)
+		out = rewriteSQLServerStringConcatToConcat(out, forceMySQLStringConcat)
 	}
 	out = trimExtraTrailingCloseParens(out)
 	return out, nil
+}
+
+func (r Renderer) mysqlComputedConcatUsesStrings(expr string, col driver.Column, colType string, tableColumns []driver.Column) bool {
+	if r.target != "mysql" || !strings.Contains(expr, "+") {
+		return false
+	}
+	if isTextualSourceType(col.DataType) || isTextualSourceType(colType) {
+		return true
+	}
+	for _, tableCol := range tableColumns {
+		if !isTextualSourceType(tableCol.DataType) {
+			continue
+		}
+		if expressionReferencesColumn(expr, tableCol.Name) || expressionReferencesColumn(expr, r.normalize(tableCol.Name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func expressionReferencesColumn(expr, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	pattern := `(?i)(^|[^A-Za-z0-9_])` + regexp.QuoteMeta(name) + `([^A-Za-z0-9_]|$)`
+	return regexp.MustCompile(pattern).MatchString(expr)
 }
 
 func (r Renderer) unknownType(dt string) (string, error) {
@@ -1425,11 +1464,11 @@ func unquoteSQLString(quoted string) (string, bool) {
 	return b.String(), true
 }
 
-func rewriteSQLServerStringConcatToConcat(expr string) string {
+func rewriteSQLServerStringConcatToConcat(expr string, forceStringConcat bool) string {
 	// Handles the CRM-style "a + ' ' + b" computed expression without trying
-	// to become a SQL parser. Only fires when a top-level operand is a string
-	// literal — numeric/date arithmetic ("subtotal + tax",
-	// "CURRENT_TIMESTAMP + INTERVAL '1' DAY") must stay arithmetic.
+	// to become a SQL parser. Generic expression rendering only fires when a
+	// top-level operand is a string literal; computed-column rendering can
+	// force it when the result or referenced operands are textual.
 	if !strings.Contains(expr, "+") || strings.ContainsAny(expr, "*/") {
 		return expr
 	}
@@ -1437,15 +1476,17 @@ func rewriteSQLServerStringConcatToConcat(expr string) string {
 	if len(parts) < 2 {
 		return expr
 	}
-	hasStringOperand := false
-	for _, p := range parts {
-		if strings.HasPrefix(strings.TrimSpace(p), "'") {
-			hasStringOperand = true
-			break
+	if !forceStringConcat {
+		hasStringOperand := false
+		for _, p := range parts {
+			if strings.HasPrefix(strings.TrimSpace(p), "'") {
+				hasStringOperand = true
+				break
+			}
 		}
-	}
-	if !hasStringOperand {
-		return expr
+		if !hasStringOperand {
+			return expr
+		}
 	}
 	return "CONCAT(" + strings.Join(parts, ", ") + ")"
 }

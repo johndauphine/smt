@@ -326,6 +326,69 @@ func TestComputedColumn_MySQLStringConcatStillRewritten(t *testing.T) {
 	}
 }
 
+func TestComputedColumn_MySQLColumnOnlyStringConcatUsesConcat(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	r = r.WithSource("mssql")
+	tableColumns := []driver.Column{
+		{Name: "first_name", DataType: "nvarchar", MaxLength: 50},
+		{Name: "last_name", DataType: "nvarchar", MaxLength: 50},
+	}
+
+	def, _, err := r.ColumnDefinition(driver.Column{
+		Name:               "combo",
+		DataType:           "varchar",
+		MaxLength:          100,
+		IsNullable:         true,
+		IsComputed:         true,
+		ComputedExpression: "([first_name]+[last_name])",
+		ComputedPersisted:  true,
+	}, tableColumns)
+	if err != nil {
+		t.Fatalf("ColumnDefinition: %v", err)
+	}
+	if !strings.Contains(def, "CONCAT(`first_name`, `last_name`)") {
+		t.Fatalf("string computed column did not render CONCAT:\n%s", def)
+	}
+	if strings.Contains(def, "`first_name` + `last_name`") {
+		t.Fatalf("string computed column kept MySQL numeric addition:\n%s", def)
+	}
+}
+
+func TestComputedColumn_MySQLNumericAdditionStaysArithmetic(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	r = r.WithSource("mssql")
+	tableColumns := []driver.Column{
+		{Name: "subtotal", DataType: "decimal", Precision: 18, Scale: 2},
+		{Name: "tax", DataType: "decimal", Precision: 18, Scale: 2},
+	}
+
+	def, _, err := r.ColumnDefinition(driver.Column{
+		Name:               "total",
+		DataType:           "decimal",
+		Precision:          18,
+		Scale:              2,
+		IsNullable:         true,
+		IsComputed:         true,
+		ComputedExpression: "([subtotal]+[tax])",
+		ComputedPersisted:  true,
+	}, tableColumns)
+	if err != nil {
+		t.Fatalf("ColumnDefinition: %v", err)
+	}
+	if strings.Contains(def, "CONCAT") {
+		t.Fatalf("numeric computed column was rewritten to CONCAT:\n%s", def)
+	}
+	if !strings.Contains(def, "`subtotal`+`tax`") && !strings.Contains(def, "`subtotal` + `tax`") {
+		t.Fatalf("numeric computed column did not preserve arithmetic addition:\n%s", def)
+	}
+}
+
 // #100 — pg's timestamptz udt_name is TZ-aware and must land as
 // DATETIMEOFFSET on mssql targets, not naive DATETIME2.
 func TestColumnType_TimestamptzKeepsTZClassOnMSSQL(t *testing.T) {
