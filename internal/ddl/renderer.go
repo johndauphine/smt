@@ -44,7 +44,10 @@ import (
 // "9": Decimal/numeric rendering preserves MySQL UNSIGNED, clamps invalid
 // target precision/scale, and avoids scale-zero defaults for bare numeric
 // on fixed-precision targets (#200).
-const RendererVersion = "9"
+// "10": PostgreSQL ALTER COLUMN ... TYPE renders only the bare type for
+// identity columns; GENERATED ... AS IDENTITY is not valid in that clause
+// (#202).
+const RendererVersion = "10"
 
 type Renderer struct {
 	target            string
@@ -546,14 +549,20 @@ func (r Renderer) DropColumnDDL(tableName, colName string) string {
 }
 
 func (r Renderer) AlterColumnTypeDDL(tableName string, col driver.Column) (string, error) {
-	typ, err := r.ColumnType(col)
-	if err != nil {
-		return "", err
-	}
 	switch r.target {
 	case "postgres":
+		typeOnly := col
+		typeOnly.IsIdentity = false
+		typ, err := r.ColumnType(typeOnly)
+		if err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s", r.qualify(r.normalize(tableName)), r.quote(r.normalize(col.Name)), typ), nil
 	case "mssql":
+		typ, err := r.ColumnType(col)
+		if err != nil {
+			return "", err
+		}
 		nullability := "NULL"
 		if !col.IsNullable {
 			nullability = "NOT NULL"
