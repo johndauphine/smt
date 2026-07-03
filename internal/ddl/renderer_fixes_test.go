@@ -139,6 +139,40 @@ func TestColumnDefault_MySQLExpressionForm(t *testing.T) {
 	}
 }
 
+func TestSetColumnDefaultDDL_MySQLFunctionDefaultUsesExpressionForm(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	r = r.WithSource("postgres")
+
+	got, err := r.SetColumnDefaultDDL("events", driver.Column{Name: "created_at", DataType: "datetime", DefaultExpression: "now()"})
+	if err != nil {
+		t.Fatalf("SetColumnDefaultDDL function: %v", err)
+	}
+	want := "ALTER TABLE `crm`.`events` ALTER COLUMN `created_at` SET DEFAULT (CURRENT_TIMESTAMP(6))"
+	if got != want {
+		t.Fatalf("SetColumnDefaultDDL function = %q, want %q", got, want)
+	}
+
+	got, err = r.SetColumnDefaultDDL("events", driver.Column{Name: "quantity", DataType: "int", DefaultExpression: "1"})
+	if err != nil {
+		t.Fatalf("SetColumnDefaultDDL literal: %v", err)
+	}
+	want = "ALTER TABLE `crm`.`events` ALTER COLUMN `quantity` SET DEFAULT 1"
+	if got != want {
+		t.Fatalf("SetColumnDefaultDDL literal = %q, want %q", got, want)
+	}
+
+	def, _, err := r.ColumnDefinition(driver.Column{Name: "created_at", DataType: "datetime", IsNullable: false, DefaultExpression: "now()"})
+	if err != nil {
+		t.Fatalf("ColumnDefinition: %v", err)
+	}
+	if !strings.Contains(def, "DEFAULT CURRENT_TIMESTAMP(6)") || strings.Contains(def, "DEFAULT (CURRENT_TIMESTAMP(6))") {
+		t.Fatalf("column definition default form changed unexpectedly: %q", def)
+	}
+}
+
 func TestColumnDefault_EmptyStringDefaultPresence(t *testing.T) {
 	r, err := NewRenderer("mysql", "crm", "fail")
 	if err != nil {

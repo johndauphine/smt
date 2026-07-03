@@ -498,6 +498,35 @@ func TestRenderDeterministic_ColumnDefaultChanges(t *testing.T) {
 	}
 }
 
+func TestRenderDeterministic_MySQLFunctionDefaultChangeUsesExpressionForm(t *testing.T) {
+	createdOld := driver.Column{Name: "created_at", DataType: "datetime", IsNullable: false}
+	createdNew := createdOld
+	createdNew.DefaultExpression = "now()"
+	quantityOld := driver.Column{Name: "quantity", DataType: "int", IsNullable: false, DefaultExpression: "0"}
+	quantityNew := quantityOld
+	quantityNew.DefaultExpression = "1"
+	d := Compute(
+		Snapshot{Tables: []driver.Table{table("events", createdOld, quantityOld)}},
+		Snapshot{Tables: []driver.Table{table("events", createdNew, quantityNew)}},
+	).WithTargetSchema("crm")
+
+	plan, err := RenderDeterministicWithOptions(d, RenderOptions{
+		TargetSchema:  "crm",
+		TargetDialect: "mysql",
+		SourceDialect: "postgres",
+	})
+	if err != nil {
+		t.Fatalf("RenderDeterministicWithOptions: %v", err)
+	}
+	sql := plan.SQL()
+	if !strings.Contains(sql, "ALTER TABLE `crm`.`events` ALTER COLUMN `created_at` SET DEFAULT (CURRENT_TIMESTAMP(6))") {
+		t.Fatalf("expected function default to use MySQL expression form, got:\n%s", sql)
+	}
+	if !strings.Contains(sql, "ALTER TABLE `crm`.`events` ALTER COLUMN `quantity` SET DEFAULT 1") {
+		t.Fatalf("expected literal default to stay bare, got:\n%s", sql)
+	}
+}
+
 func TestRenderDeterministic_MSSQLDefaultOnlyChangeDropsOldDefaultFirst(t *testing.T) {
 	activeOld := driver.Column{Name: "IsActive", DataType: "bit", IsNullable: false, DefaultExpression: "((0))"}
 	activeNew := activeOld

@@ -50,7 +50,10 @@ import (
 // "11": MSSQL/MySQL computed column definitions preserve NOT NULL inside the
 // generated-column branch instead of returning before nullability is appended
 // (#203).
-const RendererVersion = "11"
+// "12": MySQL ALTER COLUMN ... SET DEFAULT parenthesizes function-valued
+// defaults such as CURRENT_TIMESTAMP, while column definitions keep their
+// engine-specific default form (#204).
+const RendererVersion = "12"
 
 type Renderer struct {
 	target            string
@@ -369,6 +372,18 @@ func (r Renderer) mysqlDefaultForm(def string, col driver.Column) string {
 	return "(" + d + ")"
 }
 
+func mysqlSetDefaultForm(def string) string {
+	d := strings.TrimSpace(def)
+	if d == "" || strings.HasPrefix(d, "(") {
+		return d
+	}
+	upper := strings.ToUpper(d)
+	if upper == "NULL" || isPlainLiteral(d) {
+		return d
+	}
+	return "(" + d + ")"
+}
+
 func isPlainLiteral(d string) bool {
 	if len(d) >= 2 && d[0] == '\'' && d[len(d)-1] == '\'' {
 		_, ok := unquoteSQLString(d)
@@ -636,6 +651,7 @@ func (r Renderer) SetColumnDefaultDDL(tableName string, col driver.Column) (stri
 	case "postgres":
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s", r.qualify(r.normalize(tableName)), r.quote(r.normalize(col.Name)), def), nil
 	case "mysql":
+		def = mysqlSetDefaultForm(def)
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s", r.qualify(r.normalize(tableName)), r.quote(r.normalize(col.Name)), def), nil
 	case "mssql":
 		name := r.quote(r.normalize("df_" + tableName + "_" + col.Name))
