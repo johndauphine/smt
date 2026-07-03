@@ -236,7 +236,9 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		return sized("CHAR", ct.Length, "1"), nil
 	case Text, Json, Xml, Array:
 		return "NVARCHAR(MAX)", nil
-	case Binary, VarBinary, Blob:
+	case Binary:
+		return mssqlBinaryDDL(ct.Length), nil
+	case VarBinary, Blob:
 		return sizedCapped("VARBINARY", ct.Length, 8000), nil
 	case RowVersion:
 		return "ROWVERSION", nil
@@ -312,7 +314,9 @@ func fromCanonicalMySQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		return "JSON", nil
 	case Xml:
 		return "LONGTEXT", nil // mysql has no XML type; XML as text
-	case Binary, VarBinary:
+	case Binary:
+		return mysqlBinaryDDL(ct.Length), nil
+	case VarBinary:
 		if ct.Length <= 0 {
 			return "LONGBLOB", nil
 		}
@@ -369,6 +373,29 @@ func sizedCapped(name string, length, max int) string {
 		return name + "(MAX)"
 	}
 	return sized(name, length, "MAX")
+}
+
+func mssqlBinaryDDL(length int) string {
+	if length <= 0 {
+		return "BINARY(1)"
+	}
+	if length > 8000 {
+		return "VARBINARY(MAX)"
+	}
+	return fmt.Sprintf("BINARY(%d)", length)
+}
+
+func mysqlBinaryDDL(length int) string {
+	if length <= 0 {
+		return "BINARY(1)"
+	}
+	if length <= 255 {
+		return fmt.Sprintf("BINARY(%d)", length)
+	}
+	if length > 65535 {
+		return "MEDIUMBLOB"
+	}
+	return fmt.Sprintf("VARBINARY(%d)", length)
 }
 
 func decimalDDL(name string, ct CanonicalType, target string) string {
@@ -703,8 +730,9 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 			// "no equivalent" message.
 			add("MySQL TIMESTAMP is time-zone-aware but limited to 1970-2038; rendered as " + rendered)
 		}
-		if ct.WithTZ && target == "mysql" && ct.Kind == Time {
-			// MySQL TIME has no time-zone-aware form; the zone offset is dropped.
+		if ct.WithTZ && (target == "mysql" || target == "mssql") && ct.Kind == Time {
+			// MySQL and SQL Server TIME have no time-zone-aware form; the zone
+			// offset is dropped.
 			add("target has no equivalent time-zone-aware type; rendered as " + rendered)
 		}
 		if ct.UTCNormalized && target != "mysql" {

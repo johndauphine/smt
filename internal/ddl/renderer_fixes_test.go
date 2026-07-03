@@ -1,10 +1,12 @@
 package ddl
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"smt/internal/driver"
+	"smt/internal/logging"
 )
 
 // #86 — the CHECK keyword must only be stripped at a word boundary, not off
@@ -274,6 +276,53 @@ func TestColumnType_LengthClamping(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ColumnType(%s, %s(%d)) = %q, want %q", tc.r.Target(), tc.col.DataType, tc.col.MaxLength, got, tc.want)
 		}
+	}
+}
+
+func TestColumnType_UnknownWarnPolicyLogsFallback(t *testing.T) {
+	originalLevel := logging.GetLevel()
+	var buf bytes.Buffer
+	logging.SetOutput(&buf)
+	logging.SetLevel(logging.LevelWarn)
+	logging.SetFormat("text")
+	t.Cleanup(func() {
+		logging.SetLevel(originalLevel)
+		logging.SetOutput(nil)
+		logging.SetFormat("text")
+	})
+
+	r, err := NewRenderer("mssql", "dbo", "warn")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	got, err := r.ColumnType(driver.Column{Name: "Path", DataType: "hierarchyid"})
+	if err != nil {
+		t.Fatalf("ColumnType warn: %v", err)
+	}
+	if got != "NVARCHAR(MAX)" {
+		t.Fatalf("ColumnType warn = %q, want NVARCHAR(MAX)", got)
+	}
+	logged := buf.String()
+	for _, want := range []string{"unsupported source type \"hierarchyid\"", "unknown_type_policy=warn", "NVARCHAR(MAX)"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("warning log missing %q:\n%s", want, logged)
+		}
+	}
+
+	buf.Reset()
+	fallback, err := NewRenderer("mysql", "crm", "text_fallback")
+	if err != nil {
+		t.Fatalf("NewRenderer fallback: %v", err)
+	}
+	got, err = fallback.ColumnType(driver.Column{Name: "Path", DataType: "hierarchyid"})
+	if err != nil {
+		t.Fatalf("ColumnType fallback: %v", err)
+	}
+	if got != "TEXT" {
+		t.Fatalf("ColumnType text_fallback = %q, want TEXT", got)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("text_fallback should stay quiet, got log:\n%s", buf.String())
 	}
 }
 

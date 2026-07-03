@@ -20,7 +20,9 @@ const (
 // original name, so the caller's unknown-type policy decides what to do.
 func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	dt := strings.ToLower(strings.TrimSpace(typeName))
-	mysql := isMySQL(dialect)
+	source := canonDialect(dialect)
+	mysql := source == "mysql"
+	unicodeChars := source == "mysql" || source == "postgres"
 
 	if ct, ok := toArray(dt, m, dialect); ok {
 		return ct
@@ -86,11 +88,11 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 
 	// ---- character ------------------------------------------------------
 	case "varchar", "character varying":
-		return CanonicalType{Kind: Varchar, Length: m.MaxLength}
+		return CanonicalType{Kind: Varchar, Length: m.MaxLength, National: unicodeChars}
 	case "nvarchar":
 		return CanonicalType{Kind: Varchar, Length: m.MaxLength, National: true}
 	case "char", "character", "bpchar":
-		return CanonicalType{Kind: Char, Length: m.MaxLength}
+		return CanonicalType{Kind: Char, Length: m.MaxLength, National: unicodeChars}
 	case "nchar":
 		return CanonicalType{Kind: Char, Length: m.MaxLength, National: true}
 	case "text":

@@ -56,7 +56,10 @@ import (
 // "13": MSSQL-to-MySQL computed string concatenation rewrites column-only
 // textual + expressions to CONCAT(...) instead of numeric MySQL addition
 // (#205).
-const RendererVersion = "13"
+// "14": Type-IR fidelity fixes preserve fixed binary widths, map UTF-8
+// source varchar/char to MSSQL national types, warn on timetz to MSSQL, and
+// log unknown-type warn fallbacks (#218).
+const RendererVersion = "14"
 
 type Renderer struct {
 	target            string
@@ -771,17 +774,25 @@ func expressionReferencesColumn(expr, name string) bool {
 
 func (r Renderer) unknownType(dt string) (string, error) {
 	switch r.unknownTypePolicy {
-	case "warn", "text_fallback":
-		switch r.target {
-		case "mssql":
-			return "NVARCHAR(MAX)", nil
-		case "mysql":
-			return "TEXT", nil
-		default:
-			return "text", nil
-		}
+	case "warn":
+		fallback := r.unknownTypeFallback()
+		logging.Warn("deterministic type mapper: unsupported source type %q for %s target; using %s because unknown_type_policy=warn", dt, r.target, fallback)
+		return fallback, nil
+	case "text_fallback":
+		return r.unknownTypeFallback(), nil
 	default:
 		return "", fmt.Errorf("unsupported source type %q", dt)
+	}
+}
+
+func (r Renderer) unknownTypeFallback() string {
+	switch r.target {
+	case "mssql":
+		return "NVARCHAR(MAX)"
+	case "mysql":
+		return "TEXT"
+	default:
+		return "text"
 	}
 }
 
