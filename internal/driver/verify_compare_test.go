@@ -423,6 +423,71 @@ func TestCompareColumns_BoundedVsUnbounded(t *testing.T) {
 	}
 }
 
+func TestCompareColumns_MySQLOversizedVarcharLOBEquivalence(t *testing.T) {
+	pass := []struct {
+		name     string
+		src, tgt Column
+	}{
+		{
+			name: "threshold stays varchar",
+			src:  Column{Name: "body", DataType: "character varying", MaxLength: 16383},
+			tgt:  Column{Name: "body", DataType: "varchar", MaxLength: 16383},
+		},
+		{
+			name: "above threshold maps to mediumtext",
+			src:  Column{Name: "body", DataType: "character varying", MaxLength: 16384},
+			tgt:  Column{Name: "body", DataType: "mediumtext", MaxLength: 0},
+		},
+		{
+			name: "mediumtext capacity report also accepted",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 20000},
+			tgt:  Column{Name: "body", DataType: "mediumtext", MaxLength: 16777215},
+		},
+		{
+			name: "very large varchar maps to longtext",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 4194304},
+			tgt:  Column{Name: "body", DataType: "longtext", MaxLength: 0},
+		},
+	}
+	for _, tc := range pass {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, "postgres", "mysql")
+			if len(deltas) != 0 {
+				t.Fatalf("expected oversized varchar mapping to compare cleanly, got %v", deltas)
+			}
+		})
+	}
+
+	flag := []struct {
+		name     string
+		src, tgt Column
+	}{
+		{
+			name: "below threshold cannot become mediumtext",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 16383},
+			tgt:  Column{Name: "body", DataType: "mediumtext", MaxLength: 0},
+		},
+		{
+			name: "wrong lob tier still flags",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 20000},
+			tgt:  Column{Name: "body", DataType: "text", MaxLength: 0},
+		},
+		{
+			name: "bounded varchar regression still flags",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 20000},
+			tgt:  Column{Name: "body", DataType: "varchar", MaxLength: 16383},
+		},
+	}
+	for _, tc := range flag {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, "postgres", "mysql")
+			if !hasCriterion(deltas, "max_length") {
+				t.Fatalf("expected max_length delta, got %v", deltas)
+			}
+		})
+	}
+}
+
 // TestCompareColumns_HalvedVarchar pins the canonical "model halved a
 // varchar" failure that PR #45 chased. Ensures the deterministic check
 // catches it where the AI auditor used to false-negative on slow models.

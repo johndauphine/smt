@@ -214,6 +214,13 @@ func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	if isEnumSetType(src.DataType) && isEnumSetType(tgt.DataType) {
 		return nil
 	}
+	// Bounded character sources that exceed MySQL's safe VARCHAR ceiling are
+	// intentionally rendered to a MySQL text LOB tier. The target parser reports
+	// those LOBs as max_length=0, so compare the rendered canonical type instead
+	// of treating the bounded source length as drift (#217).
+	if expectedMySQLOversizedCharLOB(src, tgt, srcDialect, tgtDialect) {
+		return nil
+	}
 	// MySQL's LOB tiers ARE user-meaningful capacity choices when both
 	// sides speak them: LONGTEXT → TEXT silently rejects values above
 	// 64KiB, so a same-family tier change must flag even though both types
@@ -273,6 +280,24 @@ func mysqlLOBTier(dialect, dataType string) (family string, rank int) {
 	default:
 		return "", 0
 	}
+}
+
+func expectedMySQLOversizedCharLOB(src, tgt Column, srcDialect, tgtDialect string) bool {
+	if src.MaxLength <= 0 || !isMySQLDialect(tgtDialect) {
+		return false
+	}
+	expected, ok := renderedCanonicalType(src, srcDialect, tgtDialect)
+	if !ok {
+		return false
+	}
+	expectedBase := normalizeRenderedTypeBase(expected)
+	targetBase := normalizeRenderedTypeBase(tgt.DataType)
+	expectedFamily, expectedRank := mysqlLOBTier(tgtDialect, expectedBase)
+	targetFamily, targetRank := mysqlLOBTier(tgtDialect, targetBase)
+	return expectedFamily == "text" &&
+		expectedRank >= 3 &&
+		expectedFamily == targetFamily &&
+		expectedRank == targetRank
 }
 
 // normMaxLength collapses unbounded sentinels (-1 from MSSQL MAX, 0 from
