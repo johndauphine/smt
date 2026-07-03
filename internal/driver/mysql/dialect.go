@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	gomysql "github.com/go-sql-driver/mysql"
 	"smt/internal/driver"
 )
 
@@ -26,10 +27,6 @@ func (d *Dialect) QualifyTable(schema, table string) string {
 }
 
 func (d *Dialect) BuildDSN(host string, port int, database, user, password string, opts map[string]any) string {
-	// MySQL DSN format: user:password@tcp(host:port)/database?params
-	encodedUser := url.QueryEscape(user)
-	encodedPassword := url.QueryEscape(password)
-
 	params := url.Values{}
 	params.Set("parseTime", "true")
 	params.Set("multiStatements", "true")
@@ -43,7 +40,7 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 		case "require", "required", "true":
 			params.Set("tls", "true")
 		case "verify-ca", "verify_ca":
-			params.Set("tls", "skip-verify")
+			params.Set("tls", "true")
 		case "verify-full", "verify_full", "verify-identity", "verify_identity":
 			params.Set("tls", "true")
 		default:
@@ -82,10 +79,19 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 		params.Set("readTimeout", "5m")
 	}
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?%s",
-		encodedUser, encodedPassword, host, port, database, params.Encode())
-
-	return dsn
+	cfg := gomysql.NewConfig()
+	cfg.User = user
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	cfg.Addr = fmt.Sprintf("%s:%d", host, port)
+	cfg.DBName = database
+	cfg.Params = map[string]string{}
+	for key, vals := range params {
+		if len(vals) > 0 {
+			cfg.Params[key] = vals[len(vals)-1]
+		}
+	}
+	return cfg.FormatDSN()
 }
 
 func (d *Dialect) ParameterPlaceholder(_ int) string {

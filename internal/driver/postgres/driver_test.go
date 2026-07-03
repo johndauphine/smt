@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"database/sql"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -135,6 +136,33 @@ func TestAppendPostgresIndexPartCapturesExpressionIncludeAndFilter(t *testing.T)
 	}
 	if idx.Filter != filter {
 		t.Fatalf("Filter = %q, want %q", idx.Filter, filter)
+	}
+}
+
+func TestBuildDSNCredentialsRoundTrip(t *testing.T) {
+	d := &Dialect{}
+	user := "u@:/%+ space"
+	password := "p@:/%+ space"
+	dsn := d.BuildDSN("localhost", 5432, "test db", user, password, map[string]any{})
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", dsn, err)
+	}
+	if got := u.User.Username(); got != user {
+		t.Fatalf("Username = %q, want %q", got, user)
+	}
+	gotPassword, ok := u.User.Password()
+	if !ok {
+		t.Fatal("password missing from DSN")
+	}
+	if gotPassword != password {
+		t.Fatalf("Password = %q, want %q", gotPassword, password)
+	}
+	if got := strings.TrimPrefix(u.Path, "/"); got != "test db" {
+		t.Fatalf("database path = %q, want test db", got)
+	}
+	if strings.Contains(u.User.String(), "+space") {
+		t.Fatalf("userinfo encodes a space as '+': %s", u.User.String())
 	}
 }
 

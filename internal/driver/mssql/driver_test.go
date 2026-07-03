@@ -1,6 +1,7 @@
 package mssql
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -228,6 +229,33 @@ func TestBuildDSNEncrypt(t *testing.T) {
 				t.Errorf("BuildDSN with encrypt=%v should contain %q, got %q", tt.encrypt, tt.expected, dsn)
 			}
 		})
+	}
+}
+
+func TestBuildDSNCredentialsRoundTrip(t *testing.T) {
+	dialect := &Dialect{}
+	user := "u@:/%+ space"
+	password := "p@:/%+ space"
+	dsn := dialect.BuildDSN("localhost", 1433, "test db", user, password, map[string]any{})
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", dsn, err)
+	}
+	if got := u.User.Username(); got != user {
+		t.Fatalf("Username = %q, want %q", got, user)
+	}
+	gotPassword, ok := u.User.Password()
+	if !ok {
+		t.Fatal("password missing from DSN")
+	}
+	if gotPassword != password {
+		t.Fatalf("Password = %q, want %q", gotPassword, password)
+	}
+	if got := u.Query().Get("database"); got != "test db" {
+		t.Fatalf("database = %q, want test db", got)
+	}
+	if strings.Contains(u.User.String(), "+space") {
+		t.Fatalf("userinfo encodes a space as '+': %s", u.User.String())
 	}
 }
 
