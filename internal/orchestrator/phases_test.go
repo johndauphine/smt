@@ -124,7 +124,7 @@ func TestFilterTables_IncludeAndExclude(t *testing.T) {
 
 func TestFilterTables_GlobPatterns(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Migration.ExcludeTables = []string{"audit_?", "*_archive"}
+	cfg.Migration.ExcludeTables = []string{"audit_?", "*_archive", "legacy*"}
 	o := &Orchestrator{config: cfg}
 
 	in := []source.Table{
@@ -132,6 +132,7 @@ func TestFilterTables_GlobPatterns(t *testing.T) {
 		tbl("audit_log"),     // does NOT match audit_? (? is single char)
 		tbl("posts"),         // kept
 		tbl("posts_archive"), // matches *_archive
+		tbl("LegacyUsers"),   // case-insensitive match
 	}
 	out := o.filterTables(in)
 
@@ -156,11 +157,16 @@ func TestMatchesAny_EmptyPatterns(t *testing.T) {
 }
 
 func TestMatchesAny_InvalidGlobIsTreatedAsNoMatch(t *testing.T) {
-	// filepath.Match returns ErrBadPattern for malformed globs; we swallow
-	// the error and treat it as a no-match so a typo in config doesn't
-	// crash the run. Document that behavior here.
+	// Malformed globs are rejected during config load; this helper still
+	// treats an invalid direct call as a no-match.
 	if matchesAny("Users", []string{"[unclosed"}) {
 		t.Errorf("malformed glob should not match")
+	}
+}
+
+func TestMatchesAny_CaseInsensitive(t *testing.T) {
+	if !matchesAny("AuditLog", []string{"audit*"}) {
+		t.Error("lowercase pattern should match uppercase table name")
 	}
 }
 

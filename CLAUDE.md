@@ -102,7 +102,7 @@ CLI flow:
 
 ### Config + secrets split
 
-- `~/.smt/state.db` — run history, encrypted profiles, schema snapshots
+- `~/.smt/migrate.db` — run history, encrypted profiles, schema snapshots
 - `~/.smt/type-cache.json` — legacy AI type-mapping cache for the optional `MapType` API; **not** consulted by the deterministic executable-DDL path
 - `~/.secrets/smt-config.yaml` — AI keys, encryption master key, Slack webhook (mode 0600, env var `SMT_SECRETS_FILE` overrides)
 - `config.yaml` — per-migration settings (source/target connection, schema names, include/exclude tables, create_indexes/FKs/checks flags). See `config.yaml.example`.

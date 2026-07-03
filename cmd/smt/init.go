@@ -217,7 +217,7 @@ func initSaveProfile(a *wizard.Answers, data []byte) error {
 	}
 	defer state.Close()
 	if err := state.SaveProfile(name, a.ProfileDescription, data); err != nil {
-		if strings.Contains(err.Error(), "SMT_MASTER_KEY is not set") {
+		if isMissingMasterKeyError(err) {
 			return fmt.Errorf("SMT_MASTER_KEY is not set; export it before saving profiles")
 		}
 		return err

@@ -2,6 +2,8 @@ package checkpoint
 
 import (
 	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -52,6 +54,48 @@ func TestRunLifecycle(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].ID != runID {
 		t.Fatalf("GetAllRuns = %+v, want one run %q", runs, runID)
+	}
+}
+
+func TestReopenMarksRunningRunsFailed(t *testing.T) {
+	dir := t.TempDir()
+	state, err := New(dir)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if err := state.CreateRun("stale", RunKindApply, "dbo", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	state.Close()
+
+	reopened, err := New(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	r, err := reopened.GetRunByID("stale")
+	if err != nil || r == nil {
+		t.Fatalf("GetRunByID: %v %v", r, err)
+	}
+	if r.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", r.Status)
+	}
+	if r.CompletedAt == nil {
+		t.Fatal("CompletedAt = nil, want reconciliation timestamp")
+	}
+	if !strings.Contains(r.Error, "interrupted before completion") {
+		t.Fatalf("Error = %q, want interrupted message", r.Error)
+	}
+}
+
+func TestIgnoreDuplicateColumn(t *testing.T) {
+	if err := ignoreDuplicateColumn(errors.New("SQL logic error: duplicate column name: phase (1)")); err != nil {
+		t.Fatalf("ignoreDuplicateColumn duplicate error = %v, want nil", err)
+	}
+	err := errors.New("database is locked")
+	if got := ignoreDuplicateColumn(err); got != err {
+		t.Fatalf("ignoreDuplicateColumn(non-duplicate) = %v, want original error", got)
 	}
 }
 

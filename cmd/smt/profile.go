@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v3"
@@ -64,7 +65,7 @@ func profileSave(c *cli.Context) error {
 	defer state.Close()
 
 	if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
-		if strings.Contains(err.Error(), "SMT_MASTER_KEY is not set") {
+		if isMissingMasterKeyError(err) {
 			return fmt.Errorf("SMT_MASTER_KEY is not set; export it before saving profiles")
 		}
 		return err
@@ -88,14 +89,14 @@ func profileList(c *cli.Context) error {
 		fmt.Println("No profiles found")
 		return nil
 	}
-	fmt.Printf("%-20s %-40s %-19s %-19s\n", "NAME", "DESCRIPTION", "CREATED", "UPDATED")
+	fmt.Printf("%-20s %-40s %-20s %-20s\n", "NAME", "DESCRIPTION", "CREATED", "UPDATED")
 	for _, p := range profiles {
 		desc := strings.ReplaceAll(strings.TrimSpace(p.Description), "\n", " ")
-		fmt.Printf("%-20s %-40s %-19s %-19s\n",
+		fmt.Printf("%-20s %-40s %-20s %-20s\n",
 			p.Name,
 			desc,
-			p.CreatedAt.Format("2006-01-02 15:04:05"),
-			p.UpdatedAt.Format("2006-01-02 15:04:05"))
+			p.CreatedAt.UTC().Format(time.RFC3339),
+			p.UpdatedAt.UTC().Format(time.RFC3339))
 	}
 	return nil
 }
@@ -128,11 +129,27 @@ func profileExport(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(out, blob, 0600); err != nil {
+	if err := writePrivateFile(out, blob); err != nil {
 		return err
 	}
 	fmt.Printf("Exported profile %q to %s\n", name, out)
 	return nil
+}
+
+func writePrivateFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
+}
+
+func isMissingMasterKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SMT_MASTER_KEY is not set") ||
+		strings.Contains(msg, "master key not found")
 }
 
 func openProfileStore() (checkpoint.HistoryBackend, error) {

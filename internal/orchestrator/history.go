@@ -23,10 +23,10 @@ func (o *Orchestrator) ShowHistory() error {
 		return nil
 	}
 
-	fmt.Printf("%-36s %-9s %-10s %-19s %-19s %s\n", "RUN ID", "KIND", "STATUS", "STARTED", "ENDED", "PHASE")
-	fmt.Println(strings.Repeat("-", 115))
+	fmt.Printf("%-36s %-9s %-10s %-20s %-20s %s\n", "RUN ID", "KIND", "STATUS", "STARTED", "ENDED", "PHASE")
+	fmt.Println(strings.Repeat("-", 117))
 	for _, r := range runs {
-		fmt.Printf("%-36s %-9s %-10s %-19s %-19s %s\n",
+		fmt.Printf("%-36s %-9s %-10s %-20s %-20s %s\n",
 			r.ID, runKindLabel(r.Kind), r.Status, fmtTime(&r.StartedAt), fmtTime(r.CompletedAt), r.Phase)
 	}
 	return nil
@@ -67,7 +67,7 @@ func fmtTime(t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return "-"
 	}
-	return t.Format("2006-01-02 15:04:05")
+	return t.UTC().Format(time.RFC3339)
 }
 
 // asserts checkpoint.Run is the type we expect (compile-time check).

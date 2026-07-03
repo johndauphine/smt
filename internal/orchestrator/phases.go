@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -231,8 +232,12 @@ func (o *Orchestrator) filterTables(tables []source.Table) []source.Table {
 }
 
 func matchesAny(name string, patterns []string) bool {
+	lowerName := strings.ToLower(name)
 	for _, p := range patterns {
 		if ok, _ := filepath.Match(p, name); ok {
+			return true
+		}
+		if ok, _ := filepath.Match(strings.ToLower(p), lowerName); ok {
 			return true
 		}
 	}

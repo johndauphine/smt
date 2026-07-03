@@ -48,21 +48,21 @@ func TestDriftDialectCanonicalization(t *testing.T) {
 	}
 }
 
-// filterDesiredScope must match create/sync exactly: case-sensitive
-// filepath.Match on the original source names (exclude wins; include is an
+// filterDesiredScope must match create/sync exactly: filepath.Match on the
+// original source names with case folding (exclude wins; include is an
 // allowlist).
 func TestFilterDesiredScope_MatchesOrchestrator(t *testing.T) {
 	tables := []driver.Table{{Name: "Orders"}, {Name: "AuditLog"}, {Name: "Items"}}
 
-	// Exclude glob — case-sensitive, like the orchestrator.
+	// Exclude glob.
 	got := filterDesiredScope(tables, nil, []string{"Audit*"})
 	if len(got) != 2 || got[0].Name != "Orders" || got[1].Name != "Items" {
 		t.Errorf("exclude Audit* = %+v, want [Orders Items]", got)
 	}
-	// Case-sensitive: lowercase pattern must NOT match the capitalized name.
+	// Case-insensitive: lowercase pattern also matches the capitalized name.
 	got = filterDesiredScope(tables, nil, []string{"audit*"})
-	if len(got) != 3 {
-		t.Errorf("case-sensitive exclude should not match AuditLog: %+v", got)
+	if len(got) != 2 || got[0].Name != "Orders" || got[1].Name != "Items" {
+		t.Errorf("case-insensitive exclude should match AuditLog: %+v", got)
 	}
 	// Include allowlist.
 	got = filterDesiredScope(tables, []string{"Orders"}, nil)

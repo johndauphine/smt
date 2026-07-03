@@ -40,6 +40,12 @@ type Run struct {
 	Error       string // Error message if status is "failed"
 }
 
+const (
+	sqliteLegacyTimeLayout = "2006-01-02 15:04:05"
+	sqliteUTCNow           = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+	interruptedRunError    = "run interrupted before completion; marked failed on next SMT start"
+)
+
 // New creates a new state manager
 func New(dataDir string) (*State, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
@@ -124,7 +130,10 @@ func (s *State) migrate() error {
 	}
 
 	// One-time migration: sanitize any passwords stored in config column
-	return s.sanitizeStoredConfigs()
+	if err := s.sanitizeStoredConfigs(); err != nil {
+		return err
+	}
+	return s.reconcileRunningRuns()
 }
 
 func (s *State) ensureRunColumns() error {
@@ -157,37 +166,53 @@ func (s *State) ensureRunColumns() error {
 	}
 
 	if needsProfile {
-		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN profile_name TEXT`); err != nil {
+		_, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN profile_name TEXT`)
+		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
 	}
 	if needsConfigPath {
-		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_path TEXT`); err != nil {
+		_, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_path TEXT`)
+		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
 	}
 	if needsError {
-		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN error TEXT`); err != nil {
+		_, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN error TEXT`)
+		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
 	}
 	if needsPhase {
-		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN phase TEXT DEFAULT 'initializing'`); err != nil {
+		_, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN phase TEXT DEFAULT 'initializing'`)
+		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
 	}
 	if needsConfigHash {
-		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_hash TEXT`); err != nil {
+		_, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_hash TEXT`)
+		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
 	}
 	if needsKind {
-		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'apply'`); err != nil {
+		_, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'apply'`)
+		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func ignoreDuplicateColumn(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return nil
+	}
+	return err
 }
 
 func (s *State) ensureProfileColumns() error {
@@ -301,6 +326,9 @@ func (s *State) sanitizeStoredConfigs() error {
 			updates = append(updates, update{id: id, config: string(newConfig)})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
 	// Apply updates
 	for _, u := range updates {
@@ -310,6 +338,17 @@ func (s *State) sanitizeStoredConfigs() error {
 	}
 
 	return nil
+}
+
+func (s *State) reconcileRunningRuns() error {
+	_, err := s.db.Exec(`
+		UPDATE runs
+		SET status = 'failed',
+		    completed_at = `+sqliteUTCNow+`,
+		    error = CASE WHEN error IS NULL OR error = '' THEN ? ELSE error END
+		WHERE status = 'running'
+	`, interruptedRunError)
+	return err
 }
 
 // Close closes the database connection
@@ -330,7 +369,7 @@ func (s *State) CreateRun(id, kind, sourceSchema, targetSchema string, config an
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO runs (id, kind, started_at, status, source_schema, target_schema, config, profile_name, config_path, config_hash)
-		VALUES (?, ?, datetime('now'), 'running', ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, `+sqliteUTCNow+`, 'running', ?, ?, ?, ?, ?, ?)
 	`, id, kind, sourceSchema, targetSchema, string(configJSON), profileName, configPath, configHash)
 	return err
 }
@@ -338,7 +377,7 @@ func (s *State) CreateRun(id, kind, sourceSchema, targetSchema string, config an
 // CompleteRun marks a run as complete
 func (s *State) CompleteRun(id string, status string, errorMsg string) error {
 	_, err := s.db.Exec(`
-		UPDATE runs SET status = ?, completed_at = datetime('now'), error = ?
+		UPDATE runs SET status = ?, completed_at = `+sqliteUTCNow+`, error = ?
 		WHERE id = ?
 	`, status, errorMsg, id)
 	return err
@@ -371,9 +410,9 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		if err := rows.Scan(&r.ID, &r.Kind, &startedAtStr, &completedAtStr, &r.Status, &r.Phase, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
 			return nil, err
 		}
-		r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+		r.StartedAt, _ = parseStateTime(startedAtStr)
 		if completedAtStr.Valid {
-			t, _ := time.Parse("2006-01-02 15:04:05", completedAtStr.String)
+			t, _ := parseStateTime(completedAtStr.String)
 			r.CompletedAt = &t
 		}
 		if configStr.Valid {
@@ -390,7 +429,7 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		}
 		runs = append(runs, r)
 	}
-	return runs, nil
+	return runs, rows.Err()
 }
 
 // GetRunByID returns a specific run by ID
@@ -413,9 +452,9 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 		return nil, err
 	}
 
-	r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+	r.StartedAt, _ = parseStateTime(startedAtStr)
 	if completedAtStr.Valid {
-		t, _ := time.Parse("2006-01-02 15:04:05", completedAtStr.String)
+		t, _ := parseStateTime(completedAtStr.String)
 		r.CompletedAt = &t
 	}
 	if configStr.Valid {
@@ -431,4 +470,11 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 		r.Error = errorMsg.String
 	}
 	return &r, nil
+}
+
+func parseStateTime(value string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t, nil
+	}
+	return time.ParseInLocation(sqliteLegacyTimeLayout, value, time.UTC)
 }

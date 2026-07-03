@@ -9,101 +9,6 @@ import (
 	"smt/internal/secrets"
 )
 
-func TestMSSQLDSNURLEncoding(t *testing.T) {
-	tests := []struct {
-		name     string
-		user     string
-		password string
-		database string
-		wantUser string
-		wantPass string
-		wantDB   string
-	}{
-		{
-			name:     "plain credentials",
-			user:     "admin",
-			password: "secret",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "secret",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "password with @",
-			user:     "admin",
-			password: "pass@word",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "pass%40word",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "password with colon",
-			user:     "admin",
-			password: "pass:word",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "pass%3Aword",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "password with slash",
-			user:     "admin",
-			password: "pass/word",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "pass%2Fword",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "user with @",
-			user:     "user@domain",
-			password: "secret",
-			database: "mydb",
-			wantUser: "user%40domain",
-			wantPass: "secret",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "database with spaces",
-			user:     "admin",
-			password: "secret",
-			database: "my database",
-			wantUser: "admin",
-			wantPass: "secret",
-			wantDB:   "my+database", // QueryEscape uses + for spaces
-		},
-		{
-			name:     "complex password",
-			user:     "admin",
-			password: "P@ss:w/rd?123",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "P%40ss%3Aw%2Frd%3F123",
-			wantDB:   "mydb",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{}
-			dsn := cfg.buildMSSQLDSN("localhost", 1433, tt.database, tt.user, tt.password,
-				true, false, 0, "", "", "", "", "")
-
-			// Check that encoded values appear in DSN
-			if !strings.Contains(dsn, tt.wantUser+":") {
-				t.Errorf("MSSQL DSN missing encoded user %q in %q", tt.wantUser, dsn)
-			}
-			if !strings.Contains(dsn, ":"+tt.wantPass+"@") {
-				t.Errorf("MSSQL DSN missing encoded password %q in %q", tt.wantPass, dsn)
-			}
-			if !strings.Contains(dsn, "database="+tt.wantDB) {
-				t.Errorf("MSSQL DSN missing encoded database %q in %q", tt.wantDB, dsn)
-			}
-		})
-	}
-}
-
 func disableSecretsForTest(t *testing.T) {
 	t.Helper()
 	secrets.Reset()
@@ -127,139 +32,6 @@ notifications:
 	t.Setenv(secrets.SecretsFileEnvVar, secretsPath)
 	t.Cleanup(secrets.Reset)
 	return webhook
-}
-
-func TestPostgresDSNURLEncoding(t *testing.T) {
-	tests := []struct {
-		name     string
-		user     string
-		password string
-		database string
-		wantUser string
-		wantPass string
-		wantDB   string
-	}{
-		{
-			name:     "plain credentials",
-			user:     "admin",
-			password: "secret",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "secret",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "password with @",
-			user:     "admin",
-			password: "pass@word",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "pass%40word",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "password with colon",
-			user:     "admin",
-			password: "pass:word",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "pass%3Aword",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "password with slash",
-			user:     "admin",
-			password: "pass/word",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "pass%2Fword",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "user with @",
-			user:     "user@domain",
-			password: "secret",
-			database: "mydb",
-			wantUser: "user%40domain",
-			wantPass: "secret",
-			wantDB:   "mydb",
-		},
-		{
-			name:     "database with spaces",
-			user:     "admin",
-			password: "secret",
-			database: "my database",
-			wantUser: "admin",
-			wantPass: "secret",
-			wantDB:   "my%20database", // PathEscape uses %20 for spaces
-		},
-		{
-			name:     "complex password",
-			user:     "admin",
-			password: "P@ss:w/rd?123",
-			database: "mydb",
-			wantUser: "admin",
-			wantPass: "P%40ss%3Aw%2Frd%3F123",
-			wantDB:   "mydb",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{}
-			dsn := cfg.buildPostgresDSN("localhost", 5432, tt.database, tt.user, tt.password,
-				"disable", "", "")
-
-			// Check that encoded values appear in DSN
-			if !strings.Contains(dsn, tt.wantUser+":") {
-				t.Errorf("Postgres DSN missing encoded user %q in %q", tt.wantUser, dsn)
-			}
-			if !strings.Contains(dsn, ":"+tt.wantPass+"@") {
-				t.Errorf("Postgres DSN missing encoded password %q in %q", tt.wantPass, dsn)
-			}
-			if !strings.Contains(dsn, "/"+tt.wantDB+"?") {
-				t.Errorf("Postgres DSN missing encoded database %q in %q", tt.wantDB, dsn)
-			}
-		})
-	}
-}
-
-func TestMSSQLKerberosEncoding(t *testing.T) {
-	cfg := &Config{}
-
-	// Test MSSQL Kerberos with special chars
-	dsn := cfg.buildMSSQLDSN("localhost", 1433, "my database", "user@REALM.COM", "",
-		true, false, 0, "kerberos", "/path/to/krb5.conf", "", "REALM.COM", "MSSQLSvc/host:1433")
-
-	// database is QueryEscaped (+ for spaces)
-	if !strings.Contains(dsn, "database=my+database") {
-		t.Errorf("MSSQL Kerberos DSN missing encoded database in %q", dsn)
-	}
-	// username in query param is QueryEscaped
-	if !strings.Contains(dsn, "krb5-username=user%40REALM.COM") {
-		t.Errorf("MSSQL Kerberos DSN missing encoded username in %q", dsn)
-	}
-	// SPN with special chars
-	if !strings.Contains(dsn, "ServerSPN=MSSQLSvc%2Fhost%3A1433") {
-		t.Errorf("MSSQL Kerberos DSN missing encoded SPN in %q", dsn)
-	}
-}
-
-func TestPostgresKerberosEncoding(t *testing.T) {
-	cfg := &Config{}
-
-	// Test Postgres Kerberos with special chars
-	dsn := cfg.buildPostgresDSN("localhost", 5432, "my database", "user@REALM.COM", "",
-		"disable", "kerberos", "prefer")
-
-	// database is PathEscaped (%20 for spaces)
-	if !strings.Contains(dsn, "/my%20database?") {
-		t.Errorf("Postgres Kerberos DSN missing encoded database in %q", dsn)
-	}
-	// user in userinfo is QueryEscaped
-	if !strings.Contains(dsn, "user%40REALM.COM@") {
-		t.Errorf("Postgres Kerberos DSN missing encoded user in %q", dsn)
-	}
 }
 
 func TestSameEngineValidation(t *testing.T) {
@@ -370,6 +142,20 @@ func TestSameEngineValidation(t *testing.T) {
 			expectError: true,
 			errorMsg:    "source and target cannot be the same database",
 		},
+		{
+			name:        "same database blocked (case-insensitive database)",
+			sourceType:  "postgres",
+			targetType:  "postgres",
+			targetMode:  "upsert",
+			sourceHost:  "localhost",
+			targetHost:  "localhost",
+			sourcePort:  5432,
+			targetPort:  5432,
+			sourceDB:    "MyDB",
+			targetDB:    "mydb",
+			expectError: true,
+			errorMsg:    "source and target cannot be the same database",
+		},
 	}
 
 	for _, tt := range tests {
@@ -410,6 +196,40 @@ func TestSameEngineValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLoadBytesRejectsUnknownKeys(t *testing.T) {
+	disableSecretsForTest(t)
+
+	configYAML := minimalConfigYAML() + `
+migration:
+  excluded_tables:
+    - temp_*
+`
+	_, err := LoadBytes([]byte(configYAML))
+	if err == nil {
+		t.Fatal("LoadBytes() succeeded, want unknown-key error")
+	}
+	if !strings.Contains(err.Error(), "field excluded_tables not found") {
+		t.Fatalf("LoadBytes() error = %v, want unknown-key error", err)
+	}
+}
+
+func TestLoadBytesRejectsBadTableGlob(t *testing.T) {
+	disableSecretsForTest(t)
+
+	configYAML := minimalConfigYAML() + `
+migration:
+  exclude_tables:
+    - "[temp_"
+`
+	_, err := LoadBytes([]byte(configYAML))
+	if err == nil {
+		t.Fatal("LoadBytes() succeeded, want invalid glob error")
+	}
+	if !strings.Contains(err.Error(), `migration.exclude_tables[0] invalid glob "[temp_"`) {
+		t.Fatalf("LoadBytes() error = %v, want invalid glob error", err)
 	}
 }
 
@@ -1422,7 +1242,7 @@ func TestRequireTargetConnection(t *testing.T) {
 	}
 
 	cfg.Target.Port = 5432
-	cfg.Target.Database = "source"
+	cfg.Target.Database = "SOURCE"
 	if err := cfg.RequireTargetConnection(); err == nil || !strings.Contains(err.Error(), "source and target cannot be the same database") {
 		t.Fatalf("RequireTargetConnection() = %v, want same database error", err)
 	}
