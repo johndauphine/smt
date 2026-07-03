@@ -221,23 +221,26 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 	case Varchar:
 		if ct.National {
 			// Unicode intent (pg/mysql source, or MSSQL nvarchar). NVARCHAR keeps
-			// exact character length AND unicode, but caps at 4000 chars inline.
-			// Above 4000, fall back to length-preserving codepage VARCHAR rather
-			// than NVARCHAR(MAX): exact max_length (criterion 1) outranks unicode
-			// representability, which NVARCHAR cannot deliver bounded here (#224).
-			if ct.Length > 4000 {
-				return sizedCapped("VARCHAR", ct.Length, 8000), nil
+			// exact character length AND unicode but caps at 4000 chars inline.
+			// Only 4001-8000 can keep its exact bound, and only as codepage
+			// VARCHAR — so that's the sole range we drop unicode for. At >8000
+			// the bound is unrepresentable either way (both forms are MAX), so
+			// keep unicode via NVARCHAR(MAX); unbounded (<=0) is likewise
+			// NVARCHAR(MAX) (#224).
+			if ct.Length > 4000 && ct.Length <= 8000 {
+				return fmt.Sprintf("VARCHAR(%d)", ct.Length), nil
 			}
 			return sizedCapped("NVARCHAR", ct.Length, 4000), nil
 		}
 		return sizedCapped("VARCHAR", ct.Length, 8000), nil
 	case Char:
 		if ct.National {
-			// Same length gate as Varchar: NCHAR preserves unicode+length up to
-			// 4000; above that, length-preserving codepage CHAR (fixed CHAR maxes
-			// at 8000; wider still falls to VARCHAR(MAX)).
+			// Same gate as Varchar: NCHAR up to 4000 (unicode + exact length);
+			// 4001-8000 keeps the fixed bound as codepage CHAR; >8000 can't be a
+			// fixed CHAR and the bound is lost anyway, so keep unicode as
+			// NVARCHAR(MAX).
 			if ct.Length > 8000 {
-				return "VARCHAR(MAX)", nil
+				return "NVARCHAR(MAX)", nil
 			}
 			if ct.Length > 4000 {
 				return sized("CHAR", ct.Length, "1"), nil
@@ -762,7 +765,10 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 			add("MySQL LOB capacity tier is not represented on target; rendered as " + rendered)
 		}
 	case Varchar, Char:
-		if target == "mssql" && ct.National && ct.Length > 4000 {
+		// Only the 4001-8000 range renders as bounded codepage VARCHAR/CHAR
+		// (unicode dropped to keep the exact length). <=4000 stays NVARCHAR/NCHAR
+		// and >8000 stays NVARCHAR(MAX) — both keep unicode, so no warning.
+		if target == "mssql" && ct.National && ct.Length > 4000 && ct.Length <= 8000 {
 			add("unicode source exceeds SQL Server NVARCHAR/NCHAR 4000-char limit; rendered as length-preserving codepage " + rendered + " (characters outside the target collation's code page may be lost)")
 		}
 	case Spatial:
