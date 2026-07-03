@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"smt/internal/logging"
 	"smt/internal/secrets"
 )
 
@@ -170,6 +171,13 @@ func getMasterKey() ([]byte, error) {
 			return nil, fmt.Errorf("encryption.master_key must decode to 32 bytes (got %d)", len(key))
 		}
 		return key, nil
+	}
+	if err != nil {
+		var notFound *secrets.SecretsNotFoundError
+		if !errors.As(err, &notFound) {
+			logging.Warn("secrets: failed to load %s for encryption master key; falling back to %s: %v",
+				secrets.GetSecretsPath(), masterKeyEnv, err)
+		}
 	}
 
 	// Fall back to environment variable for backwards compatibility
