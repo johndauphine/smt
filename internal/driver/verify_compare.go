@@ -687,7 +687,8 @@ func tzClass(dialect, dataType string) string {
 //     128-bit identifier; reported max_length differs across
 //     dialects (0, 0, 36, 16) but isn't user-controlled.
 //   - "json"        — PG `json` / `jsonb`, MySQL `json`.
-//   - "boolean"     — PG `boolean`, MSSQL `bit`, MySQL `tinyint(1)`.
+//   - "boolean"     — PG `boolean`, MSSQL `bit`, MySQL `tinyint(1)` /
+//     `bit(1)`.
 //   - ""            — not a fixed-form class; standard length/precision
 //     comparison applies.
 //
@@ -697,6 +698,7 @@ func tzClass(dialect, dataType string) string {
 // the literal max_length check.
 func dataTypeClass(dialect string, c Column) string {
 	dt := strings.ToLower(strings.TrimSpace(c.DataType))
+	dialect = strings.ToLower(strings.TrimSpace(dialect))
 
 	// Dialect-canonical UUID/JSON/boolean types — unambiguous.
 	switch dt {
@@ -704,7 +706,10 @@ func dataTypeClass(dialect string, c Column) string {
 		return "uuid"
 	case "json", "jsonb":
 		return "json"
-	case "boolean", "bool", "bit":
+	case "boolean", "bool":
+		return "boolean"
+	}
+	if dialect == "mssql" && dt == "bit" {
 		return "boolean"
 	}
 
@@ -720,6 +725,12 @@ func dataTypeClass(dialect string, c Column) string {
 	// requires that side to be uniqueidentifier/uuid/char(36)/binary(16).
 	// In practice those pairings ARE UUIDs.
 	if dialect == "mysql" || dialect == "mariadb" {
+		if dt == "tinyint" && c.DisplayWidth == 1 {
+			return "boolean"
+		}
+		if dt == "bit" && bitColumnWidth(c) == 1 {
+			return "boolean"
+		}
 		if dt == "char" && c.MaxLength == 36 {
 			return "uuid"
 		}
@@ -729,6 +740,19 @@ func dataTypeClass(dialect string, c Column) string {
 	}
 
 	return ""
+}
+
+func bitColumnWidth(c Column) int {
+	if c.MaxLength > 0 {
+		return c.MaxLength
+	}
+	if c.Precision > 0 {
+		return c.Precision
+	}
+	if c.DisplayWidth > 0 {
+		return c.DisplayWidth
+	}
+	return 0
 }
 
 // defaultExpressionClass classifies a raw default-expression string into one

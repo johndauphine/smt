@@ -84,6 +84,10 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 	switch ct.Kind {
 	case Boolean:
 		return "boolean", nil
+	case BitString:
+		return bitStringDDL("bit", ct.Length), nil
+	case VarBitString:
+		return bitStringDDL("bit varying", ct.Length), nil
 	case TinyInt:
 		return "smallint", nil // pg has no 8-bit int
 	case SmallInt:
@@ -190,6 +194,8 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 	switch ct.Kind {
 	case Boolean:
 		return "BIT", nil
+	case BitString, VarBitString:
+		return sizedCapped("VARBINARY", bytesForBits(ct.Length), 8000), nil
 	case TinyInt:
 		return "TINYINT", nil
 	case SmallInt:
@@ -276,6 +282,10 @@ func fromCanonicalMySQL(ct CanonicalType, opts RenderOpts) (string, error) {
 	switch ct.Kind {
 	case Boolean:
 		return "TINYINT(1)", nil
+	case BitString:
+		return mysqlBitString(ct.Length), nil
+	case VarBitString:
+		return mysqlVarBitString(ct.Length), nil
 	case TinyInt:
 		return u("TINYINT"), nil
 	case SmallInt:
@@ -369,6 +379,44 @@ func decimalDDL(name string, ct CanonicalType) string {
 		return fmt.Sprintf("%s(%d,%d)", name, ct.Precision, ct.Scale)
 	}
 	return name
+}
+
+func bitStringDDL(name string, length int) string {
+	if length > 0 {
+		return fmt.Sprintf("%s(%d)", name, length)
+	}
+	return name
+}
+
+func bytesForBits(bits int) int {
+	if bits <= 0 {
+		return 0
+	}
+	return (bits + 7) / 8
+}
+
+func mysqlBitString(bits int) string {
+	if bits <= 0 {
+		return "BIT"
+	}
+	if bits <= 64 {
+		return fmt.Sprintf("BIT(%d)", bits)
+	}
+	return mysqlVarBinaryBytes(bytesForBits(bits))
+}
+
+func mysqlVarBitString(bits int) string {
+	return mysqlVarBinaryBytes(bytesForBits(bits))
+}
+
+func mysqlVarBinaryBytes(bytes int) string {
+	if bytes <= 0 {
+		return "LONGBLOB"
+	}
+	if bytes > 65535 {
+		return "MEDIUMBLOB"
+	}
+	return fmt.Sprintf("VARBINARY(%d)", bytes)
 }
 
 func fspDDL(name string, ct CanonicalType, max int) string {
@@ -575,6 +623,13 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 		if ct.Unsigned && target != "mysql" && !opts.IsIdentity {
 			add("target has no unsigned 64-bit integer; rendered as " + rendered)
 		}
+	case BitString, VarBitString:
+		if target == "mssql" {
+			add("target has no native bit-string type; rendered as " + rendered)
+		}
+		if target == "mysql" && (ct.Kind == VarBitString || ct.Length > 64) {
+			add("target has no equivalent bit-string type for this width; rendered as " + rendered)
+		}
 	case Time, Timestamp:
 		if ct.WithTZ && target == "mysql" && ct.Kind == Timestamp {
 			// MySQL TIMESTAMP preserves the TZ-aware semantic (#169) but is
@@ -649,6 +704,10 @@ func kindName(k Kind) string {
 	switch k {
 	case Boolean:
 		return "boolean"
+	case BitString:
+		return "bit_string"
+	case VarBitString:
+		return "varbit_string"
 	case TinyInt:
 		return "tinyint"
 	case SmallInt:

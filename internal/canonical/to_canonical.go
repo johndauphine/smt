@@ -26,6 +26,10 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 		return ct
 	}
 
+	if ct, ok := toBit(dt, m, dialect); ok {
+		return ct
+	}
+
 	if ct, ok := toSpatial(dt, m, dialect); ok {
 		return ct
 	}
@@ -50,7 +54,7 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 		return CanonicalType{Kind: Integer, Unsigned: m.IsUnsigned}
 	case "bigint", "int8", "bigserial":
 		return CanonicalType{Kind: BigInt, Unsigned: m.IsUnsigned}
-	case "bit", "bool", "boolean":
+	case "bool", "boolean":
 		return CanonicalType{Kind: Boolean}
 
 	// ---- exact / approximate numeric -----------------------------------
@@ -175,6 +179,63 @@ func toArray(dt string, m TypeMeta, dialect string) (CanonicalType, bool) {
 	default:
 		return CanonicalType{}, false
 	}
+}
+
+func toBit(dt string, m TypeMeta, dialect string) (CanonicalType, bool) {
+	switch dt {
+	case "bool", "boolean":
+		return CanonicalType{Kind: Boolean}, true
+	case "bit":
+		return fixedBitType(bitWidth(m), dialect), true
+	case "varbit", "bit varying":
+		return CanonicalType{Kind: VarBitString, Length: bitWidth(m)}, true
+	}
+	if width, ok := typeArgWidth(dt, "bit"); ok {
+		return fixedBitType(width, dialect), true
+	}
+	if width, ok := typeArgWidth(dt, "bit varying"); ok {
+		return CanonicalType{Kind: VarBitString, Length: width}, true
+	}
+	return CanonicalType{}, false
+}
+
+func fixedBitType(width int, dialect string) CanonicalType {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "mssql", "sqlserver", "sql-server", "sql_server":
+		return CanonicalType{Kind: Boolean}
+	case "mysql", "mariadb", "maria":
+		if width == 1 {
+			return CanonicalType{Kind: Boolean}
+		}
+		return CanonicalType{Kind: BitString, Length: width}
+	case "postgres", "postgresql", "pg":
+		return CanonicalType{Kind: BitString, Length: width}
+	default:
+		if width <= 1 {
+			return CanonicalType{Kind: Boolean}
+		}
+		return CanonicalType{Kind: BitString, Length: width}
+	}
+}
+
+func bitWidth(m TypeMeta) int {
+	if m.MaxLength > 0 {
+		return m.MaxLength
+	}
+	if m.Precision > 0 {
+		return m.Precision
+	}
+	if m.DisplayWidth > 0 {
+		return m.DisplayWidth
+	}
+	return 0
+}
+
+func typeArgWidth(dt, base string) (int, bool) {
+	if !strings.HasPrefix(dt, base+"(") || !strings.HasSuffix(dt, ")") {
+		return 0, false
+	}
+	return atoiPositive(strings.TrimSpace(dt[len(base)+1 : len(dt)-1]))
 }
 
 func toSpatial(dt string, m TypeMeta, dialect string) (CanonicalType, bool) {

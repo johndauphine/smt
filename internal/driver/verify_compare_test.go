@@ -765,6 +765,21 @@ func TestCompareColumns_MySQLLOBTiers(t *testing.T) {
 	}
 }
 
+func TestCompareColumns_BitStringDoesNotEqualBoolean(t *testing.T) {
+	src := []Column{{Name: "flags", DataType: "bit", Precision: 64}}
+	tgt := []Column{{Name: "flags", DataType: "boolean"}}
+	deltas := CompareColumns(src, tgt, "mysql", "postgres")
+	if !hasCriterion(deltas, "type") {
+		t.Fatalf("expected bit(64) -> boolean to report a type delta, got %v", deltas)
+	}
+
+	bitOne := []Column{{Name: "ok", DataType: "bit", Precision: 1}}
+	boolTarget := []Column{{Name: "ok", DataType: "boolean"}}
+	if deltas := CompareColumns(bitOne, boolTarget, "mysql", "postgres"); len(deltas) != 0 {
+		t.Fatalf("expected mysql bit(1) boolean convention to compare cleanly, got %v", deltas)
+	}
+}
+
 // PG renders MSSQL GETUTCDATE()/SYSUTCDATETIME() as CURRENT_TIMESTAMP AT TIME
 // ZONE 'UTC'. Both are current-datetime defaults; the comparator must treat
 // them as equivalent so a freshly-created target doesn't report drift.
@@ -935,7 +950,7 @@ func TestCompareColumns_ParserContractFields(t *testing.T) {
 // positive regardless of model.
 func TestBuildVerifyParsePrompt_ContractFields(t *testing.T) {
 	p := buildVerifyParsePrompt("CREATE TABLE t (id INT)", "mysql")
-	for _, field := range []string{"datetime_precision", "is_unsigned", "display_width", "enum_values"} {
+	for _, field := range []string{"datetime_precision", "is_unsigned", "display_width", "enum_values", "BIT(N)"} {
 		if !strings.Contains(p, field) {
 			t.Errorf("parser prompt is missing the %q field — comparator will false-positive", field)
 		}

@@ -90,6 +90,44 @@ func TestPostgresArrayRoundTripPreservesElementType(t *testing.T) {
 	}
 }
 
+func TestBitStringRoundTripPreservesWidth(t *testing.T) {
+	cases := []struct {
+		name       string
+		typ        string
+		meta       TypeMeta
+		source     string
+		wantKind   Kind
+		wantLength int
+		target     string
+		wantType   string
+	}{
+		{"mssql bit is boolean", "bit", TypeMeta{}, "mssql", Boolean, 0, "postgres", "boolean"},
+		{"mysql bit one is boolean", "bit", TypeMeta{Precision: 1}, "mysql", Boolean, 0, "mysql", "TINYINT(1)"},
+		{"mysql bit eight stays bit string", "bit", TypeMeta{Precision: 8}, "mysql", BitString, 8, "mysql", "BIT(8)"},
+		{"mysql bit width in type name", "bit(8)", TypeMeta{}, "mysql", BitString, 8, "mysql", "BIT(8)"},
+		{"postgres bit three stays bit string", "bit", TypeMeta{MaxLength: 3}, "postgres", BitString, 3, "postgres", "bit(3)"},
+		{"postgres varbit keeps bound", "varbit", TypeMeta{MaxLength: 12}, "postgres", VarBitString, 12, "postgres", "bit varying(12)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct := ToCanonical(tc.typ, tc.meta, tc.source)
+			if ct.Kind != tc.wantKind {
+				t.Fatalf("kind = %v, want %v", ct.Kind, tc.wantKind)
+			}
+			if ct.Length != tc.wantLength {
+				t.Fatalf("length = %d, want %d", ct.Length, tc.wantLength)
+			}
+			rendered, err := FromCanonical(ct, tc.target, RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonical: %v", err)
+			}
+			if rendered != tc.wantType {
+				t.Fatalf("rendered type = %q, want %q", rendered, tc.wantType)
+			}
+		})
+	}
+}
+
 func TestFromCanonical_Spatial(t *testing.T) {
 	ct := CanonicalType{Kind: Spatial, SpatialType: "geometry", SpatialSubType: "point", SRID: 4326}
 	cases := []struct {

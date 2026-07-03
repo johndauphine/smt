@@ -39,7 +39,9 @@ import (
 // (#201).
 // "7": PostgreSQL array element types are preserved through the canonical
 // mapper, so bigint[] stays bigint[] and varchar(N)[] keeps N (#198).
-const RendererVersion = "7"
+// "8": Multi-bit MySQL/PostgreSQL bit-string columns no longer collapse to
+// boolean and render with their bit width where supported (#199).
+const RendererVersion = "8"
 
 type Renderer struct {
 	target            string
@@ -313,7 +315,7 @@ func (r Renderer) exprColInfo(col driver.Column) exprir.ColInfo {
 		return exprir.ColInfo{}
 	}
 	return exprir.ColInfo{
-		Boolean:           isBooleanColumn(col),
+		Boolean:           r.isBooleanColumn(col),
 		Textual:           isTextualSourceType(col.DataType),
 		TZAware:           dt == "datetimeoffset" || dt == "timestamptz" || dt == "timestamp with time zone",
 		JSON:              isJSONSourceType(col.DataType),
@@ -673,7 +675,7 @@ func (r Renderer) Expression(expr string, tableColumns []driver.Column) (string,
 	out = rewritePostgresAnyArray(out)
 	out = rewriteFunctionNames(out, r.target)
 	out = rewritePostgresStringConcat(out, r.target)
-	out = rewriteBooleanLiterals(out, r.target, tableColumns, r.quote)
+	out = r.rewriteBooleanLiterals(out, tableColumns)
 	var err error
 	out, err = rewriteMySQLRegexpLike(out, r.target)
 	if err != nil {
@@ -760,13 +762,14 @@ func normalizeTypeName(dt string) string {
 	return dt
 }
 
-func isBooleanColumn(col driver.Column) bool {
-	switch normalizeTypeName(col.DataType) {
-	case "bit", "bool", "boolean", "tinyint(1)":
-		return true
-	default:
-		return false
+func (r Renderer) isBooleanColumn(col driver.Column) bool {
+	dt := normalizeTypeName(col.DataType)
+	if strings.EqualFold(strings.TrimSpace(col.DataType), "tinyint(1)") {
+		col.DataType = "tinyint"
+		col.DisplayWidth = 1
+		dt = "tinyint"
 	}
+	return canonical.ToCanonical(dt, driver.MetaOf(col), r.source).Kind == canonical.Boolean
 }
 
 func boolLiteral(target string, value bool) string {
@@ -1091,13 +1094,13 @@ func replaceCaseInsensitive(s, old, new string) string {
 	return cachedRegexp(`(?i)\b`+regexp.QuoteMeta(old)).ReplaceAllString(s, new)
 }
 
-func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote func(string) string) string {
+func (r Renderer) rewriteBooleanLiterals(expr string, columns []driver.Column) string {
 	out := expr
 	for _, col := range columns {
-		if !isBooleanColumn(col) {
+		if !r.isBooleanColumn(col) {
 			continue
 		}
-		normalized := driver.NormalizeIdentifier(canonicalTarget(target), col.Name)
+		normalized := driver.NormalizeIdentifier(r.target, col.Name)
 		// Cheap pre-check: the patterns below can only match if the column
 		// name appears in the expression at all.
 		lowerOut := strings.ToLower(out)
@@ -1110,15 +1113,15 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 		}{
 			{`\b` + regexp.QuoteMeta(col.Name) + `\b`, col.Name},
 			{`\b` + regexp.QuoteMeta(normalized) + `\b`, normalized},
-			{regexp.QuoteMeta(quote(normalized)), quote(normalized)},
+			{regexp.QuoteMeta(r.quote(normalized)), r.quote(normalized)},
 		}
 		// Compiled per use, not cached: these patterns derive from schema
 		// column names, so caching them would grow without bound across
 		// schemas in long-lived processes. The pre-check above keeps this
 		// path rare.
 		for _, ident := range identifiers {
-			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, true))
-			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, false))
+			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(r.target, true))
+			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(r.target, false))
 		}
 	}
 	return out

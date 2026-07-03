@@ -30,12 +30,38 @@ func TestColumnType_MySQLSameDialectPassthrough(t *testing.T) {
 		{"mysql tinyint(1)", fromMySQL, driver.Column{DataType: "tinyint", DisplayWidth: 1}, "TINYINT(1)"},
 		{"mysql tinyint(1) unsigned -> boolean drops sign", fromMySQL, driver.Column{DataType: "tinyint", DisplayWidth: 1, IsUnsigned: true}, "TINYINT(1)"},
 		{"mysql tinyint plain", fromMySQL, driver.Column{DataType: "tinyint"}, "TINYINT"},
+		{"mysql bit(1) boolean", fromMySQL, driver.Column{DataType: "bit", Precision: 1}, "TINYINT(1)"},
+		{"mysql bit(8) bit string", fromMySQL, driver.Column{DataType: "bit", Precision: 8}, "BIT(8)"},
 		{"unknown source ignores width", base, driver.Column{DataType: "tinyint", DisplayWidth: 1}, "TINYINT"},
 	}
 	for _, tc := range cases {
 		got, err := tc.r.ColumnType(tc.col)
 		if err != nil {
 			t.Fatalf("%s: ColumnType(%+v): %v", tc.name, tc.col, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s: ColumnType = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestColumnType_PostgresBitStringFidelity(t *testing.T) {
+	renderer, _ := NewRenderer("postgres", "public", "fail")
+	renderer = renderer.WithSource("postgres")
+
+	cases := []struct {
+		name string
+		col  driver.Column
+		want string
+	}{
+		{"bit(3)", driver.Column{DataType: "bit", MaxLength: 3}, "bit(3)"},
+		{"varbit(12)", driver.Column{DataType: "varbit", MaxLength: 12}, "bit varying(12)"},
+		{"boolean", driver.Column{DataType: "boolean"}, "boolean"},
+	}
+	for _, tc := range cases {
+		got, err := renderer.ColumnType(tc.col)
+		if err != nil {
+			t.Fatalf("%s: ColumnType: %v", tc.name, err)
 		}
 		if got != tc.want {
 			t.Errorf("%s: ColumnType = %q, want %q", tc.name, got, tc.want)

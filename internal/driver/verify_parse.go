@@ -136,7 +136,7 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
       "name": "<exact column name as written in the DDL>",
       "data_type": "<base type name, lowercase, NO length or precision modifiers>",
       "max_length": <integer; characters for char/varchar/nvarchar/text-class types; 0 if not applicable or unbounded>,
-      "precision": <integer; for decimal/numeric/money — total digits; 0 otherwise>,
+      "precision": <integer; for decimal/numeric/money total digits, and for BIT(N)/bit(N)/varbit(N) bit width; 0 otherwise>,
       "scale": <integer; for decimal/numeric/money — fractional digits; 0 otherwise>,
       "datetime_precision": <integer; fractional-seconds digits for date/time/timestamp types — the explicit N in TIMESTAMP(N)/DATETIME2(N)/DATETIMEOFFSET(N)/TIME(N), else the dialect default per rule 9 (0 for MySQL, 6 for PostgreSQL, 7 for SQL Server); 0 when not a temporal type>,
       "is_unsigned": <true for an UNSIGNED numeric type (MySQL); false otherwise>,
@@ -153,7 +153,7 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
 }
 `)
 	sb.WriteString("\n=== EXTRACTION RULES ===\n")
-	sb.WriteString("1. data_type carries ONLY the base type name (lowercase). Strip parens and parameters: `VARCHAR(20)` → `varchar` with max_length=20; `NUMERIC(18,4)` → `numeric` with precision=18, scale=4. The stripped modifiers go in their dedicated fields — fractional-seconds precision in datetime_precision, the tinyint width in display_width, UNSIGNED in is_unsigned, enum/set members in enum_values (rules 9-12).\n")
+	sb.WriteString("1. data_type carries ONLY the base type name (lowercase). Strip parens and parameters: `VARCHAR(20)` → `varchar` with max_length=20; `NUMERIC(18,4)` → `numeric` with precision=18, scale=4; `BIT(8)` / `bit(8)` / `varbit(8)` → base type with precision=8. The stripped modifiers go in their dedicated fields — fractional-seconds precision in datetime_precision, bit-string width in precision, the tinyint width in display_width, UNSIGNED in is_unsigned, and enum/set members in enum_values.\n")
 	sb.WriteString("2. Unbounded text types (`TEXT`, `NTEXT`, `CLOB`, `MEDIUMTEXT`, `LONGTEXT`, `VARCHAR(MAX)`, `NVARCHAR(MAX)`) → max_length=0.\n")
 	sb.WriteString("3. Integer types (`INT`, `BIGINT`, `SMALLINT`) → max_length=0, precision=0, scale=0 (the dialect's default precision is irrelevant for verification).\n")
 	sb.WriteString("4. is_identity is TRUE for any auto-generated PK default mechanism:\n")
