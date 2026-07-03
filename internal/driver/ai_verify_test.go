@@ -2,6 +2,8 @@ package driver
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -112,6 +114,29 @@ func TestVerifyTableDDL_BadJSONIsRetryable(t *testing.T) {
 	}
 	if len(verdict.Issues) != 1 || !strings.Contains(verdict.Issues[0], "could not parse") {
 		t.Errorf("expected single issue mentioning parse failure, got %v", verdict.Issues)
+	}
+}
+
+func TestVerifyTableDDL_ParseCallErrorFailsClosed(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+	mapper.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network unavailable")
+	})}
+
+	req := VerifyTableDDLRequest{
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		SourceTable: &Table{
+			Schema: "dbo", Name: "Companies",
+			Columns: []Column{{Name: "id", DataType: "int"}},
+		},
+		ProposedDDL: "CREATE TABLE x (id int);",
+	}
+	verdict, err := mapper.VerifyTableDDL(context.Background(), req)
+	if err == nil {
+		t.Fatalf("VerifyTableDDL should fail closed on parser call errors, verdict=%+v", verdict)
+	}
+	if !strings.Contains(err.Error(), "AI parse call failed") {
+		t.Fatalf("parse call error did not surface clearly: %v", err)
 	}
 }
 
@@ -261,6 +286,33 @@ func TestVerifyFinalizationDDL_ForeignKeyStructuredComparatorMismatch(t *testing
 	}
 	if got := strings.Join(verdict.Issues, "\n"); !strings.Contains(got, "on_delete") {
 		t.Fatalf("FK mismatch did not report on_delete: %v", verdict.Issues)
+	}
+}
+
+func TestVerifyFinalizationDDL_ForeignKeyRefSchemaMismatch(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("k"))
+	req := VerifyFinalizationDDLRequest{
+		Type:         DDLTypeForeignKey,
+		SourceDBType: "postgres", TargetDBType: "postgres",
+		Table: &Table{Name: "orders"},
+		ForeignKey: &ForeignKey{
+			Name:       "fk_orders_customers",
+			Columns:    []string{"customer_id"},
+			RefSchema:  "tenant_a",
+			RefTable:   "customers",
+			RefColumns: []string{"id"},
+		},
+		ProposedDDL: `ALTER TABLE "public"."orders" ADD CONSTRAINT "fk_orders_customers" FOREIGN KEY ("customer_id") REFERENCES "tenant_b"."customers" ("id")`,
+	}
+	verdict, err := mapper.VerifyFinalizationDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("VerifyFinalizationDDL FK ref schema mismatch: %v", err)
+	}
+	if verdict.OK {
+		t.Fatal("FK verifier passed wrong referenced schema")
+	}
+	if got := strings.Join(verdict.Issues, "\n"); !strings.Contains(got, "ref_schema") {
+		t.Fatalf("FK mismatch did not report ref_schema: %v", verdict.Issues)
 	}
 }
 

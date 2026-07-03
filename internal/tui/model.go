@@ -1045,7 +1045,7 @@ func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
 			defer state.Close()
 
 			if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
-				if strings.Contains(err.Error(), "SMT_MASTER_KEY is not set") {
+				if strings.Contains(err.Error(), "SMT_MASTER_KEY is not set") || strings.Contains(err.Error(), "master key not found") {
 					p.Send(OutputMsg("Error saving profile: SMT_MASTER_KEY is not set. Start the TUI with the env var set.\n"))
 					return
 				}
@@ -1102,8 +1102,8 @@ func (m Model) profileListCmd() tea.Cmd {
 				fmt.Fprintf(&b, "%-20s %-40s %-20s %-20s\n",
 					prof.Name,
 					desc,
-					prof.CreatedAt.Format("2006-01-02 15:04:05"),
-					prof.UpdatedAt.Format("2006-01-02 15:04:05"))
+					prof.CreatedAt.UTC().Format(time.RFC3339),
+					prof.UpdatedAt.UTC().Format(time.RFC3339))
 			}
 			p.Send(BoxedOutputMsg(b.String()))
 		}()

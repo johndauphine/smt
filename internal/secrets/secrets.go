@@ -52,7 +52,7 @@ type MigrationDefaults struct {
 	// Schema-object defaults (use *bool to distinguish "not set" from "false").
 	CreateIndexes          *bool `yaml:"create_indexes,omitempty"`           // Create non-PK indexes (default: true)
 	CreateForeignKeys      *bool `yaml:"create_foreign_keys,omitempty"`      // Create FK constraints (default: true)
-	CreateCheckConstraints *bool `yaml:"create_check_constraints,omitempty"` // Create CHECK constraints (default: false)
+	CreateCheckConstraints *bool `yaml:"create_check_constraints,omitempty"` // Create CHECK constraints (default: true)
 
 	// Directory for the SMT state DB, snapshots, and run artifacts.
 	DataDir string `yaml:"data_dir,omitempty"`
@@ -249,14 +249,8 @@ func loadFromFile() (*Config, error) {
 		return nil, fmt.Errorf("reading secrets file: %w", err)
 	}
 
-	// Check file permissions - reject if too permissive (security requirement)
-	info, err := os.Stat(path)
-	if err == nil {
-		mode := info.Mode().Perm()
-		if mode&0077 != 0 {
-			return nil, fmt.Errorf("secrets file %s has insecure permissions (%04o). "+
-				"Other users can read your API keys. Run: chmod 600 %s", path, mode, path)
-		}
+	if err := checkSecretsFilePermissions(path); err != nil {
+		return nil, err
 	}
 
 	var config Config
@@ -267,6 +261,7 @@ func loadFromFile() (*Config, error) {
 	// Warn (once) about removed DMT-era migration_defaults keys still present in
 	// the file. They are ignored, not fatal — keep old secrets files loadable.
 	warnLegacyMigrationDefaults(data)
+	warnUnknownSecretsKeys(data)
 
 	// Validate configuration
 	if err := config.Validate(); err != nil {
@@ -312,6 +307,125 @@ func warnLegacyMigrationDefaults(data []byte) {
 	if len(found) > 0 {
 		logging.Warn("secrets: ignoring removed migration_defaults keys (DMT-era, dropped in v1): %s",
 			strings.Join(found, ", "))
+	}
+}
+
+var (
+	secretsTopLevelKeys = map[string]bool{
+		"ai":                 true,
+		"encryption":         true,
+		"notifications":      true,
+		"migration_defaults": true,
+	}
+	secretsAIKeys = map[string]bool{
+		"default_provider": true,
+		"providers":        true,
+	}
+	secretsProviderKeys = map[string]bool{
+		"provider":          true,
+		"api_key":           true,
+		"base_url":          true,
+		"model":             true,
+		"context_window":    true,
+		"max_tokens":        true,
+		"timeout_seconds":   true,
+		"model_temperature": true,
+	}
+	secretsEncryptionKeys = map[string]bool{
+		"master_key": true,
+	}
+	secretsNotificationsKeys = map[string]bool{
+		"slack": true,
+	}
+	secretsSlackKeys = map[string]bool{
+		"webhook_url": true,
+	}
+	secretsMigrationDefaultKeys = map[string]bool{
+		"max_source_connections":   true,
+		"max_target_connections":   true,
+		"create_indexes":           true,
+		"create_foreign_keys":      true,
+		"create_check_constraints": true,
+		"data_dir":                 true,
+	}
+)
+
+func init() {
+	for _, key := range legacyMigrationDefaultKeys {
+		secretsMigrationDefaultKeys[key] = true
+	}
+}
+
+func warnUnknownSecretsKeys(data []byte) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return
+	}
+	root := documentMapping(&doc)
+	if root == nil {
+		return
+	}
+
+	warnUnknownMappingKeys(root, "", secretsTopLevelKeys)
+	if ai := mappingValue(root, "ai"); ai != nil {
+		warnUnknownMappingKeys(ai, "ai", secretsAIKeys)
+		if providers := mappingValue(ai, "providers"); providers != nil && providers.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(providers.Content); i += 2 {
+				name := providers.Content[i].Value
+				warnUnknownMappingKeys(providers.Content[i+1], "ai.providers."+name, secretsProviderKeys)
+			}
+		}
+	}
+	if encryption := mappingValue(root, "encryption"); encryption != nil {
+		warnUnknownMappingKeys(encryption, "encryption", secretsEncryptionKeys)
+	}
+	if notifications := mappingValue(root, "notifications"); notifications != nil {
+		warnUnknownMappingKeys(notifications, "notifications", secretsNotificationsKeys)
+		if slack := mappingValue(notifications, "slack"); slack != nil {
+			warnUnknownMappingKeys(slack, "notifications.slack", secretsSlackKeys)
+		}
+	}
+	if defaults := mappingValue(root, "migration_defaults"); defaults != nil {
+		warnUnknownMappingKeys(defaults, "migration_defaults", secretsMigrationDefaultKeys)
+	}
+}
+
+func documentMapping(doc *yaml.Node) *yaml.Node {
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		doc = doc.Content[0]
+	}
+	if doc.Kind != yaml.MappingNode {
+		return nil
+	}
+	return doc
+}
+
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func warnUnknownMappingKeys(mapping *yaml.Node, path string, known map[string]bool) {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key := mapping.Content[i].Value
+		if known[key] {
+			continue
+		}
+		if path == "" {
+			logging.Warn("secrets: unknown key %s", key)
+		} else {
+			logging.Warn("secrets: unknown key %s.%s", path, key)
+		}
 	}
 }
 
@@ -567,7 +681,7 @@ migration_defaults:
   # Schema-object defaults
   create_indexes: true            # Create non-PK indexes
   create_foreign_keys: true       # Create FK constraints
-  create_check_constraints: false # Create CHECK constraints
+  create_check_constraints: true  # Create CHECK constraints
 
   # Optional: connection pool sizing and state/artifact directory
   # max_source_connections: 4

@@ -276,7 +276,7 @@ func liveIndexDiff(want, have []driver.Index) (added, removed []driver.Index) {
 }
 
 func indexKey(idx driver.Index) string {
-	key := orderedCols(idx.Columns)
+	key := indexColumnsKey(idx)
 	if len(idx.IncludeCols) > 0 {
 		key += "/include:" + orderedCols(idx.IncludeCols)
 	}

@@ -289,6 +289,7 @@ CREATE TABLE type_smoke (
     -- numeric precision boundaries
     num_max_prec    NUMERIC(38,10) NOT NULL DEFAULT 0,
     dec_min_prec    DECIMAL(1,0),
+    big_ids         BIGINT[],
     double_col      DOUBLE PRECISION,
     real_col        REAL
 );

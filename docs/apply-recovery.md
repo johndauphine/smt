@@ -17,21 +17,33 @@ If a statement fails:
 - the error includes the statement description, database error, and SQL text;
 - later statements are not attempted.
 
-Create re-runs are intended to be idempotent for objects SMT can identify in the
-target catalog. Before executing create statements, SMT checks whether tables,
-indexes, foreign keys, and check constraints already exist and skips existing
-objects. Schema statements are rendered with `IF NOT EXISTS` semantics where the
-target dialect supports it.
+Create re-runs are intended to be idempotent for objects SMT can identify by
+name in the target catalog. Before executing create statements, SMT checks
+whether tables, indexes, foreign keys, and check constraints already exist and
+skips existing objects. Existing-object skips are logged as shape-unverified;
+run `smt drift` after recovery to confirm the target matches `schema.sql`.
+Schema statements are rendered with `IF NOT EXISTS` semantics where the target
+dialect supports it.
 
 ## `smt sync --apply`
 
-`sync --apply` refuses unsupported changes before executing anything. It also
-refuses `data-loss-risk` statements unless `--allow-data-loss` is set.
+`sync --apply` creates a run record and writes the rendered `migration.sql`
+plus a run `manifest.json` under `migration.data_dir/runs/<run-id>/ddl/`
+before executing anything. It refuses unsupported changes before executing
+DDL, and refuses `data-loss-risk` statements unless `--allow-data-loss` is set.
 
 Once execution starts, sync statements run sequentially and stop at the first
 failure. The error includes the failed statement number, description, database
-error, and SQL text. `--save-snapshot` writes a new baseline only after every
-statement succeeds.
+error, and SQL text. The run is marked `failed` with its current phase in the
+state DB. `--save-snapshot` writes a new baseline only after every statement
+succeeds.
+
+For `sync --against snapshot --apply`, a partial failure leaves the saved
+snapshot baseline unchanged. If the latest baseline still predates that failed
+partial apply, SMT refuses a blind snapshot-mode rerun before executing DDL.
+Recover by inspecting the run artifact, making the target correct, then running
+`smt sync --against target --apply` or capturing a new baseline with
+`smt snapshot`.
 
 ## Transactions
 
@@ -51,6 +63,7 @@ Automated coverage pins the v1 failure behavior:
 
 ```bash
 go test ./cmd/smt -run TestApplyPlan_StopsAtFirstFailure
+go test ./cmd/smt -run TestSyncApplyRecordsRunAndArtifactsOnFailure
 go test ./internal/orchestrator -run TestExecutePlanStopsAtFirstFailure
 ```
 

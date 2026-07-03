@@ -172,6 +172,19 @@ func TestEqual_AcceptanceCriteria(t *testing.T) {
 			t.Errorf("expected %q ≢ %q", p[0], p[1])
 		}
 	}
+
+	checkEq := func(a, b string) bool {
+		return Equal(ParseCheck(a, ""), ParseCheck(b, ""))
+	}
+	if !checkEq("status IN ('a','b')", "status IN ('b','a')") {
+		t.Error("IN-list membership order must not affect equality")
+	}
+	if !checkEq("status IN ('a','a','b')", "status IN ('b','a')") {
+		t.Error("duplicate IN-list members must not affect equality")
+	}
+	if checkEq("status IN ('a','b')", "status IN ('a','c')") {
+		t.Error("different IN-list members must not compare equal")
+	}
 }
 
 // TestClassLabel_LegacyVocabulary pins the class-label vocabulary carried
@@ -316,6 +329,66 @@ func TestParse_StringLiteralRoundTrip(t *testing.T) {
 		if got != "'logged via GETDATE()'" {
 			t.Errorf("target %s: string literal corrupted: %q", target, got)
 		}
+	}
+}
+
+func TestRender_MySQLStringLiteralsEscapeBackslashes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "regex digit class", in: `^\d+$`, want: `'^\\d+$'`},
+		{name: "literal backslash n", in: `a\nb`, want: `'a\\nb'`},
+		{name: "actual newline", in: "a\nb", want: `'a\nb'`},
+		{name: "trailing backslash", in: `\`, want: `'\\'`},
+		{name: "injection shaped payload", in: `\'); DROP TABLE users; --`, want: `'\\''); DROP TABLE users; --'`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Render(Lit{Kind: LitString, Str: tc.in}, Opts{Target: MySQL, Kind: "default", Col: ColInfo{Textual: true}})
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("Render = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRender_StringLiteralsBackslashUnchangedForPostgresAndMSSQL(t *testing.T) {
+	for _, target := range []string{Postgres, MSSQL} {
+		got, err := Render(Lit{Kind: LitString, Str: `a\nb`}, Opts{Target: target, Kind: "default", Col: ColInfo{Textual: true}})
+		if err != nil {
+			t.Fatalf("%s Render: %v", target, err)
+		}
+		if got != `'a\nb'` {
+			t.Fatalf("%s Render = %q, want %q", target, got, `'a\nb'`)
+		}
+	}
+}
+
+func TestRender_BareDefaultOnNonTextualColumnStaysQuoted(t *testing.T) {
+	got, err := Render(ParseDefault("abc", MySQL), Opts{Target: MySQL, Source: MySQL, Kind: "default"})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got != "'abc'" {
+		t.Fatalf("bare default rendered as %q, want quoted string", got)
+	}
+}
+
+func TestParseDefault_DoubleUnaryMinusDoesNotRenderLineComment(t *testing.T) {
+	got, err := Render(ParseDefault("- -1", Postgres), defaultOpts(Postgres))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(got, "--") {
+		t.Fatalf("Render(- -1) = %q, must not emit SQL line-comment token", got)
+	}
+	if got != "1" {
+		t.Fatalf("Render(- -1) = %q, want folded positive literal", got)
 	}
 }
 

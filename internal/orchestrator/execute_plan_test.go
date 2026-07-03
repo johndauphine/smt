@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"smt/internal/checkpoint"
 	"smt/internal/config"
 	"smt/internal/driver"
+	"smt/internal/logging"
 	"smt/internal/schemadiff"
 )
 
@@ -47,9 +49,20 @@ type fakeState struct {
 
 func (fakeState) UpdatePhase(_, _ string) error { return nil }
 
-// #87 — executePlan runs statements in plan order and skips objects that
-// already exist on the target (idempotent re-runs).
+// #87/#213 — executePlan runs statements in plan order and skips objects that
+// already exist on the target, but the skip is warned as shape-unverified.
 func TestExecutePlanSkipsExistingObjects(t *testing.T) {
+	var logs bytes.Buffer
+	originalLevel := logging.GetLevel()
+	logging.SetOutput(&logs)
+	logging.SetLevel(logging.LevelInfo)
+	logging.SetFormat("text")
+	t.Cleanup(func() {
+		logging.SetLevel(originalLevel)
+		logging.SetOutput(nil)
+		logging.SetFormat("text")
+	})
+
 	w := &fakeWriter{
 		tables:  map[string]bool{"existing": true},
 		indexes: map[string]bool{"ix_old": true},
@@ -77,6 +90,17 @@ func TestExecutePlanSkipsExistingObjects(t *testing.T) {
 	for i := range want {
 		if w.execed[i] != want[i] {
 			t.Fatalf("executed %v, want %v", w.execed, want)
+		}
+	}
+	logText := logs.String()
+	for _, want := range []string{
+		"existing already exists",
+		"ix_old already exists",
+		"skipped without verifying shape",
+		"smt drift",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("skip log missing %q:\n%s", want, logText)
 		}
 	}
 }

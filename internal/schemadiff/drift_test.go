@@ -19,6 +19,22 @@ func dtbl(name string, cols ...driver.Column) driver.Table {
 	return driver.Table{Name: name, Columns: cols}
 }
 
+func TestIndexKeysIncludePrefixLengthsAndExpressions(t *testing.T) {
+	keys := indexKeys([]driver.Index{
+		{Name: "idx_body", Columns: []string{"body"}, ColumnPrefixLengths: []int{100}},
+		{Name: "idx_expr", Columns: []string{"lower(name)"}, ColumnExpressions: []bool{true}},
+	})
+	if len(keys) != 2 {
+		t.Fatalf("len(indexKeys) = %d, want 2", len(keys))
+	}
+	if keys[0] != "body(100)" {
+		t.Fatalf("prefix index key = %q, want body(100)", keys[0])
+	}
+	if keys[1] != "expr:lower(name)" {
+		t.Fatalf("expression index key = %q, want expr:lower(name)", keys[1])
+	}
+}
+
 // Identical schemas (cross-dialect equivalent types) must report no drift:
 // mssql varchar(20) ≡ pg character varying(20), datetime2 ≡ timestamp, etc.
 func TestComputeDrift_NoFalsePositiveCrossDialect(t *testing.T) {

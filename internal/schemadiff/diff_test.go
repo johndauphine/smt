@@ -16,6 +16,33 @@ func table(name string, cols ...driver.Column) driver.Table {
 	return driver.Table{Schema: "dbo", Name: name, Columns: cols}
 }
 
+func assertSQLOrder(t *testing.T, sql, before, after string) {
+	t.Helper()
+	beforePos := strings.Index(sql, before)
+	afterPos := strings.Index(sql, after)
+	if beforePos < 0 || afterPos < 0 {
+		t.Fatalf("expected SQL to contain %q before %q, got:\n%s", before, after, sql)
+	}
+	if beforePos > afterPos {
+		t.Fatalf("expected %q before %q, got:\n%s", before, after, sql)
+	}
+}
+
+func TestColumnsEqualDefaultPresenceDistinguishesEmptyDefault(t *testing.T) {
+	noDefault := driver.Column{Name: "status", DataType: "varchar", MaxLength: 10}
+	emptyDefault := noDefault
+	emptyDefault.HasDefault = true
+	if columnsEqual(noDefault, emptyDefault) {
+		t.Fatal("column with no default compared equal to DEFAULT ''")
+	}
+
+	emptyDefaultAgain := noDefault
+	emptyDefaultAgain.HasDefault = true
+	if !columnsEqual(emptyDefault, emptyDefaultAgain) {
+		t.Fatal("matching DEFAULT '' metadata should compare equal")
+	}
+}
+
 func TestCompute_NoChanges(t *testing.T) {
 	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
 	curr := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
@@ -125,6 +152,94 @@ func TestCompute_ChangedMySQLColumnFlags(t *testing.T) {
 	d = Compute(Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("Events", oldID)}}, Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("Events", newID)}})
 	if len(d.ChangedTables) != 1 || len(d.ChangedTables[0].ChangedColumns) != 1 {
 		t.Fatalf("expected unsigned change to be detected, got %+v", d)
+	}
+}
+
+func TestCompute_SideObjectDefinitionChanges(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{{
+		Name: "Orders",
+		Indexes: []driver.Index{{
+			Name:    "ix_orders_status",
+			Columns: []string{"status"},
+			Filter:  "status <> 'deleted'",
+		}},
+		ForeignKeys: []driver.ForeignKey{{
+			Name:       "fk_orders_customers",
+			Columns:    []string{"customer_id"},
+			RefTable:   "Customers",
+			RefColumns: []string{"id"},
+			OnDelete:   "NO ACTION",
+		}},
+		CheckConstraints: []driver.CheckConstraint{{
+			Name:       "ck_orders_status",
+			Definition: "status IN ('new','paid')",
+		}},
+	}}}
+	curr := Snapshot{Tables: []driver.Table{{
+		Name: "Orders",
+		Indexes: []driver.Index{{
+			Name:     "ix_orders_status",
+			Columns:  []string{"status", "created_at"},
+			IsUnique: true,
+			Filter:   "status <> 'deleted'",
+		}},
+		ForeignKeys: []driver.ForeignKey{{
+			Name:       "fk_orders_customers",
+			Columns:    []string{"customer_id"},
+			RefTable:   "Customers",
+			RefColumns: []string{"customer_id"},
+			OnDelete:   "CASCADE",
+		}},
+		CheckConstraints: []driver.CheckConstraint{{
+			Name:       "ck_orders_status",
+			Definition: "status IN ('new','paid','shipped')",
+		}},
+	}}}
+
+	d := Compute(prev, curr)
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected one changed table, got %+v", d)
+	}
+	td := d.ChangedTables[0]
+	if len(td.AddedIndexes) != 1 || len(td.RemovedIndexes) != 1 {
+		t.Fatalf("index definition change should be add+remove, got added=%+v removed=%+v", td.AddedIndexes, td.RemovedIndexes)
+	}
+	if len(td.AddedForeignKeys) != 1 || len(td.RemovedForeignKeys) != 1 {
+		t.Fatalf("FK definition change should be add+remove, got added=%+v removed=%+v", td.AddedForeignKeys, td.RemovedForeignKeys)
+	}
+	if len(td.AddedChecks) != 1 || len(td.RemovedChecks) != 1 {
+		t.Fatalf("check definition change should be add+remove, got added=%+v removed=%+v", td.AddedChecks, td.RemovedChecks)
+	}
+}
+
+func TestCompute_PrimaryKeyChange(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{{
+		Name:       "Orders",
+		PrimaryKey: []string{"id"},
+		Columns: []driver.Column{
+			col("tenant_id", "int", false),
+			col("id", "int", false),
+		},
+	}}}
+	curr := Snapshot{Tables: []driver.Table{{
+		Name:       "Orders",
+		PrimaryKey: []string{"tenant_id", "id"},
+		Columns: []driver.Column{
+			col("tenant_id", "int", false),
+			col("id", "int", false),
+		},
+	}}}
+
+	d := Compute(prev, curr)
+	if d.IsEmpty() {
+		t.Fatal("primary-key change produced an empty diff")
+	}
+	if len(d.ChangedTables) != 1 || !d.ChangedTables[0].PrimaryKeyChanged {
+		t.Fatalf("expected primary-key changed table diff, got %+v", d)
+	}
+	if !stringSlicesEqual(d.ChangedTables[0].OldPrimaryKey, []string{"id"}) ||
+		!stringSlicesEqual(d.ChangedTables[0].NewPrimaryKey, []string{"tenant_id", "id"}) {
+		t.Fatalf("unexpected primary-key change: %+v", d.ChangedTables[0])
 	}
 }
 
@@ -378,6 +493,93 @@ func TestRenderDeterministic_AddedTableForeignKeysAfterAllCreateTables(t *testin
 	}
 }
 
+func TestRenderDeterministic_DropsForeignKeysBeforeDependentColumns(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{
+		{
+			Name:           "accounts",
+			RemovedColumns: []driver.Column{{Name: "code", DataType: "varchar"}},
+			Curr:           driver.Table{Name: "accounts"},
+		},
+		{
+			Name: "users",
+			RemovedForeignKeys: []driver.ForeignKey{{
+				Name:       "fk_users_accounts_code",
+				Columns:    []string{"account_code"},
+				RefTable:   "accounts",
+				RefColumns: []string{"code"},
+			}},
+			Curr: driver.Table{Name: "users"},
+		},
+	}}
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	assertSQLOrder(t, plan.SQL(), "drop foreign key fk_users_accounts_code", "drop column code")
+}
+
+func TestRenderDeterministic_AddsReferencedColumnsBeforeForeignKeys(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{
+		{
+			Name: "aaa",
+			Curr: driver.Table{Name: "aaa", Columns: []driver.Column{
+				{Name: "tenant_id", DataType: "int", IsNullable: false},
+			}},
+			AddedForeignKeys: []driver.ForeignKey{{
+				Name:       "fk_aaa_zzz_tenant",
+				Columns:    []string{"tenant_id"},
+				RefTable:   "zzz",
+				RefColumns: []string{"tenant_id"},
+			}},
+		},
+		{
+			Name: "zzz",
+			Curr: driver.Table{Name: "zzz", Columns: []driver.Column{
+				{Name: "tenant_id", DataType: "int", IsNullable: false},
+			}},
+			AddedColumns: []driver.Column{{Name: "tenant_id", DataType: "int", IsNullable: false}},
+		},
+	}}
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	assertSQLOrder(t, plan.SQL(), "add column tenant_id", "create foreign key fk_aaa_zzz_tenant")
+}
+
+func TestRenderDeterministic_AddedTableForeignKeyWaitsForExistingTableColumnAdd(t *testing.T) {
+	d := Diff{
+		AddedTables: []driver.Table{{
+			Name: "new_child",
+			Columns: []driver.Column{
+				{Name: "id", DataType: "int", IsNullable: false},
+				{Name: "tenant_id", DataType: "int", IsNullable: false},
+			},
+			ForeignKeys: []driver.ForeignKey{{
+				Name:       "fk_new_child_accounts_tenant",
+				Columns:    []string{"tenant_id"},
+				RefTable:   "accounts",
+				RefColumns: []string{"tenant_id"},
+			}},
+		}},
+		ChangedTables: []TableDiff{{
+			Name: "accounts",
+			Curr: driver.Table{Name: "accounts", Columns: []driver.Column{
+				{Name: "tenant_id", DataType: "int", IsNullable: false},
+			}},
+			AddedColumns: []driver.Column{{Name: "tenant_id", DataType: "int", IsNullable: false}},
+		}},
+	}
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	assertSQLOrder(t, plan.SQL(), "add column tenant_id", "create foreign key fk_new_child_accounts_tenant")
+}
+
 func TestRenderDeterministic_ColumnTypeAndDefaultChangeDropsDefaultFirst(t *testing.T) {
 	oldScore := driver.Column{Name: "Score", DataType: "varchar", MaxLength: 10, IsNullable: false, DefaultExpression: "('0')"}
 	newScore := driver.Column{Name: "Score", DataType: "int", IsNullable: false, DefaultExpression: "((0))"}
@@ -401,6 +603,30 @@ func TestRenderDeterministic_ColumnTypeAndDefaultChangeDropsDefaultFirst(t *test
 	}
 	if !(dropPos < typePos && typePos < setPos) {
 		t.Fatalf("expected default drop before type change before set default, got:\n%s", sql)
+	}
+}
+
+func TestRenderDeterministic_PostgresIdentityTypeChangeOmitsIdentityClause(t *testing.T) {
+	oldID := driver.Column{Name: "ID", DataType: "int", IsNullable: false, IsIdentity: true}
+	newID := driver.Column{Name: "ID", DataType: "bigint", IsNullable: false, IsIdentity: true}
+	d := Compute(
+		Snapshot{Tables: []driver.Table{table("Orders", oldID)}},
+		Snapshot{Tables: []driver.Table{table("Orders", newID)}},
+	).Normalize(func(name string) string {
+		return driver.NormalizeIdentifier("postgres", name)
+	}).WithTargetSchema("public")
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	sql := plan.SQL()
+	want := `ALTER TABLE "public"."orders" ALTER COLUMN "id" TYPE bigint`
+	if !strings.Contains(sql, want) {
+		t.Fatalf("expected SQL to contain %q, got:\n%s", want, sql)
+	}
+	if strings.Contains(sql, "GENERATED BY DEFAULT AS IDENTITY") {
+		t.Fatalf("ALTER COLUMN TYPE must not include identity clause, got:\n%s", sql)
 	}
 }
 
@@ -430,6 +656,59 @@ func TestRenderDeterministic_ComputedColumnChangeFails(t *testing.T) {
 	}
 }
 
+func TestRenderDeterministic_PrimaryKeyChangeUnsupported(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{{
+		Name:              "orders",
+		PrimaryKeyChanged: true,
+		OldPrimaryKey:     []string{"id"},
+		NewPrimaryKey:     []string{"tenant_id", "id"},
+		Curr: driver.Table{
+			Name:       "orders",
+			PrimaryKey: []string{"tenant_id", "id"},
+			Columns: []driver.Column{
+				col("tenant_id", "int", false),
+				col("id", "int", false),
+			},
+		},
+	}}}
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	if len(plan.Unsupported) != 1 {
+		t.Fatalf("expected one unsupported primary-key change, got %+v", plan)
+	}
+	if !strings.Contains(plan.Unsupported[0].Reason, "primary key changes are not supported") {
+		t.Fatalf("unexpected unsupported reason: %+v", plan.Unsupported[0])
+	}
+}
+
+func TestRenderDeterministic_UnsupportedColumnOnlyChange(t *testing.T) {
+	oldUpdated := driver.Column{Name: "updated_at", DataType: "datetime", IsNullable: true}
+	newUpdated := oldUpdated
+	newUpdated.OnUpdateExpression = "CURRENT_TIMESTAMP"
+	d := Compute(
+		Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("events", oldUpdated)}},
+		Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("events", newUpdated)}},
+	)
+
+	plan, err := RenderDeterministicWithOptions(d, RenderOptions{
+		TargetSchema:  "crm",
+		TargetDialect: "mysql",
+		SourceDialect: "mysql",
+	})
+	if err != nil {
+		t.Fatalf("RenderDeterministicWithOptions: %v", err)
+	}
+	if len(plan.Statements) != 0 {
+		t.Fatalf("expected no renderable statements, got %+v", plan.Statements)
+	}
+	if len(plan.Unsupported) != 1 || !strings.Contains(plan.Unsupported[0].Reason, "on_update") {
+		t.Fatalf("expected unsupported on_update change, got %+v", plan.Unsupported)
+	}
+}
+
 func TestRenderDeterministic_ColumnDefaultChanges(t *testing.T) {
 	activeOld := driver.Column{Name: "IsActive", DataType: "bit", IsNullable: false, DefaultExpression: "((0))"}
 	activeNew := activeOld
@@ -456,6 +735,35 @@ func TestRenderDeterministic_ColumnDefaultChanges(t *testing.T) {
 	}
 	if !strings.Contains(sql, `ALTER TABLE "public"."users" ALTER COLUMN "status" DROP DEFAULT`) {
 		t.Fatalf("expected DROP DEFAULT, got:\n%s", sql)
+	}
+}
+
+func TestRenderDeterministic_MySQLFunctionDefaultChangeUsesExpressionForm(t *testing.T) {
+	createdOld := driver.Column{Name: "created_at", DataType: "datetime", IsNullable: false}
+	createdNew := createdOld
+	createdNew.DefaultExpression = "now()"
+	quantityOld := driver.Column{Name: "quantity", DataType: "int", IsNullable: false, DefaultExpression: "0"}
+	quantityNew := quantityOld
+	quantityNew.DefaultExpression = "1"
+	d := Compute(
+		Snapshot{Tables: []driver.Table{table("events", createdOld, quantityOld)}},
+		Snapshot{Tables: []driver.Table{table("events", createdNew, quantityNew)}},
+	).WithTargetSchema("crm")
+
+	plan, err := RenderDeterministicWithOptions(d, RenderOptions{
+		TargetSchema:  "crm",
+		TargetDialect: "mysql",
+		SourceDialect: "postgres",
+	})
+	if err != nil {
+		t.Fatalf("RenderDeterministicWithOptions: %v", err)
+	}
+	sql := plan.SQL()
+	if !strings.Contains(sql, "ALTER TABLE `crm`.`events` ALTER COLUMN `created_at` SET DEFAULT (CURRENT_TIMESTAMP(6))") {
+		t.Fatalf("expected function default to use MySQL expression form, got:\n%s", sql)
+	}
+	if !strings.Contains(sql, "ALTER TABLE `crm`.`events` ALTER COLUMN `quantity` SET DEFAULT 1") {
+		t.Fatalf("expected literal default to stay bare, got:\n%s", sql)
 	}
 }
 

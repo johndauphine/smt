@@ -161,6 +161,9 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 
 		tables = append(tables, t)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating tables: %w", err)
+	}
 
 	// Override with actual avg row sizes from database statistics when available.
 	r.applyActualRowSizes(ctx, schema, tables)
@@ -223,7 +226,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			ISNULL(NUMERIC_SCALE, 0),
 			ISNULL(DATETIME_PRECISION, -1),
 			CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
-			COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity'),
+			COLUMNPROPERTY(OBJECT_ID(QUOTENAME(TABLE_SCHEMA) + '.' + QUOTENAME(TABLE_NAME)), COLUMN_NAME, 'IsIdentity'),
 			ORDINAL_POSITION,
 			ISNULL(COLUMN_DEFAULT, '')
 		FROM INFORMATION_SCHEMA.COLUMNS
@@ -238,7 +241,8 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	t.Columns = nil
 	for rows.Next() {
 		var col driver.Column
-		var isNullable, isIdentity, dtPrecision int
+		var isNullable, dtPrecision int
+		var isIdentity sql.NullInt64
 		if err := rows.Scan(&col.Name, &col.DataType, &col.MaxLength, &col.Precision, &col.Scale, &dtPrecision, &isNullable, &isIdentity, &col.OrdinalPos, &col.DefaultExpression); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
@@ -247,7 +251,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			col.DatetimePrecision = &p
 		}
 		col.IsNullable = isNullable == 1
-		col.IsIdentity = isIdentity == 1
+		col.IsIdentity = isIdentity.Valid && isIdentity.Int64 == 1
 		if strings.EqualFold(col.DataType, "timestamp") {
 			// INFORMATION_SCHEMA reports rowversion under its deprecated
 			// synonym "timestamp" with NULL CHARACTER_MAXIMUM_LENGTH; rename
@@ -342,6 +346,9 @@ func (r *Reader) loadPrimaryKey(ctx context.Context, t *driver.Table) error {
 		}
 		t.PrimaryKey = append(t.PrimaryKey, colName)
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating primary key: %w", err)
+	}
 
 	return nil
 }
@@ -367,19 +374,32 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 			i.name AS index_name,
 			i.is_unique,
 			i.type_desc,
-			STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns,
-			ISNULL(STRING_AGG(CASE WHEN ic.is_included_column = 1 THEN c.name END, ',')
-				WITHIN GROUP (ORDER BY ic.key_ordinal), '') AS include_columns
+			ISNULL(key_cols.columns, '') AS columns,
+			ISNULL(include_cols.columns, '') AS include_columns,
+			ISNULL(i.filter_definition, '') AS filter_definition
 		FROM sys.indexes i
-		JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-		JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
 		JOIN sys.tables tb ON i.object_id = tb.object_id
 		JOIN sys.schemas s ON tb.schema_id = s.schema_id
+		OUTER APPLY (
+			SELECT STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns
+			FROM sys.index_columns ic
+			JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+			WHERE ic.object_id = i.object_id
+			  AND ic.index_id = i.index_id
+			  AND ic.is_included_column = 0
+		) key_cols
+		OUTER APPLY (
+			SELECT STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.index_column_id) AS columns
+			FROM sys.index_columns ic
+			JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+			WHERE ic.object_id = i.object_id
+			  AND ic.index_id = i.index_id
+			  AND ic.is_included_column = 1
+		) include_cols
 		WHERE s.name = @schema
 		  AND tb.name = @table
 		  AND i.is_primary_key = 0
 		  AND i.type > 0
-		GROUP BY i.name, i.is_unique, i.type_desc
 		ORDER BY i.name
 	`, sql.Named("schema", t.Schema), sql.Named("table", t.Name))
 	if err != nil {
@@ -390,7 +410,7 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var idx driver.Index
 		var typeDesc, colsStr, includeStr string
-		if err := rows.Scan(&idx.Name, &idx.IsUnique, &typeDesc, &colsStr, &includeStr); err != nil {
+		if err := rows.Scan(&idx.Name, &idx.IsUnique, &typeDesc, &colsStr, &includeStr, &idx.Filter); err != nil {
 			return err
 		}
 		idx.IsClustered = typeDesc == "CLUSTERED"
@@ -399,6 +419,9 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 			idx.IncludeCols = util.SplitCSV(includeStr)
 		}
 		t.Indexes = append(t.Indexes, idx)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating indexes: %w", err)
 	}
 
 	return nil

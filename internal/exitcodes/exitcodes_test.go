@@ -26,6 +26,7 @@ func TestFromError(t *testing.T) {
 		{"context canceled", errors.New("context canceled"), Cancelled},
 		{"state error", errors.New("checkpoint not found"), StateError},
 		{"config changed", errors.New("config changed since last run"), StateError},
+		{"apply statement failure", errors.New("statement 1 (create table state_log) failed: pq: relation \"x\" does not exist\nSQL: CREATE TABLE state_log(id int)"), TransferError},
 		{"unknown error", errors.New("something unexpected happened"), TransferError},
 	}
 
@@ -92,6 +93,7 @@ func TestDescription(t *testing.T) {
 		{Cancelled, "cancelled (recoverable)"},
 		{StateError, "state error"},
 		{IOError, "I/O error (recoverable)"},
+		{DriftDetected, "drift detected"},
 		{99, "unknown error"},
 	}
 
@@ -102,5 +104,14 @@ func TestDescription(t *testing.T) {
 				t.Errorf("Description(%d) = %q, want %q", tt.code, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestDriftDetectedHasDedicatedCode(t *testing.T) {
+	if DriftDetected == TransferError {
+		t.Fatalf("DriftDetected must not collide with TransferError (%d)", TransferError)
+	}
+	if got := FromError(NewExitError(errors.New("drift detected"), DriftDetected)); got != DriftDetected {
+		t.Fatalf("FromError drift detected = %d, want %d", got, DriftDetected)
 	}
 }

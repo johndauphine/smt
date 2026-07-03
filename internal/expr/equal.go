@@ -178,15 +178,10 @@ func nodeEqual(a, b Node) bool {
 		return ok && av.Op == bv.Op && nodeEqual(av.L, bv.L) && nodeEqual(av.R, bv.R)
 	case In:
 		bv, ok := b.(In)
-		if !ok || av.Not != bv.Not || len(av.List) != len(bv.List) || !nodeEqual(av.X, bv.X) {
+		if !ok || av.Not != bv.Not || !nodeEqual(av.X, bv.X) {
 			return false
 		}
-		for i := range av.List {
-			if !nodeEqual(av.List[i], bv.List[i]) {
-				return false
-			}
-		}
-		return true
+		return inListSetEqual(av.List, bv.List)
 	case Like:
 		bv, ok := b.(Like)
 		return ok && av.Not == bv.Not && av.Regex == bv.Regex &&
@@ -200,6 +195,29 @@ func nodeEqual(a, b Node) bool {
 	case Raw:
 		bv, ok := b.(Raw)
 		return ok && av == bv
+	}
+	return false
+}
+
+func inListSetEqual(a, b []Node) bool {
+	for _, ae := range a {
+		if !containsNode(b, ae) {
+			return false
+		}
+	}
+	for _, be := range b {
+		if !containsNode(a, be) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsNode(list []Node, want Node) bool {
+	for _, got := range list {
+		if nodeEqual(got, want) {
+			return true
+		}
 	}
 	return false
 }

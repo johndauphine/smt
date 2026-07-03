@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +67,124 @@ func TestApplyPlan_StopsAtFirstFailure(t *testing.T) {
 	}
 	if len(exec.executed) != 2 {
 		t.Fatalf("expected to stop after 2 statements, executed %d", len(exec.executed))
+	}
+}
+
+func TestSyncApplyRecordsRunAndArtifactsOnFailure(t *testing.T) {
+	dataDir := t.TempDir()
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		t.Fatalf("setup state: %v", err)
+	}
+	defer state.Close()
+
+	cfg := snapshotSyncCfg()
+	cfg.Migration.DataDir = dataDir
+	cfg.Source.Password = "source-secret"
+	cfg.Target.Password = "target-secret"
+	plan := schemadiff.Plan{Statements: []schemadiff.Statement{
+		{SQL: "ALTER TABLE public.users ADD COLUMN age integer", Description: "add age", Risk: schemadiff.RiskSafe},
+		{SQL: "ALTER TABLE public.users ADD COLUMN state text", Description: "add state", Risk: schemadiff.RiskSafe},
+	}}
+	exec := &stubExecutor{failAt: 2, failErr: errors.New("column already exists")}
+
+	err = applySyncPlan(context.Background(), exec, plan, syncApplyOptions{
+		mode:     syncModeTarget,
+		cfg:      cfg,
+		state:    state,
+		currSnap: snapshotWith(driver.Table{Name: "Users", Columns: []driver.Column{{Name: "ID", DataType: "int"}}}),
+		runID:    "sync-failure-run",
+	})
+	if err == nil {
+		t.Fatal("expected apply failure")
+	}
+
+	run, err := state.GetRunByID("sync-failure-run")
+	if err != nil || run == nil {
+		t.Fatalf("GetRunByID: %v %v", run, err)
+	}
+	if run.Status != "failed" {
+		t.Fatalf("run status = %q, want failed", run.Status)
+	}
+	if run.Phase != syncPhase(syncModeTarget, syncStepApply) {
+		t.Fatalf("run phase = %q, want %q", run.Phase, syncPhase(syncModeTarget, syncStepApply))
+	}
+	if !strings.Contains(run.Error, "statement 2") {
+		t.Fatalf("run error should identify failed statement, got %q", run.Error)
+	}
+	if strings.Contains(run.Config, "source-secret") || strings.Contains(run.Config, "target-secret") {
+		t.Fatalf("run config leaked credentials: %s", run.Config)
+	}
+
+	sqlPath := filepath.Join(dataDir, "runs", "sync-failure-run", "ddl", "migration.sql")
+	sql, err := os.ReadFile(sqlPath)
+	if err != nil {
+		t.Fatalf("reading migration artifact: %v", err)
+	}
+	if !strings.Contains(string(sql), "ADD COLUMN age") || !strings.Contains(string(sql), "ADD COLUMN state") {
+		t.Fatalf("migration artifact missing plan SQL:\n%s", sql)
+	}
+
+	manifestPath := filepath.Join(dataDir, "runs", "sync-failure-run", "ddl", "manifest.json")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("reading manifest artifact: %v", err)
+	}
+	if !strings.Contains(string(manifest), `"sync_mode": "target"`) ||
+		!strings.Contains(string(manifest), `"plan_fingerprint": "sha256:`) {
+		t.Fatalf("manifest missing sync recovery metadata:\n%s", manifest)
+	}
+}
+
+func TestSnapshotApplyPartialFailureBlocksBlindRerun(t *testing.T) {
+	dataDir := t.TempDir()
+	state, err := checkpoint.New(dataDir)
+	if err != nil {
+		t.Fatalf("setup state: %v", err)
+	}
+	defer state.Close()
+
+	cfg := snapshotSyncCfg()
+	cfg.Migration.DataDir = dataDir
+	prev := snapshotWith(driver.Table{Name: "Users", Columns: []driver.Column{{Name: "ID", DataType: "int"}}})
+	prev.CapturedAt = time.Now().UTC().Add(-time.Hour)
+	curr := snapshotWith(driver.Table{Name: "Users", Columns: []driver.Column{
+		{Name: "ID", DataType: "int"},
+		{Name: "Age", DataType: "int"},
+	}})
+	curr.CapturedAt = time.Now().UTC()
+
+	plan := schemadiff.Plan{Statements: []schemadiff.Statement{
+		{SQL: "ALTER TABLE public.users ADD COLUMN age integer", Description: "add age", Risk: schemadiff.RiskSafe},
+		{SQL: "ALTER TABLE public.users ADD COLUMN state text", Description: "add state", Risk: schemadiff.RiskSafe},
+	}}
+	exec := &stubExecutor{failAt: 2, failErr: errors.New("boom")}
+	err = applySyncPlan(context.Background(), exec, plan, syncApplyOptions{
+		mode:           syncModeSnapshot,
+		cfg:            cfg,
+		state:          state,
+		snapshotState:  state,
+		currSnap:       curr,
+		sourceIdentity: "host=source;port=1433;database=crm",
+		saveSnapshot:   true,
+		runID:          "snapshot-partial-run",
+	})
+	if err == nil {
+		t.Fatal("expected partial snapshot apply failure")
+	}
+
+	err = refuseUnsafeSnapshotApplyRerun(state, prev, cfg)
+	if err == nil {
+		t.Fatal("expected stale snapshot rerun to be refused")
+	}
+	if !strings.Contains(err.Error(), "--against target") {
+		t.Fatalf("rerun refusal should point at target-mode recovery, got: %v", err)
+	}
+
+	newBaseline := prev
+	newBaseline.CapturedAt = time.Now().UTC().Add(time.Hour)
+	if err := refuseUnsafeSnapshotApplyRerun(state, newBaseline, cfg); err != nil {
+		t.Fatalf("newer baseline should clear stale replay guard, got: %v", err)
 	}
 }
 
@@ -192,7 +312,7 @@ func TestLoadPreviousSnapshot_NoSnapshotReturnsHelpfulError(t *testing.T) {
 	}
 	defer state.Close()
 
-	_, err = loadPreviousSnapshot(state, "mssql", "dbo")
+	_, err = loadPreviousSnapshot(state, "mssql", "host=source;port=1433;database=crm", "dbo")
 	if err == nil {
 		t.Fatal("expected error when no snapshot exists")
 	}
@@ -218,11 +338,12 @@ func TestLoadPreviousSnapshot_RoundTrip(t *testing.T) {
 		Tables:     []driver.Table{{Schema: "dbo", Name: "Users"}},
 	}
 	payload, _ := json.Marshal(want)
-	if _, err := state.SaveSnapshot(want.SourceType, want.Schema, want.CapturedAt, payload); err != nil {
+	sourceIdentity := "host=source;port=1433;database=crm"
+	if _, err := state.SaveSnapshot(want.SourceType, sourceIdentity, want.Schema, want.CapturedAt, payload); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	got, err := loadPreviousSnapshot(state, "mssql", "dbo")
+	got, err := loadPreviousSnapshot(state, "mssql", sourceIdentity, "dbo")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -449,11 +570,12 @@ func TestLoadPreviousSnapshot_MalformedPayload(t *testing.T) {
 	defer state.Close()
 
 	// Save a payload that isn't valid JSON for a Snapshot.
-	if _, err := state.SaveSnapshot("mssql", "dbo", time.Now(), []byte("{not json")); err != nil {
+	sourceIdentity := "host=source;port=1433;database=crm"
+	if _, err := state.SaveSnapshot("mssql", sourceIdentity, "dbo", time.Now(), []byte("{not json")); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	_, err = loadPreviousSnapshot(state, "mssql", "dbo")
+	_, err = loadPreviousSnapshot(state, "mssql", sourceIdentity, "dbo")
 	if err == nil {
 		t.Fatal("expected unmarshal error")
 	}

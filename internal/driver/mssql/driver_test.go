@@ -1,6 +1,7 @@
 package mssql
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,6 +26,71 @@ func TestReaderDatabaseContext_Populated(t *testing.T) {
 	}
 }
 
+func TestReaderLoadColumnsUsesQuotedNullSafeIdentityProbe(t *testing.T) {
+	body := readerFunctionSource(t, "func (r *Reader) loadColumns", "func (r *Reader) loadComputedColumns")
+	for _, needle := range []string{
+		"OBJECT_ID(QUOTENAME(TABLE_SCHEMA) + '.' + QUOTENAME(TABLE_NAME))",
+		"sql.NullInt64",
+		"isIdentity.Valid && isIdentity.Int64 == 1",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("loadColumns missing identity safety marker %q", needle)
+		}
+	}
+}
+
+func TestReaderLoadIndexesSeparatesKeyAndIncludeColumns(t *testing.T) {
+	body := readerFunctionSource(t, "func (r *Reader) LoadIndexes", "// fkColumnDelimiter")
+	for _, needle := range []string{
+		"AND ic.is_included_column = 0",
+		"AND ic.is_included_column = 1",
+		"WITHIN GROUP (ORDER BY ic.key_ordinal)",
+		"WITHIN GROUP (ORDER BY ic.index_column_id)",
+		"i.filter_definition",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("LoadIndexes missing INCLUDE/key-column marker %q", needle)
+		}
+	}
+}
+
+func TestReaderChecksIterationErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		start string
+		end   string
+		want  string
+	}{
+		{
+			name:  "ExtractSchema",
+			start: "func (r *Reader) ExtractSchema",
+			end:   "func (r *Reader) applyActualRowSizes",
+			want:  `return nil, fmt.Errorf("iterating tables: %w", err)`,
+		},
+		{
+			name:  "loadPrimaryKey",
+			start: "func (r *Reader) loadPrimaryKey",
+			end:   "func (r *Reader) loadRowCount",
+			want:  `return fmt.Errorf("iterating primary key: %w", err)`,
+		},
+		{
+			name:  "LoadIndexes",
+			start: "func (r *Reader) LoadIndexes",
+			end:   "// fkColumnDelimiter",
+			want:  `return fmt.Errorf("iterating indexes: %w", err)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := readerFunctionSource(t, tt.start, tt.end)
+			if !strings.Contains(body, tt.want) {
+				t.Fatalf("%s missing rows.Err guard %q", tt.name, tt.want)
+			}
+		})
+	}
+}
+
 // readReaderSource returns the contents of reader.go as a string. Uses
 // runtime.Caller to locate the file by absolute path so the test doesn't
 // depend on the working directory.
@@ -39,6 +105,20 @@ func readReaderSource(t *testing.T) string {
 		t.Fatalf("read reader.go: %v", err)
 	}
 	return string(src)
+}
+
+func readerFunctionSource(t *testing.T, start, end string) string {
+	t.Helper()
+	body := readReaderSource(t)
+	startIdx := strings.Index(body, start)
+	if startIdx < 0 {
+		t.Fatalf("reader.go missing start marker %q", start)
+	}
+	endIdx := strings.Index(body[startIdx:], end)
+	if endIdx < 0 {
+		t.Fatalf("reader.go missing end marker %q after %q", end, start)
+	}
+	return body[startIdx : startIdx+endIdx]
 }
 
 func TestDriverRegistration(t *testing.T) {
@@ -149,6 +229,33 @@ func TestBuildDSNEncrypt(t *testing.T) {
 				t.Errorf("BuildDSN with encrypt=%v should contain %q, got %q", tt.encrypt, tt.expected, dsn)
 			}
 		})
+	}
+}
+
+func TestBuildDSNCredentialsRoundTrip(t *testing.T) {
+	dialect := &Dialect{}
+	user := "u@:/%+ space"
+	password := "p@:/%+ space"
+	dsn := dialect.BuildDSN("localhost", 1433, "test db", user, password, map[string]any{})
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", dsn, err)
+	}
+	if got := u.User.Username(); got != user {
+		t.Fatalf("Username = %q, want %q", got, user)
+	}
+	gotPassword, ok := u.User.Password()
+	if !ok {
+		t.Fatal("password missing from DSN")
+	}
+	if gotPassword != password {
+		t.Fatalf("Password = %q, want %q", gotPassword, password)
+	}
+	if got := u.Query().Get("database"); got != "test db" {
+		t.Fatalf("database = %q, want test db", got)
+	}
+	if strings.Contains(u.User.String(), "+space") {
+		t.Fatalf("userinfo encodes a space as '+': %s", u.User.String())
 	}
 }
 

@@ -426,11 +426,13 @@ func (r *Reader) loadPrimaryKey(ctx context.Context, t *driver.Table) error {
 	rows, err := r.sqlDB.QueryContext(ctx, `
 		SELECT a.attname
 		FROM pg_index i
-		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
 		JOIN pg_class c ON c.oid = i.indrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
+		CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ordinality)
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
 		WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2
-		ORDER BY array_position(i.indkey, a.attnum)
+		  AND k.ordinality <= i.indnkeyatts
+		ORDER BY k.ordinality
 	`, t.Schema, t.Name)
 	if err != nil {
 		return fmt.Errorf("querying primary key for %s: %w", t.Name, err)
@@ -447,6 +449,58 @@ func (r *Reader) loadPrimaryKey(ctx context.Context, t *driver.Table) error {
 	return rows.Err()
 }
 
+type postgresIndexPart struct {
+	indexName   string
+	isUnique    bool
+	isClustered bool
+	isKey       bool
+	columnName  sql.NullString
+	expression  string
+	filter      string
+}
+
+func appendPostgresIndexPart(idx *driver.Index, part postgresIndexPart) error {
+	filter := strings.TrimSpace(part.filter)
+	if filter != "" {
+		idx.Filter = filter
+	}
+
+	if !part.isKey {
+		col := strings.TrimSpace(part.columnName.String)
+		if col == "" {
+			return fmt.Errorf("index %s has an empty INCLUDE column", part.indexName)
+		}
+		idx.IncludeCols = append(idx.IncludeCols, col)
+		return nil
+	}
+
+	col := strings.TrimSpace(part.columnName.String)
+	isExpression := !part.columnName.Valid || col == ""
+	keyPart := col
+	if isExpression {
+		keyPart = strings.TrimSpace(part.expression)
+	}
+	if keyPart == "" {
+		return fmt.Errorf("index %s has an empty key part", part.indexName)
+	}
+	idx.Columns = append(idx.Columns, keyPart)
+	idx.ColumnExpressions = append(idx.ColumnExpressions, isExpression)
+	return nil
+}
+
+func compactPostgresIndexKeyPartMetadata(idx *driver.Index) {
+	hasExpression := false
+	for _, isExpression := range idx.ColumnExpressions {
+		if isExpression {
+			hasExpression = true
+			break
+		}
+	}
+	if !hasExpression {
+		idx.ColumnExpressions = nil
+	}
+}
+
 // LoadIndexes loads index metadata for a table.
 func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 	rows, err := r.sqlDB.QueryContext(ctx, `
@@ -454,31 +508,50 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 			i.relname AS index_name,
 			ix.indisunique,
 			CASE WHEN am.amname = 'btree' AND ix.indisclustered THEN true ELSE false END,
-			array_to_string(array_agg(a.attname ORDER BY k.ordinality), ',') AS columns
+			k.ordinality <= ix.indnkeyatts AS is_key,
+			a.attname AS column_name,
+			CASE WHEN k.attnum = 0 AND k.ordinality <= ix.indnkeyatts
+				THEN pg_get_indexdef(ix.indexrelid, k.ordinality::int, false)
+				ELSE ''
+			END AS expression,
+			COALESCE(pg_get_expr(ix.indpred, ix.indrelid), '') AS filter
 		FROM pg_index ix
 		JOIN pg_class i ON i.oid = ix.indexrelid
 		JOIN pg_class t ON t.oid = ix.indrelid
 		JOIN pg_namespace n ON n.oid = t.relnamespace
 		JOIN pg_am am ON am.oid = i.relam
 		CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ordinality)
-		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+		LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
 		WHERE n.nspname = $1 AND t.relname = $2 AND NOT ix.indisprimary
-		GROUP BY i.relname, ix.indisunique, am.amname, ix.indisclustered
-		ORDER BY i.relname
+		ORDER BY i.relname, k.ordinality
 	`, t.Schema, t.Name)
 	if err != nil {
 		return fmt.Errorf("querying indexes: %w", err)
 	}
 	defer rows.Close()
 
+	indexByName := make(map[string]int)
 	for rows.Next() {
-		var idx driver.Index
-		var columns string
-		if err := rows.Scan(&idx.Name, &idx.IsUnique, &idx.IsClustered, &columns); err != nil {
+		var part postgresIndexPart
+		if err := rows.Scan(&part.indexName, &part.isUnique, &part.isClustered, &part.isKey, &part.columnName, &part.expression, &part.filter); err != nil {
 			return err
 		}
-		idx.Columns = strings.Split(columns, ",")
-		t.Indexes = append(t.Indexes, idx)
+		idxPos, ok := indexByName[part.indexName]
+		if !ok {
+			t.Indexes = append(t.Indexes, driver.Index{
+				Name:        part.indexName,
+				IsUnique:    part.isUnique,
+				IsClustered: part.isClustered,
+			})
+			idxPos = len(t.Indexes) - 1
+			indexByName[part.indexName] = idxPos
+		}
+		if err := appendPostgresIndexPart(&t.Indexes[idxPos], part); err != nil {
+			return err
+		}
+	}
+	for i := range t.Indexes {
+		compactPostgresIndexKeyPartMetadata(&t.Indexes[i])
 	}
 	return rows.Err()
 }

@@ -175,7 +175,7 @@ func (r deterministicDDL) columnDefinition(col driver.Column, tableColumns ...[]
 	if !col.IsIdentity && !col.IsNullable {
 		b.WriteString(" NOT NULL")
 	}
-	if !col.IsIdentity && strings.TrimSpace(col.DefaultExpression) != "" {
+	if !col.IsIdentity && driver.ColumnHasDefault(col) {
 		def := strings.TrimSpace(col.DefaultExpressionOverride)
 		if def == "" {
 			var err error
@@ -203,7 +203,11 @@ func (r deterministicDDL) createIndex(t *driver.Table, idx *driver.Index, target
 
 	cols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
-		cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+		if i < len(idx.ColumnExpressions) && idx.ColumnExpressions[i] {
+			cols[i] = strings.TrimSpace(c)
+		} else {
+			cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+		}
 	}
 
 	var b strings.Builder
@@ -381,7 +385,10 @@ func (r deterministicDDL) columnType(col driver.Column) (string, error) {
 func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
 	raw := strings.TrimSpace(col.DefaultExpression)
 	if raw == "" {
-		return "", nil
+		if !driver.ColumnHasDefault(col) {
+			return "", nil
+		}
+		return pgStringLiteral(col.DefaultExpression), nil
 	}
 	out, err := exprir.Render(exprir.ParseDefault(raw, r.sourceDialect), r.exprOpts("default", col, nil))
 	if err == nil {
@@ -391,6 +398,10 @@ func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
 		return "", err
 	}
 	return r.sqlServerExpression(unwrapDefaultParens(raw))
+}
+
+func pgStringLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // exprOpts assembles the IR render options: postgres target conventions plus

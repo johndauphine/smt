@@ -133,7 +133,7 @@ SMT's core schema path is deterministic: introspect schemas, map types, compute 
 
 Either way:
 
-1. `smt snapshot` extracts the current source schema (tables + columns + indexes + FKs + check constraints) and stores the JSON in the SQLite state DB at `~/.smt/state.db`.
+1. `smt snapshot` extracts the current source schema (tables + columns + indexes + FKs + check constraints) and stores the JSON in the SQLite state DB at `~/.smt/migrate.db`.
 2. `smt sync` computes a structural diff (added / removed / changed tables and per-table column/index/FK/check deltas) against the chosen baseline.
 3. SMT renders a target-dialect plan locally using deterministic rules.
 4. By default the SQL is written to `migration.sql` for review. With `--apply` the statements are executed against the target in order. `data-loss-risk` statements (column drops, table drops) are refused unless `--allow-data-loss` is also passed.

@@ -19,6 +19,13 @@ import (
 
 const verifyParseMaxAttempts = 2
 
+// errParseCall marks a failure to reach/complete the AI parser call (network,
+// provider, token limits) as opposed to a malformed-but-received response.
+// VerifyTableDDL treats the former as a hard error (fail-closed) and the
+// latter as a retryable verdict, so the distinction is made with errors.Is
+// rather than a brittle substring match on the message (#219 follow-up).
+var errParseCall = errors.New("AI parse call failed")
+
 // parsedTargetDDL is the AI-parser response shape. The JSON returned by the
 // model is decoded directly into this struct; Columns can then be fed to
 // CompareColumns without an intermediate translation.
@@ -46,10 +53,10 @@ func (m *AITypeMapper) parseTargetDDLToColumns(ctx context.Context, ddl string, 
 		raw, err := m.CallAI(ctx, prompt)
 		if err != nil {
 			if errors.Is(err, errAnthropicMaxTokens) {
-				lastErr = fmt.Errorf("AI parse call failed: %w", err)
+				lastErr = fmt.Errorf("%w: %w", errParseCall, err)
 				continue
 			}
-			return nil, fmt.Errorf("AI parse call failed: %w", err)
+			return nil, fmt.Errorf("%w: %w", errParseCall, err)
 		}
 
 		cols, err := parseTargetDDLResponse(raw)
@@ -105,10 +112,10 @@ func buildVerifyParseRetryPrompt(ddl, targetDialect string, previousErr error) s
 	sb.WriteString("\n\n")
 
 	sb.WriteString("=== OUTPUT SCHEMA ===\n")
-	sb.WriteString(`{"columns":[{"name":"","data_type":"","max_length":0,"precision":0,"scale":0,"datetime_precision":0,"is_unsigned":false,"display_width":0,"is_nullable":false,"is_identity":false,"default_expression":"","is_computed":false,"computed_expression":"","computed_persisted":false,"enum_values":[]}]}`)
+	sb.WriteString(`{"columns":[{"name":"","data_type":"","max_length":0,"precision":0,"scale":0,"datetime_precision":0,"is_unsigned":false,"display_width":0,"is_nullable":false,"is_identity":false,"default_expression":"","on_update_expression":"","is_computed":false,"computed_expression":"","computed_persisted":false,"enum_values":[]}]}`)
 	sb.WriteString("\n\n")
 
-	sb.WriteString("Rules: emit one columns[] entry per DDL column in order; strip type modifiers into numeric fields; use zero values instead of null; preserve default/computed text; use dialect defaults for temporal precision; output must start with { and end with }.")
+	sb.WriteString("Rules: emit one columns[] entry per DDL column in order; strip type modifiers into numeric fields; use zero values instead of null; preserve default/on-update/computed text; use dialect defaults for temporal precision; output must start with { and end with }.")
 
 	return sb.String()
 }
@@ -136,7 +143,7 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
       "name": "<exact column name as written in the DDL>",
       "data_type": "<base type name, lowercase, NO length or precision modifiers>",
       "max_length": <integer; characters for char/varchar/nvarchar/text-class types; 0 if not applicable or unbounded>,
-      "precision": <integer; for decimal/numeric/money — total digits; 0 otherwise>,
+      "precision": <integer; for decimal/numeric/money total digits, and for BIT(N)/bit(N)/varbit(N) bit width; 0 otherwise>,
       "scale": <integer; for decimal/numeric/money — fractional digits; 0 otherwise>,
       "datetime_precision": <integer; fractional-seconds digits for date/time/timestamp types — the explicit N in TIMESTAMP(N)/DATETIME2(N)/DATETIMEOFFSET(N)/TIME(N), else the dialect default per rule 9 (0 for MySQL, 6 for PostgreSQL, 7 for SQL Server); 0 when not a temporal type>,
       "is_unsigned": <true for an UNSIGNED numeric type (MySQL); false otherwise>,
@@ -144,6 +151,7 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
       "is_nullable": <true if the column allows NULL, false if NOT NULL or PRIMARY KEY>,
       "is_identity": <true if the column auto-increments; see EXTRACTION RULES below>,
       "default_expression": "<exact default clause text, or empty string>",
+      "on_update_expression": "<exact MySQL/MariaDB ON UPDATE expression, or empty string>",
       "is_computed": <true for generated/computed columns>,
       "computed_expression": "<the generation expression, or empty>",
       "computed_persisted": <true for STORED/PERSISTED computed columns>,
@@ -153,7 +161,7 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
 }
 `)
 	sb.WriteString("\n=== EXTRACTION RULES ===\n")
-	sb.WriteString("1. data_type carries ONLY the base type name (lowercase). Strip parens and parameters: `VARCHAR(20)` → `varchar` with max_length=20; `NUMERIC(18,4)` → `numeric` with precision=18, scale=4. The stripped modifiers go in their dedicated fields — fractional-seconds precision in datetime_precision, the tinyint width in display_width, UNSIGNED in is_unsigned, enum/set members in enum_values (rules 9-12).\n")
+	sb.WriteString("1. data_type carries ONLY the base type name (lowercase). Strip parens and parameters: `VARCHAR(20)` → `varchar` with max_length=20; `NUMERIC(18,4)` → `numeric` with precision=18, scale=4; `BIT(8)` / `bit(8)` / `varbit(8)` → base type with precision=8. The stripped modifiers go in their dedicated fields — fractional-seconds precision in datetime_precision, bit-string width in precision, the tinyint width in display_width, UNSIGNED in is_unsigned, and enum/set members in enum_values.\n")
 	sb.WriteString("2. Unbounded text types (`TEXT`, `NTEXT`, `CLOB`, `MEDIUMTEXT`, `LONGTEXT`, `VARCHAR(MAX)`, `NVARCHAR(MAX)`) → max_length=0.\n")
 	sb.WriteString("3. Integer types (`INT`, `BIGINT`, `SMALLINT`) → max_length=0, precision=0, scale=0 (the dialect's default precision is irrelevant for verification).\n")
 	sb.WriteString("4. is_identity is TRUE for any auto-generated PK default mechanism:\n")
@@ -168,7 +176,8 @@ func buildVerifyParsePrompt(ddl, targetDialect string) string {
 	sb.WriteString("9. datetime_precision: the fractional-seconds precision of a temporal type — the N in `TIMESTAMP(N)`, `DATETIME2(N)`, `DATETIMEOFFSET(N)`, `TIME(N)`, `timestamp(N) with|without time zone`. When a temporal type is written WITHOUT an explicit precision, use the dialect's stored default, NOT 0: PostgreSQL `timestamp`/`timestamptz`/`time` = 6; SQL Server `datetime2`/`datetimeoffset`/`time` = 7; MySQL `TIMESTAMP`/`DATETIME`/`TIME` = 0. Use 0 for non-temporal types. This is SEPARATE from precision/scale, which are for decimal/numeric/money only.\n")
 	sb.WriteString("10. is_unsigned: true for a MySQL `... UNSIGNED` numeric type (`INT UNSIGNED`, `BIGINT UNSIGNED`, `TINYINT UNSIGNED`, ...); false otherwise.\n")
 	sb.WriteString("11. display_width: the integer N in MySQL `tinyint(N)` (e.g. `TINYINT(1)` → 1). Capture it ONLY for tinyint; 0 for every other type.\n")
-	sb.WriteString("12. enum_values: for MySQL `ENUM(...)` / `SET(...)`, the list of member string values in declaration order (`ENUM('a','b')` → [\"a\",\"b\"]); empty array for non-enum/set types.\n\n")
+	sb.WriteString("12. on_update_expression: for MySQL/MariaDB `ON UPDATE <expr>`, capture exactly `<expr>` (e.g. `CURRENT_TIMESTAMP`, `CURRENT_TIMESTAMP(3)`); empty string for columns without ON UPDATE and for other dialects.\n")
+	sb.WriteString("13. enum_values: for MySQL `ENUM(...)` / `SET(...)`, the list of member string values in declaration order (`ENUM('a','b')` → [\"a\",\"b\"]); empty array for non-enum/set types.\n\n")
 
 	sb.WriteString("=== OUTPUT CONSTRAINTS ===\n")
 	sb.WriteString("- Output MUST be a single JSON object starting with `{` and ending with `}`.\n")

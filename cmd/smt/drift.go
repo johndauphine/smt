@@ -7,7 +7,7 @@ package main
 // equivalence is handled by the deterministic comparator, so an mssql
 // varchar(20) does not "drift" against a pg character varying(20).
 //
-// Nothing is modified. Exit status: 0 = in sync, 3 = drift detected, non-zero
+// Nothing is modified. Exit status: 0 = in sync, 8 = drift detected, non-zero
 // (cli error) = connection/introspection failure. Useful as a CI gate.
 
 import (
@@ -21,6 +21,7 @@ import (
 
 	"smt/internal/config"
 	"smt/internal/driver"
+	"smt/internal/exitcodes"
 	"smt/internal/logging"
 	"smt/internal/orchestrator"
 	"smt/internal/pool"
@@ -85,9 +86,8 @@ func runDrift(c *cli.Context) error {
 	for _, t := range desired {
 		allSourceNorm[strings.ToLower(norm(t.Name))] = true
 	}
-	// Filter the SOURCE side with exactly the semantics create/sync use —
-	// case-sensitive filepath.Match on the original source names — so drift's
-	// scope is identical to what the migration manages.
+	// Filter the SOURCE side with exactly the semantics create/sync use, so
+	// drift's scope is identical to what the migration manages.
 	include, exclude := cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables
 	desired = filterDesiredScope(desired, include, exclude)
 	if err := loadConstraintsGated(ctx, orch.Source(), desired, opts); err != nil {
@@ -136,14 +136,14 @@ func runDrift(c *cli.Context) error {
 		return nil
 	}
 	// cli.Exit sets the process exit code without printing a Go error trace.
-	return cli.Exit("", 3)
+	return cli.Exit("", exitcodes.DriftDetected)
 }
 
 // targetAsSource adapts the target connection into a SourceConfig so the same
 // deterministic reader path can introspect it.
 // filterDesiredScope applies the migration include/exclude rules with exactly
 // the semantics the orchestrator's create/sync use: exclude wins, include
-// (when set) is an allowlist, and patterns are matched case-sensitively with
+// (when set) is an allowlist, and patterns match case-insensitively with
 // filepath.Match on the original source names. Keeping this identical to the
 // migration path means drift's scope is the migration's scope.
 func filterDesiredScope(tables []driver.Table, include, exclude []string) []driver.Table {
@@ -152,10 +152,10 @@ func filterDesiredScope(tables []driver.Table, include, exclude []string) []driv
 	}
 	out := make([]driver.Table, 0, len(tables))
 	for _, t := range tables {
-		if matchesAnyExact(t.Name, exclude) {
+		if matchesAnyScoped(t.Name, exclude) {
 			continue
 		}
-		if len(include) > 0 && !matchesAnyExact(t.Name, include) {
+		if len(include) > 0 && !matchesAnyScoped(t.Name, include) {
 			continue
 		}
 		out = append(out, t)
@@ -163,9 +163,13 @@ func filterDesiredScope(tables []driver.Table, include, exclude []string) []driv
 	return out
 }
 
-func matchesAnyExact(name string, patterns []string) bool {
+func matchesAnyScoped(name string, patterns []string) bool {
+	lowerName := strings.ToLower(name)
 	for _, p := range patterns {
 		if ok, _ := filepath.Match(p, name); ok {
+			return true
+		}
+		if ok, _ := filepath.Match(strings.ToLower(p), lowerName); ok {
 			return true
 		}
 	}

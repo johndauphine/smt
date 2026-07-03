@@ -32,7 +32,7 @@ var renderedTypeArgsRE = regexp.MustCompile(`\([^)]*\)`)
 // today's free-text path — only the source of the deltas differs.
 type ColumnDelta struct {
 	Column    string // column name on the source side
-	Criterion string // one of: missing, max_length, precision, scale, nullability, identity, tz_class, default
+	Criterion string // one of: missing, max_length, precision, scale, nullability, identity, tz_class, default, on_update
 	SourceVal string // formatted source value
 	TargetVal string // formatted target value, or "<missing>"
 }
@@ -44,10 +44,10 @@ func (d ColumnDelta) String() string {
 // CompareColumns runs the per-column criteria deterministically. Returns
 // an empty slice when the parsed target columns preserve the source under
 // every criterion the harness applies (type, max_length, precision, scale,
-// nullability, identity, TZ class, default class). Caller's responsibility:
-// pass *parsed* target columns whose attributes faithfully reflect the
-// proposed DDL — i.e. the AI's parse step must round-trip the DDL into a
-// Column[] before this function runs.
+// nullability, identity, TZ class, default class, ON UPDATE, computed status,
+// and enum/set members). Caller's responsibility: pass *parsed* target columns
+// whose attributes faithfully reflect the proposed DDL — i.e. the AI's parse
+// step must round-trip the DDL into a Column[] before this function runs.
 //
 // Dialect args drive the class lookups (tzClass, defaultExpressionClass).
 // Both must be one of "mssql", "postgres", "mysql"; unknown values fall back
@@ -92,6 +92,7 @@ func CompareColumns(src, tgt []Column, srcDialect, tgtDialect string) []ColumnDe
 			cmpIdentity,
 			cmpTZClass,
 			cmpEnumValues,
+			cmpOnUpdate,
 		}
 		// Same-class fixed-form columns (UUID, JSON, etc.) also skip
 		// max_length / precision / scale: those metadata are dialect-storage
@@ -214,6 +215,13 @@ func cmpMaxLength(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelta {
 	if isEnumSetType(src.DataType) && isEnumSetType(tgt.DataType) {
 		return nil
 	}
+	// Bounded character sources that exceed MySQL's safe VARCHAR ceiling are
+	// intentionally rendered to a MySQL text LOB tier. The target parser reports
+	// those LOBs as max_length=0, so compare the rendered canonical type instead
+	// of treating the bounded source length as drift (#217).
+	if expectedMySQLOversizedCharLOB(src, tgt, srcDialect, tgtDialect) {
+		return nil
+	}
 	// MySQL's LOB tiers ARE user-meaningful capacity choices when both
 	// sides speak them: LONGTEXT → TEXT silently rejects values above
 	// 64KiB, so a same-family tier change must flag even though both types
@@ -273,6 +281,24 @@ func mysqlLOBTier(dialect, dataType string) (family string, rank int) {
 	default:
 		return "", 0
 	}
+}
+
+func expectedMySQLOversizedCharLOB(src, tgt Column, srcDialect, tgtDialect string) bool {
+	if src.MaxLength <= 0 || !isMySQLDialect(tgtDialect) {
+		return false
+	}
+	expected, ok := renderedCanonicalType(src, srcDialect, tgtDialect)
+	if !ok {
+		return false
+	}
+	expectedBase := normalizeRenderedTypeBase(expected)
+	targetBase := normalizeRenderedTypeBase(tgt.DataType)
+	expectedFamily, expectedRank := mysqlLOBTier(tgtDialect, expectedBase)
+	targetFamily, targetRank := mysqlLOBTier(tgtDialect, targetBase)
+	return expectedFamily == "text" &&
+		expectedRank >= 3 &&
+		expectedFamily == targetFamily &&
+		expectedRank == targetRank
 }
 
 // normMaxLength collapses unbounded sentinels (-1 from MSSQL MAX, 0 from
@@ -408,6 +434,35 @@ func cmpIdentity(src, tgt Column, _, _ string) *ColumnDelta {
 	}
 }
 
+func cmpOnUpdate(src, tgt Column, _, tgtDialect string) *ColumnDelta {
+	// ON UPDATE <expr> is a MySQL/MariaDB-only column feature; MSSQL and
+	// PostgreSQL have no equivalent, so a MySQL source's ON UPDATE cannot be
+	// preserved cross-dialect and must not be flagged as a fidelity failure.
+	// Only enforce it when the target is MySQL/MariaDB (e.g. mysql→mysql), where
+	// a dropped ON UPDATE is a real regression (#219).
+	if tgtDialect != "mysql" && tgtDialect != "mariadb" {
+		return nil
+	}
+	srcExpr := normalizedDefaultLiteral(src.OnUpdateExpression)
+	tgtExpr := normalizedDefaultLiteral(tgt.OnUpdateExpression)
+	if srcExpr == tgtExpr {
+		return nil
+	}
+	return &ColumnDelta{
+		Column:    src.Name,
+		Criterion: "on_update",
+		SourceVal: emptyLabel(src.OnUpdateExpression),
+		TargetVal: emptyLabel(tgt.OnUpdateExpression),
+	}
+}
+
+func emptyLabel(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "<empty>"
+	}
+	return s
+}
+
 // cmpTZClass enforces criterion 4: TZ-awareness CLASS preserved. Compares
 // the dialect-specific data_type strings via tzClass to the abstract class
 // (naive_dt, tzaware_dt, naive_t, tzaware_t, na). Two type names that are
@@ -465,16 +520,25 @@ func cmpDefaultClass(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelt
 	if src.IsIdentity || tgt.IsIdentity {
 		return nil
 	}
-	srcClass := defaultExpressionClassForColumn(src.DefaultExpression, src, srcDialect)
-	tgtClass := defaultExpressionClassForColumn(tgt.DefaultExpression, tgt, tgtDialect)
+	srcExpr := defaultExpressionForClass(src)
+	tgtExpr := defaultExpressionForClass(tgt)
+	srcClass := defaultExpressionClassForColumn(srcExpr, src, srcDialect)
+	tgtClass := defaultExpressionClassForColumn(tgtExpr, tgt, tgtDialect)
 	if srcClass == tgtClass || structuredEmptyDefaultEquivalent(srcClass, tgtClass, src, tgt, srcDialect, tgtDialect) {
 		return nil
 	}
 	return &ColumnDelta{
 		Column: src.Name, Criterion: "default",
-		SourceVal: fmt.Sprintf("%s (%q)", srcClass, src.DefaultExpression),
-		TargetVal: fmt.Sprintf("%s (%q)", tgtClass, tgt.DefaultExpression),
+		SourceVal: fmt.Sprintf("%s (%q)", srcClass, srcExpr),
+		TargetVal: fmt.Sprintf("%s (%q)", tgtClass, tgtExpr),
 	}
+}
+
+func defaultExpressionForClass(col Column) string {
+	if ColumnHasDefault(col) && strings.TrimSpace(col.DefaultExpression) == "" {
+		return "'" + strings.ReplaceAll(col.DefaultExpression, "'", "''") + "'"
+	}
+	return col.DefaultExpression
 }
 
 func defaultExpressionClassForColumn(expr string, col Column, dialect string) string {
@@ -539,7 +603,7 @@ func normalizedDefaultLiteral(expr string) string {
 		norm = stripped
 		break
 	}
-	if i := strings.LastIndex(norm, "::"); i >= 0 {
+	if i := lastPostgresCastOutsideQuotes(norm); i >= 0 {
 		norm = strings.TrimSpace(norm[:i])
 	}
 	for len(norm) >= 2 && norm[0] == '(' && norm[len(norm)-1] == ')' {
@@ -549,6 +613,26 @@ func normalizedDefaultLiteral(expr string) string {
 		norm = norm[1:]
 	}
 	return strings.TrimSpace(norm)
+}
+
+func lastPostgresCastOutsideQuotes(s string) int {
+	idx := -1
+	inSingle := false
+	for i := 0; i < len(s)-1; i++ {
+		if s[i] == '\'' {
+			if inSingle && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				continue
+			}
+			inSingle = !inSingle
+			continue
+		}
+		if !inSingle && s[i] == ':' && s[i+1] == ':' {
+			idx = i
+			i++
+		}
+	}
+	return idx
 }
 
 func normalizedNumericLiteral(norm string) (string, bool) {
@@ -678,7 +762,8 @@ func tzClass(dialect, dataType string) string {
 //     128-bit identifier; reported max_length differs across
 //     dialects (0, 0, 36, 16) but isn't user-controlled.
 //   - "json"        — PG `json` / `jsonb`, MySQL `json`.
-//   - "boolean"     — PG `boolean`, MSSQL `bit`, MySQL `tinyint(1)`.
+//   - "boolean"     — PG `boolean`, MSSQL `bit`, MySQL `tinyint(1)` /
+//     `bit(1)`.
 //   - ""            — not a fixed-form class; standard length/precision
 //     comparison applies.
 //
@@ -688,6 +773,7 @@ func tzClass(dialect, dataType string) string {
 // the literal max_length check.
 func dataTypeClass(dialect string, c Column) string {
 	dt := strings.ToLower(strings.TrimSpace(c.DataType))
+	dialect = strings.ToLower(strings.TrimSpace(dialect))
 
 	// Dialect-canonical UUID/JSON/boolean types — unambiguous.
 	switch dt {
@@ -695,7 +781,10 @@ func dataTypeClass(dialect string, c Column) string {
 		return "uuid"
 	case "json", "jsonb":
 		return "json"
-	case "boolean", "bool", "bit":
+	case "boolean", "bool":
+		return "boolean"
+	}
+	if dialect == "mssql" && dt == "bit" {
 		return "boolean"
 	}
 
@@ -711,6 +800,12 @@ func dataTypeClass(dialect string, c Column) string {
 	// requires that side to be uniqueidentifier/uuid/char(36)/binary(16).
 	// In practice those pairings ARE UUIDs.
 	if dialect == "mysql" || dialect == "mariadb" {
+		if dt == "tinyint" && c.DisplayWidth == 1 {
+			return "boolean"
+		}
+		if dt == "bit" && bitColumnWidth(c) == 1 {
+			return "boolean"
+		}
 		if dt == "char" && c.MaxLength == 36 {
 			return "uuid"
 		}
@@ -720,6 +815,19 @@ func dataTypeClass(dialect string, c Column) string {
 	}
 
 	return ""
+}
+
+func bitColumnWidth(c Column) int {
+	if c.MaxLength > 0 {
+		return c.MaxLength
+	}
+	if c.Precision > 0 {
+		return c.Precision
+	}
+	if c.DisplayWidth > 0 {
+		return c.DisplayWidth
+	}
+	return 0
 }
 
 // defaultExpressionClass classifies a raw default-expression string into one

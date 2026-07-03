@@ -131,6 +131,46 @@ migration_defaults:
 	}
 }
 
+func TestLoadWarnsUnknownKeys(t *testing.T) {
+	tmp := t.TempDir()
+	f := filepath.Join(tmp, "secrets.yaml")
+	content := `
+encryption:
+  master_keey: "typo"
+notifications:
+  slack:
+    webhook_url: ""
+    channel: "#ops"
+migration_defaults:
+  create_indexes: true
+  exclude_tables:
+    - temp_*
+`
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(SecretsFileEnvVar, f)
+	Reset()
+
+	var buf bytes.Buffer
+	logging.SetOutput(&buf)
+	defer logging.SetOutput(nil)
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"unknown key encryption.master_keey",
+		"unknown key notifications.slack.channel",
+		"unknown key migration_defaults.exclude_tables",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
 // TestTemplateEmitsOnlyV1MigrationDefaults: the init-secrets template advertises
 // supported keys and none of the removed ones.
 func TestTemplateEmitsOnlyV1MigrationDefaults(t *testing.T) {
@@ -144,5 +184,8 @@ func TestTemplateEmitsOnlyV1MigrationDefaults(t *testing.T) {
 		if strings.Contains(tpl, k+":") {
 			t.Errorf("template still emits removed key %q", k)
 		}
+	}
+	if !strings.Contains(tpl, "create_check_constraints: true") {
+		t.Error("template should default create_check_constraints to true")
 	}
 }

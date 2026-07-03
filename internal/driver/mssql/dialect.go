@@ -23,12 +23,8 @@ func (d *Dialect) QualifyTable(schema, table string) string {
 }
 
 func (d *Dialect) BuildDSN(host string, port int, database, user, password string, opts map[string]any) string {
-	encodedUser := url.QueryEscape(user)
-	encodedPassword := url.QueryEscape(password)
-	encodedDatabase := url.QueryEscape(database)
-
-	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
-		encodedUser, encodedPassword, host, port, encodedDatabase)
+	dsn := fmt.Sprintf("sqlserver://%s@%s:%d?database=%s",
+		url.UserPassword(user, password).String(), host, port, url.QueryEscape(database))
 
 	// Add optional parameters
 	if encrypt, ok := opts["encrypt"].(bool); ok {

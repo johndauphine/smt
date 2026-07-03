@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	gomysql "github.com/go-sql-driver/mysql"
 )
 
 func TestBuildDSNTimeouts(t *testing.T) {
@@ -33,6 +35,43 @@ func TestBuildDSNTimeoutOverride(t *testing.T) {
 	}
 	if strings.Contains(dsn, "readTimeout=5m") {
 		t.Errorf("DSN should not override user readTimeout: %s", dsn)
+	}
+}
+
+func TestBuildDSNCredentialsRoundTrip(t *testing.T) {
+	d := &Dialect{}
+	user := "u@%+ space"
+	password := "p@:/%+ space"
+	dsn := d.BuildDSN("localhost", 3306, "test db", user, password, map[string]any{})
+	cfg, err := gomysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("ParseDSN(%q): %v", dsn, err)
+	}
+	if cfg.User != user {
+		t.Fatalf("User = %q, want %q", cfg.User, user)
+	}
+	if cfg.Passwd != password {
+		t.Fatalf("Passwd = %q, want %q", cfg.Passwd, password)
+	}
+	if cfg.DBName != "test db" {
+		t.Fatalf("DBName = %q, want test db", cfg.DBName)
+	}
+}
+
+func TestBuildDSNVerifyCADoesNotSkipVerification(t *testing.T) {
+	d := &Dialect{}
+	dsn := d.BuildDSN("localhost", 3306, "testdb", "root", "pass", map[string]any{
+		"ssl_mode": "verify-ca",
+	})
+	cfg, err := gomysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("ParseDSN(%q): %v", dsn, err)
+	}
+	if got := cfg.TLSConfig; got == "skip-verify" {
+		t.Fatalf("verify-ca mapped to tls=%q in %s", got, dsn)
+	}
+	if got := cfg.TLSConfig; got != "true" {
+		t.Fatalf("verify-ca tls = %q, want true", got)
 	}
 }
 

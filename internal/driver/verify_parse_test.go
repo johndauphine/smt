@@ -22,7 +22,7 @@ func TestParseTargetDDLToColumns_HappyPath(t *testing.T) {
 		"columns": [
 			{"name": "id", "data_type": "integer", "max_length": 0, "precision": 0, "scale": 0, "is_nullable": false, "is_identity": true, "default_expression": "", "is_computed": false, "computed_expression": "", "computed_persisted": false},
 			{"name": "code", "data_type": "varchar", "max_length": 20, "precision": 0, "scale": 0, "is_nullable": false, "is_identity": false, "default_expression": "", "is_computed": false, "computed_expression": "", "computed_persisted": false},
-			{"name": "created_at", "data_type": "timestamp", "max_length": 0, "precision": 0, "scale": 0, "is_nullable": false, "is_identity": false, "default_expression": "CURRENT_TIMESTAMP", "is_computed": false, "computed_expression": "", "computed_persisted": false}
+			{"name": "created_at", "data_type": "timestamp", "max_length": 0, "precision": 0, "scale": 0, "is_nullable": false, "is_identity": false, "default_expression": "CURRENT_TIMESTAMP", "on_update_expression": "CURRENT_TIMESTAMP", "is_computed": false, "computed_expression": "", "computed_persisted": false}
 		]
 	}`
 	mapper := mockParseServer(t, resp)
@@ -44,6 +44,18 @@ func TestParseTargetDDLToColumns_HappyPath(t *testing.T) {
 	}
 	if cols[2].DefaultExpression != "CURRENT_TIMESTAMP" {
 		t.Errorf("col[2].DefaultExpression = %q, want CURRENT_TIMESTAMP", cols[2].DefaultExpression)
+	}
+	if cols[2].OnUpdateExpression != "CURRENT_TIMESTAMP" {
+		t.Errorf("col[2].OnUpdateExpression = %q, want CURRENT_TIMESTAMP", cols[2].OnUpdateExpression)
+	}
+}
+
+func TestBuildVerifyParsePromptIncludesOnUpdateExpression(t *testing.T) {
+	prompt := buildVerifyParsePrompt("CREATE TABLE x (updated_at timestamp ON UPDATE CURRENT_TIMESTAMP)", "mysql")
+	for _, want := range []string{"on_update_expression", "ON UPDATE <expr>", "CURRENT_TIMESTAMP(3)"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("verify parse prompt missing %q:\n%s", want, prompt)
+		}
 	}
 }
 

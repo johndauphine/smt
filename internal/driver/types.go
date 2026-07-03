@@ -121,6 +121,7 @@ type Column struct {
 	DisplayWidth      int    `json:"display_width,omitempty"` // MySQL integer display width, captured only for tinyint(1) (the boolean convention); other widths are deprecated and intentionally not captured
 	OrdinalPos        int    `json:"ordinal_position"`
 	DefaultExpression string `json:"default_expression,omitempty"` // raw default clause from source dialect (e.g. "((0))", "getutcdate()", "'pending'") — empty if no default
+	HasDefault        bool   `json:"has_default,omitempty"`        // true when the source has a DEFAULT clause, even if DefaultExpression is the empty string
 	// DefaultExpressionOverride, when set, is emitted verbatim as the column's
 	// DEFAULT instead of translating DefaultExpression. It is a transient,
 	// runtime-only splice point (not persisted) used by the AI fix-suggestion
@@ -135,6 +136,31 @@ type Column struct {
 	SRID                      int      `json:"srid,omitempty"`                 // Spatial Reference ID for geography/geometry columns (0 = default/unset)
 	SpatialSubType            string   `json:"spatial_subtype,omitempty"`      // Spatial subtype (point, polygon, etc.) when the catalog exposes it
 	SampleValues              []string `json:"sample_values,omitempty"`        // Sample data values for AI type mapping context
+}
+
+// ColumnHasDefault reports whether a column has a DEFAULT clause. The
+// DefaultExpression fallback keeps pre-HasDefault snapshots compatible.
+func ColumnHasDefault(c Column) bool {
+	return c.HasDefault || strings.TrimSpace(c.DefaultExpression) != ""
+}
+
+// ColumnDefaultsEqual compares default presence and expression text while
+// preserving empty and whitespace-only string defaults.
+func ColumnDefaultsEqual(a, b Column) bool {
+	aHasDefault := ColumnHasDefault(a)
+	bHasDefault := ColumnHasDefault(b)
+	if aHasDefault != bHasDefault {
+		return false
+	}
+	if !aHasDefault {
+		return true
+	}
+	aDefault := a.DefaultExpression
+	bDefault := b.DefaultExpression
+	if strings.TrimSpace(aDefault) == "" || strings.TrimSpace(bDefault) == "" {
+		return aDefault == bDefault
+	}
+	return strings.TrimSpace(aDefault) == strings.TrimSpace(bDefault)
 }
 
 // ExpressionRenderError is returned by the deterministic renderer when a single
@@ -336,12 +362,14 @@ type Partition struct {
 
 // Index represents a table index.
 type Index struct {
-	Name        string   `json:"name"`
-	Columns     []string `json:"columns"`
-	IsUnique    bool     `json:"is_unique"`
-	IsClustered bool     `json:"is_clustered"`
-	IncludeCols []string `json:"include_cols"` // Non-key included columns (covering index)
-	Filter      string   `json:"filter"`       // Filter expression (filtered index)
+	Name                string   `json:"name"`
+	Columns             []string `json:"columns"`
+	ColumnExpressions   []bool   `json:"column_expressions,omitempty"`    // true when Columns[i] is an expression key part, not an identifier
+	ColumnPrefixLengths []int    `json:"column_prefix_lengths,omitempty"` // MySQL prefix lengths aligned with Columns
+	IsUnique            bool     `json:"is_unique"`
+	IsClustered         bool     `json:"is_clustered"`
+	IncludeCols         []string `json:"include_cols"` // Non-key included columns (covering index)
+	Filter              string   `json:"filter"`       // Filter expression (filtered index)
 }
 
 // ForeignKey represents a foreign key constraint.

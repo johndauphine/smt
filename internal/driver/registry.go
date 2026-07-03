@@ -53,7 +53,7 @@ func Get(nameOrAlias string) (Driver, error) {
 	// Lookup is case-insensitive since drivers are registered lowercase
 	d, exists := drivers[strings.ToLower(nameOrAlias)]
 	if !exists {
-		return nil, fmt.Errorf("unknown database driver: %q (available: %v)", nameOrAlias, Available())
+		return nil, fmt.Errorf("unknown database driver: %q (available: %v)", nameOrAlias, availableLocked())
 	}
 	return d, nil
 }
@@ -77,7 +77,10 @@ func Canonicalize(nameOrAlias string) string {
 func Available() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
+	return availableLocked()
+}
 
+func availableLocked() []string {
 	// Collect unique primary names
 	seen := make(map[string]bool)
 	for _, d := range drivers {

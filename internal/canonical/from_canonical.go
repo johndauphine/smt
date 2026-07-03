@@ -84,6 +84,10 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 	switch ct.Kind {
 	case Boolean:
 		return "boolean", nil
+	case BitString:
+		return bitStringDDL("bit", ct.Length), nil
+	case VarBitString:
+		return bitStringDDL("bit varying", ct.Length), nil
 	case TinyInt:
 		return "smallint", nil // pg has no 8-bit int
 	case SmallInt:
@@ -106,10 +110,7 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 		}
 		return "bigint", nil
 	case Decimal:
-		if ct.Precision > 0 {
-			return fmt.Sprintf("numeric(%d,%d)", ct.Precision, ct.Scale), nil
-		}
-		return "numeric", nil
+		return decimalDDL("numeric", ct, "postgres"), nil
 	case Real:
 		return "real", nil
 	case Double:
@@ -143,18 +144,7 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 	case Enum, Set:
 		return "text", nil
 	case Array:
-		elem := Text
-		if ct.Element != nil {
-			elem = ct.Element.Kind
-		}
-		switch elem {
-		case Integer, SmallInt, BigInt:
-			return "integer[]", nil
-		case Uuid:
-			return "uuid[]", nil
-		default:
-			return "text[]", nil
-		}
+		return pgArrayDDL(ct)
 	case Spatial:
 		return pgSpatialDDL(ct), nil
 	case Raw:
@@ -162,6 +152,18 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 	default:
 		return "", fmt.Errorf("%w", ErrUnknownType)
 	}
+}
+
+func pgArrayDDL(ct CanonicalType) (string, error) {
+	elem := CanonicalType{Kind: Text}
+	if ct.Element != nil {
+		elem = *ct.Element
+	}
+	elemDDL, err := fromCanonicalPG(elem, RenderOpts{})
+	if err != nil {
+		return "", err
+	}
+	return elemDDL + "[]", nil
 }
 
 // pgTemporal renders a time/timestamp with its fractional-seconds precision
@@ -189,6 +191,8 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 	switch ct.Kind {
 	case Boolean:
 		return "BIT", nil
+	case BitString, VarBitString:
+		return sizedCapped("VARBINARY", bytesForBits(ct.Length), 8000), nil
 	case TinyInt:
 		return "TINYINT", nil
 	case SmallInt:
@@ -209,7 +213,7 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		}
 		return "BIGINT", nil
 	case Decimal:
-		return decimalDDL("DECIMAL", ct), nil
+		return decimalDDL("DECIMAL", ct, "mssql"), nil
 	case Real:
 		return "REAL", nil
 	case Double:
@@ -232,7 +236,9 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		return sized("CHAR", ct.Length, "1"), nil
 	case Text, Json, Xml, Array:
 		return "NVARCHAR(MAX)", nil
-	case Binary, VarBinary, Blob:
+	case Binary:
+		return mssqlBinaryDDL(ct.Length), nil
+	case VarBinary, Blob:
 		return sizedCapped("VARBINARY", ct.Length, 8000), nil
 	case RowVersion:
 		return "ROWVERSION", nil
@@ -275,6 +281,10 @@ func fromCanonicalMySQL(ct CanonicalType, opts RenderOpts) (string, error) {
 	switch ct.Kind {
 	case Boolean:
 		return "TINYINT(1)", nil
+	case BitString:
+		return mysqlBitString(ct.Length), nil
+	case VarBitString:
+		return mysqlVarBitString(ct.Length), nil
 	case TinyInt:
 		return u("TINYINT"), nil
 	case SmallInt:
@@ -286,11 +296,11 @@ func fromCanonicalMySQL(ct CanonicalType, opts RenderOpts) (string, error) {
 	case BigInt:
 		return u("BIGINT"), nil
 	case Decimal:
-		return u(decimalDDL("DECIMAL", ct)), nil
+		return u(decimalDDL("DECIMAL", ct, "mysql")), nil
 	case Real:
-		return "FLOAT", nil
+		return u("FLOAT"), nil
 	case Double:
-		return "DOUBLE", nil
+		return u("DOUBLE"), nil
 	case Varchar:
 		return mysqlVarchar(ct.Length), nil
 	case Char:
@@ -304,7 +314,9 @@ func fromCanonicalMySQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		return "JSON", nil
 	case Xml:
 		return "LONGTEXT", nil // mysql has no XML type; XML as text
-	case Binary, VarBinary:
+	case Binary:
+		return mysqlBinaryDDL(ct.Length), nil
+	case VarBinary:
 		if ct.Length <= 0 {
 			return "LONGBLOB", nil
 		}
@@ -363,11 +375,112 @@ func sizedCapped(name string, length, max int) string {
 	return sized(name, length, "MAX")
 }
 
-func decimalDDL(name string, ct CanonicalType) string {
-	if ct.Precision > 0 {
-		return fmt.Sprintf("%s(%d,%d)", name, ct.Precision, ct.Scale)
+func mssqlBinaryDDL(length int) string {
+	if length <= 0 {
+		return "BINARY(1)"
+	}
+	if length > 8000 {
+		return "VARBINARY(MAX)"
+	}
+	return fmt.Sprintf("BINARY(%d)", length)
+}
+
+func mysqlBinaryDDL(length int) string {
+	if length <= 0 {
+		return "BINARY(1)"
+	}
+	if length <= 255 {
+		return fmt.Sprintf("BINARY(%d)", length)
+	}
+	if length > 65535 {
+		return "MEDIUMBLOB"
+	}
+	return fmt.Sprintf("VARBINARY(%d)", length)
+}
+
+func decimalDDL(name string, ct CanonicalType, target string) string {
+	precision, scale := decimalShape(ct, target)
+	if precision > 0 {
+		return fmt.Sprintf("%s(%d,%d)", name, precision, scale)
 	}
 	return name
+}
+
+func decimalShape(ct CanonicalType, target string) (precision, scale int) {
+	if ct.Precision <= 0 {
+		switch target {
+		case "mysql":
+			return 65, 30
+		case "mssql":
+			return 38, 18
+		default:
+			return 0, 0
+		}
+	}
+
+	precision = ct.Precision
+	scale = ct.Scale
+	if scale < 0 {
+		scale = 0
+	}
+	switch target {
+	case "mysql":
+		if precision > 65 {
+			precision = 65
+		}
+		if scale > 30 {
+			scale = 30
+		}
+	case "mssql":
+		if precision > 38 {
+			precision = 38
+		}
+		if scale > 38 {
+			scale = 38
+		}
+	}
+	if scale > precision {
+		scale = precision
+	}
+	return precision, scale
+}
+
+func bitStringDDL(name string, length int) string {
+	if length > 0 {
+		return fmt.Sprintf("%s(%d)", name, length)
+	}
+	return name
+}
+
+func bytesForBits(bits int) int {
+	if bits <= 0 {
+		return 0
+	}
+	return (bits + 7) / 8
+}
+
+func mysqlBitString(bits int) string {
+	if bits <= 0 {
+		return "BIT"
+	}
+	if bits <= 64 {
+		return fmt.Sprintf("BIT(%d)", bits)
+	}
+	return mysqlVarBinaryBytes(bytesForBits(bits))
+}
+
+func mysqlVarBitString(bits int) string {
+	return mysqlVarBinaryBytes(bytesForBits(bits))
+}
+
+func mysqlVarBinaryBytes(bytes int) string {
+	if bytes <= 0 {
+		return "LONGBLOB"
+	}
+	if bytes > 65535 {
+		return "MEDIUMBLOB"
+	}
+	return fmt.Sprintf("VARBINARY(%d)", bytes)
 }
 
 func fspDDL(name string, ct CanonicalType, max int) string {
@@ -574,6 +687,41 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 		if ct.Unsigned && target != "mysql" && !opts.IsIdentity {
 			add("target has no unsigned 64-bit integer; rendered as " + rendered)
 		}
+	case Decimal:
+		if ct.Precision <= 0 && target != "postgres" {
+			add("target has no unconstrained decimal type; rendered as " + rendered)
+		}
+		if target == "mysql" {
+			if ct.Precision > 65 {
+				add(fmt.Sprintf("decimal precision %d exceeds MySQL max 65; rendered as %s", ct.Precision, rendered))
+			}
+			if ct.Scale > 30 {
+				add(fmt.Sprintf("decimal scale %d exceeds MySQL max 30; rendered as %s", ct.Scale, rendered))
+			}
+		}
+		if target == "mssql" && ct.Precision > 38 {
+			add(fmt.Sprintf("decimal precision %d exceeds SQL Server max 38; rendered as %s", ct.Precision, rendered))
+		}
+		if target == "mssql" && ct.Scale > 38 {
+			add(fmt.Sprintf("decimal scale %d exceeds SQL Server max 38; rendered as %s", ct.Scale, rendered))
+		}
+		if ct.Scale > ct.Precision && ct.Precision > 0 {
+			add(fmt.Sprintf("decimal scale %d exceeds precision %d; rendered as %s", ct.Scale, ct.Precision, rendered))
+		}
+		if ct.Unsigned && target != "mysql" {
+			add("target has no unsigned decimal domain; rendered as " + rendered)
+		}
+	case Real, Double:
+		if ct.Unsigned && target != "mysql" {
+			add("target has no unsigned floating-point domain; rendered as " + rendered)
+		}
+	case BitString, VarBitString:
+		if target == "mssql" {
+			add("target has no native bit-string type; rendered as " + rendered)
+		}
+		if target == "mysql" && (ct.Kind == VarBitString || ct.Length > 64) {
+			add("target has no equivalent bit-string type for this width; rendered as " + rendered)
+		}
 	case Time, Timestamp:
 		if ct.WithTZ && target == "mysql" && ct.Kind == Timestamp {
 			// MySQL TIMESTAMP preserves the TZ-aware semantic (#169) but is
@@ -582,8 +730,9 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 			// "no equivalent" message.
 			add("MySQL TIMESTAMP is time-zone-aware but limited to 1970-2038; rendered as " + rendered)
 		}
-		if ct.WithTZ && target == "mysql" && ct.Kind == Time {
-			// MySQL TIME has no time-zone-aware form; the zone offset is dropped.
+		if ct.WithTZ && (target == "mysql" || target == "mssql") && ct.Kind == Time {
+			// MySQL and SQL Server TIME have no time-zone-aware form; the zone
+			// offset is dropped.
 			add("target has no equivalent time-zone-aware type; rendered as " + rendered)
 		}
 		if ct.UTCNormalized && target != "mysql" {
@@ -607,6 +756,18 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 		}
 		if target == "mysql" && ct.SpatialType == "geography" {
 			add("MySQL has no native geography type; rendered as " + rendered)
+		}
+	case Array:
+		if target != "postgres" {
+			add("target has no native array type; rendered as " + rendered)
+			break
+		}
+		if ct.Element != nil {
+			elemRendered := strings.TrimSuffix(rendered, "[]")
+			for _, w := range mappingWarnings(*ct.Element, target, elemRendered, opts) {
+				w.Reason = "array element: " + w.Reason
+				out = append(out, w)
+			}
 		}
 	}
 	return out
@@ -636,6 +797,10 @@ func kindName(k Kind) string {
 	switch k {
 	case Boolean:
 		return "boolean"
+	case BitString:
+		return "bit_string"
+	case VarBitString:
+		return "varbit_string"
 	case TinyInt:
 		return "tinyint"
 	case SmallInt:

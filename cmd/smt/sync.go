@@ -18,22 +18,28 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/urfave/cli/v2"
 
 	"smt/internal/checkpoint"
 	"smt/internal/config"
+	"smt/internal/ddl"
 	"smt/internal/driver"
+	"smt/internal/exitcodes"
 	"smt/internal/logging"
 	"smt/internal/orchestrator"
 	"smt/internal/pool"
 	"smt/internal/schemadiff"
+	"smt/internal/version"
 )
 
 func snapshotCommand() *cli.Command {
@@ -146,7 +152,7 @@ func runSnapshot(c *cli.Context) error {
 	if !ok {
 		return fmt.Errorf("snapshot storage requires the SQLite state backend")
 	}
-	id, err := state.SaveSnapshot(snap.SourceType, snap.Schema, snap.CapturedAt, payload)
+	id, err := state.SaveSnapshot(snap.SourceType, snapshotSourceIdentity(cfg.Source), snap.Schema, snap.CapturedAt, payload)
 	if err != nil {
 		return err
 	}
@@ -186,6 +192,19 @@ func runSync(c *cli.Context) error {
 	default:
 		return fmt.Errorf("invalid --against value %q (expected 'target' or 'snapshot')", c.String("against"))
 	}
+}
+
+const (
+	syncModeTarget   = "target"
+	syncModeSnapshot = "snapshot"
+
+	syncStepPlan         = "plan"
+	syncStepApply        = "apply"
+	syncStepSaveSnapshot = "save_snapshot"
+)
+
+func syncPhase(mode, step string) string {
+	return "sync_" + mode + "_" + step
 }
 
 func runSyncAgainstTarget(c *cli.Context) error {
@@ -289,7 +308,7 @@ func runSyncAgainstTarget(c *cli.Context) error {
 		fmt.Println("Renderer returned no statements; nothing to apply.")
 		return nil
 	}
-	return finishSyncPlan(c, ctx, orch, plan, state, currSnap)
+	return finishSyncPlan(c, ctx, orch, cfg, profileName, configPath, syncModeTarget, plan, state, currSnap, snapshotSourceIdentity(cfg.Source))
 }
 
 // runSyncAgainstSnapshot diffs the current source schema against the latest
@@ -324,9 +343,15 @@ func runSyncAgainstSnapshot(c *cli.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	prevSnap, err := loadPreviousSnapshot(state, cfg.Source.Type, cfg.Source.Schema)
+	sourceIdentity := snapshotSourceIdentity(cfg.Source)
+	prevSnap, err := loadPreviousSnapshot(state, cfg.Source.Type, sourceIdentity, cfg.Source.Schema)
 	if err != nil {
 		return err
+	}
+	if apply {
+		if err := refuseUnsafeSnapshotApplyRerun(state, prevSnap, cfg); err != nil {
+			return err
+		}
 	}
 
 	logging.Info("extracting current source schema")
@@ -364,7 +389,7 @@ func runSyncAgainstSnapshot(c *cli.Context) error {
 		fmt.Println("Renderer returned no statements; nothing to apply.")
 		return nil
 	}
-	return finishSyncPlan(c, ctx, orch, plan, state, currSnap)
+	return finishSyncPlan(c, ctx, orch, cfg, profileName, configPath, syncModeSnapshot, plan, state, currSnap, sourceIdentity)
 }
 
 // buildSnapshotSyncPlan computes the offline snapshot-to-snapshot diff and
@@ -412,7 +437,7 @@ func buildSnapshotSyncPlan(prev, curr schemadiff.Snapshot, cfg *config.Config) (
 // finishSyncPlan is the shared tail of both sync modes: write the plan to
 // --out for review, or gate (unsupported changes, data-loss risk) and apply
 // it against the target, optionally saving the new baseline snapshot.
-func finishSyncPlan(c *cli.Context, ctx context.Context, orch *orchestrator.Orchestrator, plan schemadiff.Plan, state *checkpoint.State, currSnap schemadiff.Snapshot) error {
+func finishSyncPlan(c *cli.Context, ctx context.Context, orch *orchestrator.Orchestrator, cfg *config.Config, profileName, configPath, mode string, plan schemadiff.Plan, snapshotState *checkpoint.State, currSnap schemadiff.Snapshot, sourceIdentity string) error {
 	printPlanSummary(plan)
 
 	if !c.Bool("apply") {
@@ -425,29 +450,251 @@ func finishSyncPlan(c *cli.Context, ctx context.Context, orch *orchestrator.Orch
 		return nil
 	}
 
+	return applySyncPlan(ctx, orch.Target(), plan, syncApplyOptions{
+		mode:           mode,
+		cfg:            cfg,
+		profileName:    profileName,
+		configPath:     configPath,
+		state:          orch.State(),
+		snapshotState:  snapshotState,
+		currSnap:       currSnap,
+		sourceIdentity: sourceIdentity,
+		allowDataLoss:  c.Bool("allow-data-loss"),
+		saveSnapshot:   c.Bool("save-snapshot"),
+	})
+}
+
+type syncApplyOptions struct {
+	mode           string
+	cfg            *config.Config
+	profileName    string
+	configPath     string
+	state          checkpoint.StateBackend
+	snapshotState  *checkpoint.State
+	currSnap       schemadiff.Snapshot
+	sourceIdentity string
+	allowDataLoss  bool
+	saveSnapshot   bool
+	runID          string
+}
+
+type syncRunConfig struct {
+	Config any             `json:"config"`
+	Sync   syncRunMetadata `json:"sync"`
+}
+
+type syncRunMetadata struct {
+	Mode          string `json:"mode"`
+	AllowDataLoss bool   `json:"allow_data_loss"`
+	SaveSnapshot  bool   `json:"save_snapshot"`
+}
+
+type syncRunManifest struct {
+	SMTVersion                string `json:"smt_version"`
+	RendererVersion           string `json:"renderer_version"`
+	SourceDialect             string `json:"source_dialect"`
+	TargetDialect             string `json:"target_dialect"`
+	TargetSchema              string `json:"target_schema"`
+	UnknownTypePolicy         string `json:"unknown_type_policy"`
+	SyncMode                  string `json:"sync_mode"`
+	StatementCount            int    `json:"statement_count"`
+	UnsupportedCount          int    `json:"unsupported_count"`
+	SourceSnapshotFingerprint string `json:"source_snapshot_fingerprint"`
+	PlanFingerprint           string `json:"plan_fingerprint"`
+}
+
+func applySyncPlan(ctx context.Context, tgt sqlExecutor, plan schemadiff.Plan, opts syncApplyOptions) error {
+	if opts.state == nil {
+		return fmt.Errorf("sync --apply requires a state backend")
+	}
+	if opts.cfg == nil {
+		return fmt.Errorf("sync --apply requires configuration")
+	}
+	runID := opts.runID
+	if runID == "" {
+		runID = uuid.NewString()
+	}
+	runConfig := syncRunConfig{
+		Config: opts.cfg.Sanitized(),
+		Sync: syncRunMetadata{
+			Mode:          opts.mode,
+			AllowDataLoss: opts.allowDataLoss,
+			SaveSnapshot:  opts.saveSnapshot,
+		},
+	}
+	if err := opts.state.CreateRun(runID, checkpoint.RunKindApply, opts.cfg.Source.Schema, opts.cfg.Target.Schema, runConfig, opts.profileName, opts.configPath); err != nil {
+		return fmt.Errorf("recording sync run start: %w", err)
+	}
+
+	fail := func(err error) error {
+		_ = opts.state.CompleteRun(runID, "failed", err.Error())
+		return err
+	}
+
+	if err := opts.state.UpdatePhase(runID, syncPhase(opts.mode, syncStepPlan)); err != nil {
+		return fail(fmt.Errorf("recording sync plan phase: %w", err))
+	}
+	if err := writeSyncRunArtifacts(opts.cfg.Migration.DataDir, runID, plan, opts); err != nil {
+		return fail(fmt.Errorf("writing sync run artifacts: %w", err))
+	}
+
 	if len(plan.Unsupported) > 0 {
 		printUnsupportedChanges(plan.Unsupported)
-		return fmt.Errorf("refusing to apply plan with unsupported change(s)")
+		return fail(fmt.Errorf("refusing to apply plan with unsupported change(s)"))
 	}
 
-	if err := gatePlanForApply(plan, c.Bool("allow-data-loss")); err != nil {
-		return err
+	if err := gatePlanForApply(plan, opts.allowDataLoss); err != nil {
+		return fail(err)
 	}
 
-	if err := applyPlan(ctx, orch.Target(), plan); err != nil {
-		return err
+	if err := opts.state.UpdatePhase(runID, syncPhase(opts.mode, syncStepApply)); err != nil {
+		return fail(fmt.Errorf("recording sync apply phase: %w", err))
+	}
+	if err := applyPlan(ctx, tgt, plan); err != nil {
+		return fail(err)
 	}
 	fmt.Printf("Applied %d statement(s) successfully; skipped 0 unsupported change(s).\n", len(plan.Statements))
 
-	if c.Bool("save-snapshot") {
-		payload, _ := json.Marshal(currSnap)
-		id, err := state.SaveSnapshot(currSnap.SourceType, currSnap.Schema, currSnap.CapturedAt, payload)
+	if opts.saveSnapshot {
+		if opts.snapshotState == nil {
+			return fail(fmt.Errorf("saving snapshots requires the SQLite state backend"))
+		}
+		if err := opts.state.UpdatePhase(runID, syncPhase(opts.mode, syncStepSaveSnapshot)); err != nil {
+			return fail(fmt.Errorf("recording sync snapshot phase: %w", err))
+		}
+		payload, err := json.Marshal(opts.currSnap)
 		if err != nil {
-			return fmt.Errorf("saving baseline snapshot: %w", err)
+			return fail(fmt.Errorf("marshaling baseline snapshot: %w", err))
+		}
+		id, err := opts.snapshotState.SaveSnapshot(opts.currSnap.SourceType, opts.sourceIdentity, opts.currSnap.Schema, opts.currSnap.CapturedAt, payload)
+		if err != nil {
+			return fail(fmt.Errorf("saving baseline snapshot: %w", err))
 		}
 		fmt.Printf("New baseline snapshot saved (id=%d).\n", id)
 	}
+	if err := opts.state.CompleteRun(runID, "success", ""); err != nil {
+		return fmt.Errorf("recording sync run success: %w", err)
+	}
 	return nil
+}
+
+func writeSyncRunArtifacts(dataDir, runID string, plan schemadiff.Plan, opts syncApplyOptions) error {
+	dir, err := syncDDLArtifactDir(dataDir, runID)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "migration.sql"), []byte(plan.SQL()), 0600); err != nil {
+		return err
+	}
+	manifest, err := buildSyncRunManifest(plan, opts)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "manifest.json"), append(data, '\n'), 0600)
+}
+
+func syncDDLArtifactDir(dataDir, runID string) (string, error) {
+	if strings.TrimSpace(dataDir) == "" {
+		var err error
+		dataDir, err = config.DefaultDataDir()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(dataDir, "runs", runID, "ddl"), nil
+}
+
+func buildSyncRunManifest(plan schemadiff.Plan, opts syncApplyOptions) (syncRunManifest, error) {
+	sourceFP, err := syncSnapshotFingerprint(opts.currSnap)
+	if err != nil {
+		return syncRunManifest{}, err
+	}
+	return syncRunManifest{
+		SMTVersion:                version.Version,
+		RendererVersion:           ddl.RendererVersion,
+		SourceDialect:             driver.Canonicalize(opts.cfg.Source.Type),
+		TargetDialect:             driver.Canonicalize(opts.cfg.Target.Type),
+		TargetSchema:              opts.cfg.Target.Schema,
+		UnknownTypePolicy:         opts.cfg.SchemaGeneration.UnknownTypePolicy,
+		SyncMode:                  opts.mode,
+		StatementCount:            len(plan.Statements),
+		UnsupportedCount:          len(plan.Unsupported),
+		SourceSnapshotFingerprint: sourceFP,
+		PlanFingerprint:           syncFingerprintBytes([]byte(plan.SQL())),
+	}, nil
+}
+
+func syncSnapshotFingerprint(snap schemadiff.Snapshot) (string, error) {
+	payload := struct {
+		Version    int            `json:"version,omitempty"`
+		Schema     string         `json:"schema"`
+		SourceType string         `json:"source_type"`
+		Tables     []driver.Table `json:"tables"`
+	}{
+		Version:    snap.Version,
+		Schema:     snap.Schema,
+		SourceType: snap.SourceType,
+		Tables:     syncFingerprintTables(snap.Tables),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return syncFingerprintBytes(data), nil
+}
+
+func syncFingerprintTables(tables []driver.Table) []driver.Table {
+	out := make([]driver.Table, len(tables))
+	for i := range tables {
+		out[i] = tables[i]
+		out[i].RowCount = 0
+		out[i].EstimatedRowSize = 0
+		out[i].Columns = append([]driver.Column(nil), tables[i].Columns...)
+		for j := range out[i].Columns {
+			out[i].Columns[j].SampleValues = nil
+		}
+	}
+	return out
+}
+
+func syncFingerprintBytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func refuseUnsafeSnapshotApplyRerun(state *checkpoint.State, prevSnap schemadiff.Snapshot, cfg *config.Config) error {
+	runs, err := state.GetAllRuns()
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if run.SourceSchema != cfg.Source.Schema || run.TargetSchema != cfg.Target.Schema {
+			continue
+		}
+		if !isPartialSnapshotApplyPhase(run.Phase) || run.Status != "failed" {
+			continue
+		}
+		if run.CompletedAt != nil && prevSnap.CapturedAt.After(*run.CompletedAt) {
+			return nil
+		}
+		return fmt.Errorf(
+			"previous sync --against snapshot --apply run %s failed during %s; refusing to replay the stale snapshot plan. Inspect runs/%s/ddl/migration.sql, then recover with `smt sync --against target --apply` or capture a new baseline with `smt snapshot` after the target is correct",
+			run.ID, run.Phase, run.ID,
+		)
+	}
+	return nil
+}
+
+func isPartialSnapshotApplyPhase(phase string) bool {
+	return phase == syncPhase(syncModeSnapshot, syncStepApply) ||
+		phase == syncPhase(syncModeSnapshot, syncStepSaveSnapshot)
 }
 
 // gatePlanForApply refuses to apply a plan containing data-loss-risk
@@ -466,10 +713,10 @@ func gatePlanForApply(plan schemadiff.Plan, allowDataLoss bool) error {
 }
 
 // loadPreviousSnapshot returns the most recent stored snapshot for this
-// (sourceType, schema). It is the baseline loader for `sync --against
+// (sourceType, sourceIdentity, schema). It is the baseline loader for `sync --against
 // snapshot`; live target sync planning does not require a previous snapshot.
-func loadPreviousSnapshot(state *checkpoint.State, sourceType, schema string) (schemadiff.Snapshot, error) {
-	snapRow, err := state.GetLatestSnapshot(sourceType, schema)
+func loadPreviousSnapshot(state *checkpoint.State, sourceType, sourceIdentity, schema string) (schemadiff.Snapshot, error) {
+	snapRow, err := state.GetLatestSnapshot(sourceType, sourceIdentity, schema)
 	if err != nil {
 		return schemadiff.Snapshot{}, err
 	}
@@ -481,6 +728,12 @@ func loadPreviousSnapshot(state *checkpoint.State, sourceType, schema string) (s
 		return schemadiff.Snapshot{}, fmt.Errorf("decoding stored snapshot: %w", err)
 	}
 	return snap, nil
+}
+
+func snapshotSourceIdentity(src config.SourceConfig) string {
+	host := strings.ToLower(strings.TrimSpace(src.Host))
+	database := strings.TrimSpace(src.Database)
+	return fmt.Sprintf("host=%s;port=%d;database=%s", host, src.Port, database)
 }
 
 // constraintLoader is the narrow subset of driver.Reader that
@@ -519,12 +772,15 @@ type sqlExecutor interface {
 
 // applyPlan executes each statement against the target writer in order.
 // Stops at the first failure so the operator can investigate and re-run
-// (idempotent statements are the AI's responsibility, not ours).
+// using the run artifact as the recovery record.
 func applyPlan(ctx context.Context, tgt sqlExecutor, plan schemadiff.Plan) error {
 	for i, s := range plan.Statements {
 		logging.Info("[%d/%d] %s (risk=%s)", i+1, len(plan.Statements), s.Description, s.Risk)
 		if _, err := tgt.ExecRaw(ctx, s.SQL); err != nil {
-			return fmt.Errorf("statement %d (%s) failed: %w\nSQL: %s", i+1, s.Description, err, s.SQL)
+			return exitcodes.NewExitError(
+				fmt.Errorf("statement %d (%s) failed: %w\nSQL: %s", i+1, s.Description, err, s.SQL),
+				exitcodes.TransferError,
+			)
 		}
 	}
 	return nil

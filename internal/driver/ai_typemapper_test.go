@@ -79,6 +79,42 @@ func TestNewAITypeMapper_LocalProviderNoAPIKey(t *testing.T) {
 	}
 }
 
+func TestNewAITypeMapper_OpenAICompatBaseURLNoAPIKey(t *testing.T) {
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("request path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("OpenAI-compatible local request sent Authorization header %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"pong"}}]}`))
+	}))
+	defer server.Close()
+
+	mapper, err := NewAITypeMapper("vllm", &secrets.Provider{
+		BaseURL: server.URL,
+		Model:   "local-model",
+	})
+	if err != nil {
+		t.Fatalf("OpenAI-compatible base_url provider should not require API key: %v", err)
+	}
+	mapper.client = server.Client()
+
+	got, err := mapper.CallAI(context.Background(), "ping")
+	if err != nil {
+		t.Fatalf("CallAI through OpenAI-compatible provider: %v", err)
+	}
+	if got != "pong" {
+		t.Fatalf("CallAI response = %q, want pong", got)
+	}
+	if !sawRequest {
+		t.Fatal("test server did not receive CallAI request")
+	}
+}
+
 func TestNewAITypeMapper_APIKeyProvided(t *testing.T) {
 	provider := testProvider("test-key-123")
 	mapper, err := NewAITypeMapper("anthropic", provider)
@@ -382,6 +418,39 @@ func TestAITypeMapper_ExportCache(t *testing.T) {
 	if len(exported) != 2 {
 		t.Errorf("expected 2 exported entries, got %d", len(exported))
 	}
+}
+
+func TestAITypeMapper_CacheAccessSafeDuringClear(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+	for i := 0; i < 20; i++ {
+		mapper.cache.Set(fmt.Sprintf("k:%d", i), "varchar")
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 100; j++ {
+				_ = mapper.CacheSize()
+				_ = mapper.ExportCache(io.Discard)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for j := 0; j < 100; j++ {
+			if err := mapper.ClearCache(); err != nil {
+				t.Errorf("ClearCache: %v", err)
+			}
+		}
+	}()
+	close(start)
+	wg.Wait()
 }
 
 // TestAITypeMapper_SaveCacheConcurrent is a regression guard for the

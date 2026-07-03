@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"smt/internal/logging"
 	"smt/internal/secrets"
 )
 
@@ -41,11 +42,11 @@ func (s *State) SaveProfile(name, description string, config []byte) error {
 
 	_, err = s.db.Exec(`
 		INSERT INTO profiles (name, description, config_enc, created_at, updated_at)
-		VALUES (?, ?, ?, datetime('now'), datetime('now'))
+		VALUES (?, ?, ?, `+sqliteUTCNow+`, `+sqliteUTCNow+`)
 		ON CONFLICT(name) DO UPDATE SET
 			description = excluded.description,
 			config_enc = excluded.config_enc,
-			updated_at = datetime('now')
+			updated_at = `+sqliteUTCNow+`
 	`, name, description, enc)
 	return err
 }
@@ -89,8 +90,8 @@ func (s *State) ListProfiles() ([]ProfileInfo, error) {
 		if desc.Valid {
 			p.Description = desc.String
 		}
-		p.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
-		p.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAtStr)
+		p.CreatedAt, _ = parseStateTime(createdAtStr)
+		p.UpdatedAt, _ = parseStateTime(updatedAtStr)
 		profiles = append(profiles, p)
 	}
 	return profiles, rows.Err()
@@ -170,6 +171,13 @@ func getMasterKey() ([]byte, error) {
 			return nil, fmt.Errorf("encryption.master_key must decode to 32 bytes (got %d)", len(key))
 		}
 		return key, nil
+	}
+	if err != nil {
+		var notFound *secrets.SecretsNotFoundError
+		if !errors.As(err, &notFound) {
+			logging.Warn("secrets: failed to load %s for encryption master key; falling back to %s: %v",
+				secrets.GetSecretsPath(), masterKeyEnv, err)
+		}
 	}
 
 	// Fall back to environment variable for backwards compatibility

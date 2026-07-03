@@ -34,7 +34,34 @@ import (
 // translation with a common fail-closed gate; output normalizes spacing and
 // spellings (e.g. UTC now-defaults become UTC_TIMESTAMP() on MySQL, pg's
 // = ANY (ARRAY[...]) checks become IN (...), lexical ::casts are stripped).
-const RendererVersion = "5"
+// "6": MySQL-target string literals from the expression IR escape backslashes
+// and control characters, closing DEFAULT/CHECK corruption and injection paths
+// (#201).
+// "7": PostgreSQL array element types are preserved through the canonical
+// mapper, so bigint[] stays bigint[] and varchar(N)[] keeps N (#198).
+// "8": Multi-bit MySQL/PostgreSQL bit-string columns no longer collapse to
+// boolean and render with their bit width where supported (#199).
+// "9": Decimal/numeric rendering preserves MySQL UNSIGNED, clamps invalid
+// target precision/scale, and avoids scale-zero defaults for bare numeric
+// on fixed-precision targets (#200).
+// "10": PostgreSQL ALTER COLUMN ... TYPE renders only the bare type for
+// identity columns; GENERATED ... AS IDENTITY is not valid in that clause
+// (#202).
+// "11": MSSQL/MySQL computed column definitions preserve NOT NULL inside the
+// generated-column branch instead of returning before nullability is appended
+// (#203).
+// "12": MySQL ALTER COLUMN ... SET DEFAULT parenthesizes function-valued
+// defaults such as CURRENT_TIMESTAMP, while column definitions keep their
+// engine-specific default form (#204).
+// "13": MSSQL-to-MySQL computed string concatenation rewrites column-only
+// textual + expressions to CONCAT(...) instead of numeric MySQL addition
+// (#205).
+// "14": Type-IR fidelity fixes preserve fixed binary widths, map UTF-8
+// source varchar/char to MSSQL national types, warn on timetz to MSSQL, and
+// log unknown-type warn fallbacks (#218).
+// "15": Expression parsing folds nested numeric unary minus instead of
+// rendering double-minus SQL that can become a line comment (#221).
+const RendererVersion = "15"
 
 type Renderer struct {
 	target            string
@@ -144,7 +171,8 @@ func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.C
 	}
 
 	if col.IsComputed {
-		expr, err := r.Expression(col.ComputedExpression, firstColumns(tableColumns))
+		contextColumns := firstColumns(tableColumns)
+		expr, err := r.computedExpression(col.ComputedExpression, col, colType, contextColumns)
 		if err != nil {
 			return "", "", fmt.Errorf("mapping computed column %s: %w", col.Name, err)
 		}
@@ -157,13 +185,20 @@ func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.C
 			if col.ComputedPersisted {
 				suffix = " PERSISTED"
 			}
+			if !col.IsNullable {
+				suffix += " NOT NULL"
+			}
 			return fmt.Sprintf("%s AS (%s)%s", r.quote(colName), expr, suffix), colType, nil
 		case "mysql":
 			storage := "VIRTUAL"
 			if col.ComputedPersisted {
 				storage = "STORED"
 			}
-			return fmt.Sprintf("%s %s GENERATED ALWAYS AS (%s) %s", r.quote(colName), colType, expr, storage), colType, nil
+			nullability := ""
+			if !col.IsNullable {
+				nullability = " NOT NULL"
+			}
+			return fmt.Sprintf("%s %s GENERATED ALWAYS AS (%s) %s%s", r.quote(colName), colType, expr, storage, nullability), colType, nil
 		}
 	}
 
@@ -182,7 +217,7 @@ func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.C
 	if !col.IsNullable {
 		b.WriteString(" NOT NULL")
 	}
-	if strings.TrimSpace(col.DefaultExpression) != "" && !col.IsIdentity {
+	if driver.ColumnHasDefault(col) && !col.IsIdentity {
 		def, err := r.ColumnDefault(col)
 		if err != nil {
 			return "", "", err
@@ -235,7 +270,14 @@ func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 	}
 	raw := strings.TrimSpace(col.DefaultExpression)
 	if raw == "" {
-		return "", nil
+		if !driver.ColumnHasDefault(col) {
+			return "", nil
+		}
+		out := sqlStringLiteral(col.DefaultExpression)
+		if r.target == "mysql" {
+			out = r.mysqlDefaultForm(out, col)
+		}
+		return out, nil
 	}
 	out, err := exprir.Render(exprir.ParseDefault(raw, r.source), r.exprOpts("default", col, nil))
 	if err != nil {
@@ -301,7 +343,7 @@ func (r Renderer) exprColInfo(col driver.Column) exprir.ColInfo {
 		return exprir.ColInfo{}
 	}
 	return exprir.ColInfo{
-		Boolean:           isBooleanColumn(col),
+		Boolean:           r.isBooleanColumn(col),
 		Textual:           isTextualSourceType(col.DataType),
 		TZAware:           dt == "datetimeoffset" || dt == "timestamptz" || dt == "timestamp with time zone",
 		JSON:              isJSONSourceType(col.DataType),
@@ -339,6 +381,18 @@ func (r Renderer) mysqlDefaultForm(def string, col driver.Column) string {
 	return "(" + d + ")"
 }
 
+func mysqlSetDefaultForm(def string) string {
+	d := strings.TrimSpace(def)
+	if d == "" || strings.HasPrefix(d, "(") {
+		return d
+	}
+	upper := strings.ToUpper(d)
+	if upper == "NULL" || isPlainLiteral(d) {
+		return d
+	}
+	return "(" + d + ")"
+}
+
 func isPlainLiteral(d string) bool {
 	if len(d) >= 2 && d[0] == '\'' && d[len(d)-1] == '\'' {
 		_, ok := unquoteSQLString(d)
@@ -366,7 +420,11 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 	}
 	cols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
-		cols[i] = r.quote(r.normalize(c))
+		col, err := r.indexKeyPartDDL(idx, i, c)
+		if err != nil {
+			return "", err
+		}
+		cols[i] = col
 	}
 	var b strings.Builder
 	b.WriteString("CREATE ")
@@ -382,6 +440,9 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 		fmt.Fprintf(&b, " INCLUDE (%s)", strings.Join(includeCols, ", "))
 	}
 	if filter := strings.TrimSpace(idx.Filter); filter != "" {
+		if r.target == "mysql" {
+			return "", fmt.Errorf("filtered indexes are not supported on mysql target: %s", idx.Name)
+		}
 		expr, err := r.Expression(filter, t.Columns)
 		if err != nil {
 			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
@@ -390,6 +451,25 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 		b.WriteString(expr)
 	}
 	return b.String(), nil
+}
+
+func (r Renderer) indexKeyPartDDL(idx *driver.Index, i int, column string) (string, error) {
+	isExpression := i < len(idx.ColumnExpressions) && idx.ColumnExpressions[i]
+	if isExpression {
+		if r.target != "mysql" {
+			return "", fmt.Errorf("expression indexes are not supported on %s target: %s", r.target, idx.Name)
+		}
+		expr := strings.TrimSpace(column)
+		if r.target == "mysql" && !(strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")")) {
+			expr = "(" + expr + ")"
+		}
+		return expr, nil
+	}
+	part := r.quote(r.normalize(column))
+	if r.target == "mysql" && i < len(idx.ColumnPrefixLengths) && idx.ColumnPrefixLengths[i] > 0 {
+		part += fmt.Sprintf("(%d)", idx.ColumnPrefixLengths[i])
+	}
+	return part, nil
 }
 
 func (r Renderer) CreateForeignKeyDDL(t *driver.Table, fk *driver.ForeignKey) (string, error) {
@@ -503,14 +583,20 @@ func (r Renderer) DropColumnDDL(tableName, colName string) string {
 }
 
 func (r Renderer) AlterColumnTypeDDL(tableName string, col driver.Column) (string, error) {
-	typ, err := r.ColumnType(col)
-	if err != nil {
-		return "", err
-	}
 	switch r.target {
 	case "postgres":
+		typeOnly := col
+		typeOnly.IsIdentity = false
+		typ, err := r.ColumnType(typeOnly)
+		if err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s", r.qualify(r.normalize(tableName)), r.quote(r.normalize(col.Name)), typ), nil
 	case "mssql":
+		typ, err := r.ColumnType(col)
+		if err != nil {
+			return "", err
+		}
 		nullability := "NULL"
 		if !col.IsNullable {
 			nullability = "NOT NULL"
@@ -574,6 +660,7 @@ func (r Renderer) SetColumnDefaultDDL(tableName string, col driver.Column) (stri
 	case "postgres":
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s", r.qualify(r.normalize(tableName)), r.quote(r.normalize(col.Name)), def), nil
 	case "mysql":
+		def = mysqlSetDefaultForm(def)
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s", r.qualify(r.normalize(tableName)), r.quote(r.normalize(col.Name)), def), nil
 	case "mssql":
 		name := r.quote(r.normalize("df_" + tableName + "_" + col.Name))
@@ -624,6 +711,14 @@ func logMappingWarning(column, source, target, rendered string, w canonical.Mapp
 }
 
 func (r Renderer) Expression(expr string, tableColumns []driver.Column) (string, error) {
+	return r.expression(expr, tableColumns, false)
+}
+
+func (r Renderer) computedExpression(expr string, col driver.Column, colType string, tableColumns []driver.Column) (string, error) {
+	return r.expression(expr, tableColumns, r.mysqlComputedConcatUsesStrings(expr, col, colType, tableColumns))
+}
+
+func (r Renderer) expression(expr string, tableColumns []driver.Column, forceMySQLStringConcat bool) (string, error) {
 	out := strings.TrimSpace(expr)
 	out = unwrapDefaultParens(out)
 	out = strings.TrimPrefix(strings.TrimSpace(out), "CHECK ")
@@ -635,7 +730,7 @@ func (r Renderer) Expression(expr string, tableColumns []driver.Column) (string,
 	out = rewritePostgresAnyArray(out)
 	out = rewriteFunctionNames(out, r.target)
 	out = rewritePostgresStringConcat(out, r.target)
-	out = rewriteBooleanLiterals(out, r.target, tableColumns, r.quote)
+	out = r.rewriteBooleanLiterals(out, tableColumns)
 	var err error
 	out, err = rewriteMySQLRegexpLike(out, r.target)
 	if err != nil {
@@ -646,25 +741,60 @@ func (r Renderer) Expression(expr string, tableColumns []driver.Column) (string,
 		return "", err
 	}
 	if r.target == "mysql" {
-		out = rewriteSQLServerStringConcatToConcat(out)
+		out = rewriteSQLServerStringConcatToConcat(out, forceMySQLStringConcat)
 	}
 	out = trimExtraTrailingCloseParens(out)
 	return out, nil
 }
 
+func (r Renderer) mysqlComputedConcatUsesStrings(expr string, col driver.Column, colType string, tableColumns []driver.Column) bool {
+	if r.target != "mysql" || !strings.Contains(expr, "+") {
+		return false
+	}
+	if isTextualSourceType(col.DataType) || isTextualSourceType(colType) {
+		return true
+	}
+	for _, tableCol := range tableColumns {
+		if !isTextualSourceType(tableCol.DataType) {
+			continue
+		}
+		if expressionReferencesColumn(expr, tableCol.Name) || expressionReferencesColumn(expr, r.normalize(tableCol.Name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func expressionReferencesColumn(expr, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	pattern := `(?i)(^|[^A-Za-z0-9_])` + regexp.QuoteMeta(name) + `([^A-Za-z0-9_]|$)`
+	return regexp.MustCompile(pattern).MatchString(expr)
+}
+
 func (r Renderer) unknownType(dt string) (string, error) {
 	switch r.unknownTypePolicy {
-	case "warn", "text_fallback":
-		switch r.target {
-		case "mssql":
-			return "NVARCHAR(MAX)", nil
-		case "mysql":
-			return "TEXT", nil
-		default:
-			return "text", nil
-		}
+	case "warn":
+		fallback := r.unknownTypeFallback()
+		logging.Warn("deterministic type mapper: unsupported source type %q for %s target; using %s because unknown_type_policy=warn", dt, r.target, fallback)
+		return fallback, nil
+	case "text_fallback":
+		return r.unknownTypeFallback(), nil
 	default:
 		return "", fmt.Errorf("unsupported source type %q", dt)
+	}
+}
+
+func (r Renderer) unknownTypeFallback() string {
+	switch r.target {
+	case "mssql":
+		return "NVARCHAR(MAX)"
+	case "mysql":
+		return "TEXT"
+	default:
+		return "text"
 	}
 }
 
@@ -722,13 +852,14 @@ func normalizeTypeName(dt string) string {
 	return dt
 }
 
-func isBooleanColumn(col driver.Column) bool {
-	switch normalizeTypeName(col.DataType) {
-	case "bit", "bool", "boolean", "tinyint(1)":
-		return true
-	default:
-		return false
+func (r Renderer) isBooleanColumn(col driver.Column) bool {
+	dt := normalizeTypeName(col.DataType)
+	if strings.EqualFold(strings.TrimSpace(col.DataType), "tinyint(1)") {
+		col.DataType = "tinyint"
+		col.DisplayWidth = 1
+		dt = "tinyint"
 	}
+	return canonical.ToCanonical(dt, driver.MetaOf(col), r.source).Kind == canonical.Boolean
 }
 
 func boolLiteral(target string, value bool) string {
@@ -759,6 +890,10 @@ func referentialAction(rule string) string {
 
 func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+func sqlStringLiteral(s string) string {
+	return "'" + escapeSQLString(s) + "'"
 }
 
 func isTextualSourceType(dt string) bool {
@@ -1049,13 +1184,13 @@ func replaceCaseInsensitive(s, old, new string) string {
 	return cachedRegexp(`(?i)\b`+regexp.QuoteMeta(old)).ReplaceAllString(s, new)
 }
 
-func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote func(string) string) string {
+func (r Renderer) rewriteBooleanLiterals(expr string, columns []driver.Column) string {
 	out := expr
 	for _, col := range columns {
-		if !isBooleanColumn(col) {
+		if !r.isBooleanColumn(col) {
 			continue
 		}
-		normalized := driver.NormalizeIdentifier(canonicalTarget(target), col.Name)
+		normalized := driver.NormalizeIdentifier(r.target, col.Name)
 		// Cheap pre-check: the patterns below can only match if the column
 		// name appears in the expression at all.
 		lowerOut := strings.ToLower(out)
@@ -1068,15 +1203,15 @@ func rewriteBooleanLiterals(expr, target string, columns []driver.Column, quote 
 		}{
 			{`\b` + regexp.QuoteMeta(col.Name) + `\b`, col.Name},
 			{`\b` + regexp.QuoteMeta(normalized) + `\b`, normalized},
-			{regexp.QuoteMeta(quote(normalized)), quote(normalized)},
+			{regexp.QuoteMeta(r.quote(normalized)), r.quote(normalized)},
 		}
 		// Compiled per use, not cached: these patterns derive from schema
 		// column names, so caching them would grow without bound across
 		// schemas in long-lived processes. The pre-check above keeps this
 		// path rare.
 		for _, ident := range identifiers {
-			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, true))
-			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(target, false))
+			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?1\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(r.target, true))
+			out = regexp.MustCompile(`(?i)`+ident.pattern+`\s*=\s*\(?0\)?`).ReplaceAllString(out, ident.replacement+"="+boolLiteral(r.target, false))
 		}
 	}
 	return out
@@ -1342,11 +1477,11 @@ func unquoteSQLString(quoted string) (string, bool) {
 	return b.String(), true
 }
 
-func rewriteSQLServerStringConcatToConcat(expr string) string {
+func rewriteSQLServerStringConcatToConcat(expr string, forceStringConcat bool) string {
 	// Handles the CRM-style "a + ' ' + b" computed expression without trying
-	// to become a SQL parser. Only fires when a top-level operand is a string
-	// literal — numeric/date arithmetic ("subtotal + tax",
-	// "CURRENT_TIMESTAMP + INTERVAL '1' DAY") must stay arithmetic.
+	// to become a SQL parser. Generic expression rendering only fires when a
+	// top-level operand is a string literal; computed-column rendering can
+	// force it when the result or referenced operands are textual.
 	if !strings.Contains(expr, "+") || strings.ContainsAny(expr, "*/") {
 		return expr
 	}
@@ -1354,15 +1489,17 @@ func rewriteSQLServerStringConcatToConcat(expr string) string {
 	if len(parts) < 2 {
 		return expr
 	}
-	hasStringOperand := false
-	for _, p := range parts {
-		if strings.HasPrefix(strings.TrimSpace(p), "'") {
-			hasStringOperand = true
-			break
+	if !forceStringConcat {
+		hasStringOperand := false
+		for _, p := range parts {
+			if strings.HasPrefix(strings.TrimSpace(p), "'") {
+				hasStringOperand = true
+				break
+			}
 		}
-	}
-	if !hasStringOperand {
-		return expr
+		if !hasStringOperand {
+			return expr
+		}
 	}
 	return "CONCAT(" + strings.Join(parts, ", ") + ")"
 }

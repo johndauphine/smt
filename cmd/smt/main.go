@@ -49,8 +49,8 @@ func main() {
 
 func exitCodeForError(err error) int {
 	// A command that returns a cli.ExitCoder (e.g. `smt drift` signaling
-	// "drift detected" with cli.Exit("", 3)) owns its exit code and is not
-	// classified through the generic error mapper.
+	// "drift detected" with cli.Exit("", exitcodes.DriftDetected)) owns its
+	// exit code and is not classified through the generic error mapper.
 	var coder cli.ExitCoder
 	if errors.As(err, &coder) {
 		return coder.ExitCode()

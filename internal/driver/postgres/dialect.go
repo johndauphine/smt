@@ -22,12 +22,8 @@ func (d *Dialect) QualifyTable(schema, table string) string {
 }
 
 func (d *Dialect) BuildDSN(host string, port int, database, user, password string, opts map[string]any) string {
-	encodedUser := url.QueryEscape(user)
-	encodedPassword := url.QueryEscape(password)
-	encodedDatabase := url.QueryEscape(database)
-
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
-		encodedUser, encodedPassword, host, port, encodedDatabase)
+	dsn := fmt.Sprintf("postgres://%s@%s:%d/%s",
+		url.UserPassword(user, password).String(), host, port, url.PathEscape(database))
 
 	params := url.Values{}
 	if sslMode, ok := opts["sslmode"].(string); ok && sslMode != "" {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFileState_CreateCompleteAndRead(t *testing.T) {
@@ -20,6 +21,11 @@ func TestFileState_CreateCompleteAndRead(t *testing.T) {
 	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
 		t.Fatal("state file not created")
 	}
+	if info, err := os.Stat(stateFile); err != nil {
+		t.Fatalf("stat state file: %v", err)
+	} else if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("state file mode = %o, want 0600", got)
+	}
 
 	r, err := fs.GetRunByID("test123")
 	if err != nil || r == nil {
@@ -27,6 +33,9 @@ func TestFileState_CreateCompleteAndRead(t *testing.T) {
 	}
 	if r.Status != "running" || r.ProfileName != "myprofile" {
 		t.Errorf("unexpected run: status=%q profile=%q", r.Status, r.ProfileName)
+	}
+	if r.StartedAt.Location() != time.UTC {
+		t.Fatalf("StartedAt location = %v, want UTC", r.StartedAt.Location())
 	}
 
 	if err := fs.UpdatePhase("test123", "finalizing"); err != nil {
@@ -65,6 +74,9 @@ tables:
 	if err := os.WriteFile(stateFile, []byte(existing), 0600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
+	if err := os.Chmod(stateFile, 0644); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
 
 	fs, err := NewFileState(stateFile)
 	if err != nil {
@@ -75,7 +87,15 @@ tables:
 	if err != nil || r == nil {
 		t.Fatalf("GetRunByID: %v %v", r, err)
 	}
-	if r.Status != "running" || r.Phase != "finalizing" || r.ProfileName != "p" {
+	if r.Status != "failed" || r.Phase != "finalizing" || r.ProfileName != "p" {
 		t.Errorf("unexpected run: %+v", r)
+	}
+	if r.CompletedAt == nil {
+		t.Fatal("CompletedAt = nil, want interrupted timestamp")
+	}
+	if info, err := os.Stat(stateFile); err != nil {
+		t.Fatalf("stat state file: %v", err)
+	} else if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("state file mode = %o, want 0600", got)
 	}
 }

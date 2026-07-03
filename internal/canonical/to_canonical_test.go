@@ -20,6 +20,13 @@ func TestToCanonical_Core(t *testing.T) {
 		{"int unsigned carries flag", "int", TypeMeta{IsUnsigned: true}, "mysql", CanonicalType{Kind: Integer, Unsigned: true}},
 		{"mediumint is its own kind", "mediumint", TypeMeta{}, "mysql", CanonicalType{Kind: MediumInt}},
 		{"varchar carries length", "varchar", TypeMeta{MaxLength: 20}, "mssql", CanonicalType{Kind: Varchar, Length: 20}},
+		// pg/mysql varchar/char do NOT carry National: mapping them to MSSQL
+		// NVARCHAR/NCHAR halves the inline capacity (4000 vs 8000) and forces
+		// length 4001-8000 to (MAX), violating exact-length fidelity. They map
+		// to MSSQL VARCHAR/CHAR (codepage) so the length round-trips.
+		{"postgres varchar not national", "varchar", TypeMeta{MaxLength: 20}, "postgres", CanonicalType{Kind: Varchar, Length: 20}},
+		{"mysql char not national", "char", TypeMeta{MaxLength: 10}, "mysql", CanonicalType{Kind: Char, Length: 10}},
+		{"mssql nvarchar is national", "nvarchar", TypeMeta{MaxLength: 20}, "mssql", CanonicalType{Kind: Varchar, Length: 20, National: true}},
 		{"decimal carries p/s", "decimal", TypeMeta{Precision: 18, Scale: 4}, "postgres", CanonicalType{Kind: Decimal, Precision: 18, Scale: 4}},
 		{"money is decimal(19,4)", "money", TypeMeta{}, "mssql", CanonicalType{Kind: Decimal, Precision: 19, Scale: 4}},
 		{"mysql text is base tier", "text", TypeMeta{}, "mysql", CanonicalType{Kind: Text, Length: baseCap}},
@@ -43,11 +50,181 @@ func TestToCanonical_Core(t *testing.T) {
 			if got.Kind != tc.want.Kind || got.Length != tc.want.Length ||
 				got.Precision != tc.want.Precision || got.Scale != tc.want.Scale ||
 				got.WithTZ != tc.want.WithTZ || got.Unsigned != tc.want.Unsigned ||
-				got.UTCNormalized != tc.want.UTCNormalized || got.Raw != tc.want.Raw ||
+				got.UTCNormalized != tc.want.UTCNormalized || got.National != tc.want.National || got.Raw != tc.want.Raw ||
 				got.SpatialType != tc.want.SpatialType || got.SpatialSubType != tc.want.SpatialSubType ||
 				got.SRID != tc.want.SRID ||
 				!eqFsp(got.Fsp, tc.want.Fsp) || !eqStrs(got.EnumValues, tc.want.EnumValues) {
 				t.Errorf("ToCanonical(%q,%s) = %+v, want %+v", tc.typ, tc.dialect, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMinorFidelityMappings(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		typ    string
+		meta   TypeMeta
+		target string
+		want   string
+	}{
+		{"mssql binary stays fixed", "mssql", "binary", TypeMeta{MaxLength: 16}, "mssql", "BINARY(16)"},
+		{"mysql binary stays fixed", "mysql", "binary", TypeMeta{MaxLength: 16}, "mysql", "BINARY(16)"},
+		{"mssql varbinary stays variable", "mssql", "varbinary", TypeMeta{MaxLength: 16}, "mssql", "VARBINARY(16)"},
+		{"mysql varbinary stays variable", "mysql", "varbinary", TypeMeta{MaxLength: 16}, "mysql", "VARBINARY(16)"},
+		{"postgres varchar to mssql is codepage", "postgres", "varchar", TypeMeta{MaxLength: 50}, "mssql", "VARCHAR(50)"},
+		{"mysql varchar to mssql is codepage", "mysql", "varchar", TypeMeta{MaxLength: 50}, "mssql", "VARCHAR(50)"},
+		{"mssql varchar stays codepage", "mssql", "varchar", TypeMeta{MaxLength: 50}, "mssql", "VARCHAR(50)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FromCanonical(ToCanonical(tc.typ, tc.meta, tc.source), tc.target, RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonical: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("rendered type = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPostgresArrayRoundTripPreservesElementType(t *testing.T) {
+	cases := []struct {
+		name     string
+		typ      string
+		meta     TypeMeta
+		wantElem CanonicalType
+		wantPG   string
+	}{
+		{"bigint udt", "_int8", TypeMeta{}, CanonicalType{Kind: BigInt}, "bigint[]"},
+		{"smallint udt", "_int2", TypeMeta{}, CanonicalType{Kind: SmallInt}, "smallint[]"},
+		{"varchar udt length", "_varchar", TypeMeta{MaxLength: 20}, CanonicalType{Kind: Varchar, Length: 20}, "character varying(20)[]"},
+		{"varchar spelled length", "varchar[]", TypeMeta{MaxLength: 20}, CanonicalType{Kind: Varchar, Length: 20}, "character varying(20)[]"},
+		{"uuid udt", "_uuid", TypeMeta{}, CanonicalType{Kind: Uuid}, "uuid[]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ToCanonical(tc.typ, tc.meta, "postgres")
+			if got.Kind != Array {
+				t.Fatalf("ToCanonical(%q).Kind = %v, want Array", tc.typ, got.Kind)
+			}
+			if got.Element == nil {
+				t.Fatalf("ToCanonical(%q).Element = nil", tc.typ)
+			}
+			if got.Element.Kind != tc.wantElem.Kind || got.Element.Length != tc.wantElem.Length {
+				t.Fatalf("array element = %+v, want %+v", *got.Element, tc.wantElem)
+			}
+			rendered, err := FromCanonical(got, "postgres", RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonical: %v", err)
+			}
+			if rendered != tc.wantPG {
+				t.Fatalf("rendered array = %q, want %q", rendered, tc.wantPG)
+			}
+		})
+	}
+}
+
+func TestBitStringRoundTripPreservesWidth(t *testing.T) {
+	cases := []struct {
+		name       string
+		typ        string
+		meta       TypeMeta
+		source     string
+		wantKind   Kind
+		wantLength int
+		target     string
+		wantType   string
+	}{
+		{"mssql bit is boolean", "bit", TypeMeta{}, "mssql", Boolean, 0, "postgres", "boolean"},
+		{"mysql bit one is boolean", "bit", TypeMeta{Precision: 1}, "mysql", Boolean, 0, "mysql", "TINYINT(1)"},
+		{"mysql bit eight stays bit string", "bit", TypeMeta{Precision: 8}, "mysql", BitString, 8, "mysql", "BIT(8)"},
+		{"mysql bit width in type name", "bit(8)", TypeMeta{}, "mysql", BitString, 8, "mysql", "BIT(8)"},
+		{"postgres bit three stays bit string", "bit", TypeMeta{MaxLength: 3}, "postgres", BitString, 3, "postgres", "bit(3)"},
+		{"postgres varbit keeps bound", "varbit", TypeMeta{MaxLength: 12}, "postgres", VarBitString, 12, "postgres", "bit varying(12)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct := ToCanonical(tc.typ, tc.meta, tc.source)
+			if ct.Kind != tc.wantKind {
+				t.Fatalf("kind = %v, want %v", ct.Kind, tc.wantKind)
+			}
+			if ct.Length != tc.wantLength {
+				t.Fatalf("length = %d, want %d", ct.Length, tc.wantLength)
+			}
+			rendered, err := FromCanonical(ct, tc.target, RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonical: %v", err)
+			}
+			if rendered != tc.wantType {
+				t.Fatalf("rendered type = %q, want %q", rendered, tc.wantType)
+			}
+		})
+	}
+}
+
+func TestNumericFidelity(t *testing.T) {
+	unsignedDecimal := ToCanonical("decimal", TypeMeta{Precision: 10, Scale: 2, IsUnsigned: true}, "mysql")
+	if unsignedDecimal.Kind != Decimal || !unsignedDecimal.Unsigned {
+		t.Fatalf("unsigned decimal canonical = %+v, want unsigned decimal", unsignedDecimal)
+	}
+	got, err := FromCanonical(unsignedDecimal, "mysql", RenderOpts{})
+	if err != nil {
+		t.Fatalf("FromCanonical unsigned decimal: %v", err)
+	}
+	if got != "DECIMAL(10,2) UNSIGNED" {
+		t.Fatalf("unsigned decimal rendered as %q", got)
+	}
+
+	for _, tc := range []struct {
+		name string
+		ct   CanonicalType
+		want string
+	}{
+		{"unsigned float", ToCanonical("float", TypeMeta{IsUnsigned: true}, "mysql"), "FLOAT UNSIGNED"},
+		{"unsigned double", ToCanonical("double", TypeMeta{IsUnsigned: true}, "mysql"), "DOUBLE UNSIGNED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FromCanonical(tc.ct, "mysql", RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonical: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("rendered type = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNumericTargetLimitsWarnAndClamp(t *testing.T) {
+	cases := []struct {
+		name       string
+		ct         CanonicalType
+		target     string
+		wantType   string
+		wantReason string
+	}{
+		{"bare numeric to mysql", CanonicalType{Kind: Decimal}, "mysql", "DECIMAL(65,30)", "unconstrained"},
+		{"bare numeric to mssql", CanonicalType{Kind: Decimal}, "mssql", "DECIMAL(38,18)", "unconstrained"},
+		{"over precision to mssql", CanonicalType{Kind: Decimal, Precision: 50, Scale: 10}, "mssql", "DECIMAL(38,10)", "precision 50"},
+		{"over precision scale to mysql", CanonicalType{Kind: Decimal, Precision: 70, Scale: 40}, "mysql", "DECIMAL(65,30)", "precision 70"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, warnings, err := FromCanonicalWithWarnings(tc.ct, tc.target, RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonicalWithWarnings: %v", err)
+			}
+			if got != tc.wantType {
+				t.Fatalf("rendered type = %q, want %q", got, tc.wantType)
+			}
+			if len(warnings) == 0 {
+				t.Fatalf("expected warning, got none")
+			}
+			if !strings.Contains(warnings[0].Reason, tc.wantReason) {
+				t.Fatalf("warning reason = %q, want substring %q", warnings[0].Reason, tc.wantReason)
 			}
 		})
 	}
@@ -90,9 +267,12 @@ func TestFromCanonicalWithWarnings_Lossy(t *testing.T) {
 		{"mediumint widening", CanonicalType{Kind: MediumInt}, "mssql", "INT", "24-bit"},
 		{"tinyint widening", CanonicalType{Kind: TinyInt}, "postgres", "smallint", "8-bit"},
 		{"tz-aware timestamp to mysql", CanonicalType{Kind: Timestamp, WithTZ: true}, "mysql", "TIMESTAMP(6)", "1970-2038"},
+		{"tz-aware time to mssql", CanonicalType{Kind: Time, WithTZ: true}, "mssql", "TIME", "time-zone-aware"},
 		{"mysql timestamp to pg", CanonicalType{Kind: Timestamp, UTCNormalized: true}, "postgres", "timestamp without time zone", "UTC-normalization"},
 		{"fsp clamp", CanonicalType{Kind: Timestamp, Fsp: &fsp7}, "postgres", "timestamp(6) without time zone", "clamped"},
 		{"mysql text tier to pg", CanonicalType{Kind: Text, Length: baseCap}, "postgres", "text", "LOB capacity tier"},
+		{"array to mysql", CanonicalType{Kind: Array, Element: &CanonicalType{Kind: BigInt}}, "mysql", "JSON", "no native array"},
+		{"array element warning", CanonicalType{Kind: Array, Element: &CanonicalType{Kind: TinyInt}}, "postgres", "smallint[]", "array element"},
 		{"postgis dependency", CanonicalType{Kind: Spatial, SpatialType: "geometry"}, "postgres", "geometry", "PostGIS"},
 	}
 	for _, tc := range cases {

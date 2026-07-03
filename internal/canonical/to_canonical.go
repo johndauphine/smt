@@ -20,7 +20,16 @@ const (
 // original name, so the caller's unknown-type policy decides what to do.
 func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	dt := strings.ToLower(strings.TrimSpace(typeName))
-	mysql := isMySQL(dialect)
+	source := canonDialect(dialect)
+	mysql := source == "mysql"
+
+	if ct, ok := toArray(dt, m, dialect); ok {
+		return ct
+	}
+
+	if ct, ok := toBit(dt, m, dialect); ok {
+		return ct
+	}
 
 	if ct, ok := toSpatial(dt, m, dialect); ok {
 		return ct
@@ -46,12 +55,12 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 		return CanonicalType{Kind: Integer, Unsigned: m.IsUnsigned}
 	case "bigint", "int8", "bigserial":
 		return CanonicalType{Kind: BigInt, Unsigned: m.IsUnsigned}
-	case "bit", "bool", "boolean":
+	case "bool", "boolean":
 		return CanonicalType{Kind: Boolean}
 
 	// ---- exact / approximate numeric -----------------------------------
 	case "decimal", "numeric", "number":
-		return CanonicalType{Kind: Decimal, Precision: m.Precision, Scale: m.Scale}
+		return CanonicalType{Kind: Decimal, Precision: m.Precision, Scale: m.Scale, Unsigned: m.IsUnsigned}
 	case "money":
 		return CanonicalType{Kind: Decimal, Precision: 19, Scale: 4}
 	case "smallmoney":
@@ -61,20 +70,20 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 		// FLOAT (no precision) is 64-bit double. (PostgreSQL never reports a
 		// bare "float" — it uses real / double precision / float4 / float8.)
 		if mysql {
-			return CanonicalType{Kind: Real}
+			return CanonicalType{Kind: Real, Unsigned: m.IsUnsigned}
 		}
-		return CanonicalType{Kind: Double}
+		return CanonicalType{Kind: Double, Unsigned: m.IsUnsigned}
 	case "double", "double precision", "float8":
-		return CanonicalType{Kind: Double}
+		return CanonicalType{Kind: Double, Unsigned: m.IsUnsigned}
 	case "real":
 		// MySQL REAL is a synonym for DOUBLE (8-byte); MSSQL/PG REAL is 4-byte
 		// single. (MySQL's REAL_AS_FLOAT sql_mode is non-default and ignored.)
 		if mysql {
-			return CanonicalType{Kind: Double}
+			return CanonicalType{Kind: Double, Unsigned: m.IsUnsigned}
 		}
-		return CanonicalType{Kind: Real}
+		return CanonicalType{Kind: Real, Unsigned: m.IsUnsigned}
 	case "float4":
-		return CanonicalType{Kind: Real}
+		return CanonicalType{Kind: Real, Unsigned: m.IsUnsigned}
 
 	// ---- character ------------------------------------------------------
 	case "varchar", "character varying":
@@ -152,19 +161,82 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	case "set":
 		return CanonicalType{Kind: Set, Length: m.MaxLength, EnumValues: m.EnumValues}
 
-	// ---- pg arrays ------------------------------------------------------
-	case "_text", "text[]", "_varchar", "varchar[]", "_bpchar", "bpchar[]":
-		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Text}}
-	case "_int2", "int2[]", "_int4", "int4[]", "_int8", "int8[]":
-		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Integer}}
-	case "_uuid", "uuid[]":
-		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Uuid}}
-	case "array":
-		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Text}}
-
 	default:
 		return CanonicalType{Kind: Raw, Raw: dt}
 	}
+}
+
+func toArray(dt string, m TypeMeta, dialect string) (CanonicalType, bool) {
+	switch {
+	case dt == "array":
+		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Text}}, true
+	case strings.HasSuffix(dt, "[]"):
+		base := strings.TrimSpace(strings.TrimSuffix(dt, "[]"))
+		elem := ToCanonical(base, m, dialect)
+		return CanonicalType{Kind: Array, Element: &elem}, true
+	case strings.HasPrefix(dt, "_") && len(dt) > 1:
+		elem := ToCanonical(strings.TrimPrefix(dt, "_"), m, dialect)
+		return CanonicalType{Kind: Array, Element: &elem}, true
+	default:
+		return CanonicalType{}, false
+	}
+}
+
+func toBit(dt string, m TypeMeta, dialect string) (CanonicalType, bool) {
+	switch dt {
+	case "bool", "boolean":
+		return CanonicalType{Kind: Boolean}, true
+	case "bit":
+		return fixedBitType(bitWidth(m), dialect), true
+	case "varbit", "bit varying":
+		return CanonicalType{Kind: VarBitString, Length: bitWidth(m)}, true
+	}
+	if width, ok := typeArgWidth(dt, "bit"); ok {
+		return fixedBitType(width, dialect), true
+	}
+	if width, ok := typeArgWidth(dt, "bit varying"); ok {
+		return CanonicalType{Kind: VarBitString, Length: width}, true
+	}
+	return CanonicalType{}, false
+}
+
+func fixedBitType(width int, dialect string) CanonicalType {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "mssql", "sqlserver", "sql-server", "sql_server":
+		return CanonicalType{Kind: Boolean}
+	case "mysql", "mariadb", "maria":
+		if width == 1 {
+			return CanonicalType{Kind: Boolean}
+		}
+		return CanonicalType{Kind: BitString, Length: width}
+	case "postgres", "postgresql", "pg":
+		return CanonicalType{Kind: BitString, Length: width}
+	default:
+		if width <= 1 {
+			return CanonicalType{Kind: Boolean}
+		}
+		return CanonicalType{Kind: BitString, Length: width}
+	}
+}
+
+func bitWidth(m TypeMeta) int {
+	if m.MaxLength > 0 {
+		return m.MaxLength
+	}
+	if m.Precision > 0 {
+		return m.Precision
+	}
+	if m.DisplayWidth > 0 {
+		return m.DisplayWidth
+	}
+	return 0
+}
+
+func typeArgWidth(dt, base string) (int, bool) {
+	if !strings.HasPrefix(dt, base+"(") || !strings.HasSuffix(dt, ")") {
+		return 0, false
+	}
+	return atoiPositive(strings.TrimSpace(dt[len(base)+1 : len(dt)-1]))
 }
 
 func toSpatial(dt string, m TypeMeta, dialect string) (CanonicalType, bool) {

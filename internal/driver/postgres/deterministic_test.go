@@ -112,6 +112,20 @@ func TestDeterministicFilteredIndexBitComparison(t *testing.T) {
 	}
 }
 
+func TestDeterministicExpressionIndex(t *testing.T) {
+	renderer := newDeterministicDDL()
+	table := &driver.Table{Name: "Users"}
+	idxDDL, err := renderer.createIndex(table, &driver.Index{
+		Name:              "IX_Users_Email_Lower",
+		Columns:           []string{"lower(email)"},
+		ColumnExpressions: []bool{true},
+	}, "public")
+	if err != nil {
+		t.Fatalf("createIndex: %v", err)
+	}
+	assertContains(t, idxDDL, `CREATE INDEX "ix_users_email_lower" ON "public"."users" (lower(email))`)
+}
+
 func TestDeterministicUnsupportedTypeFails(t *testing.T) {
 	renderer := newDeterministicDDL()
 	_, err := renderer.columnType(driver.Column{Name: "Mystery", DataType: "sql_variant"})

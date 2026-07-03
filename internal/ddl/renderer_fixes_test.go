@@ -1,10 +1,12 @@
 package ddl
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"smt/internal/driver"
+	"smt/internal/logging"
 )
 
 // #86 — the CHECK keyword must only be stripped at a word boundary, not off
@@ -139,6 +141,102 @@ func TestColumnDefault_MySQLExpressionForm(t *testing.T) {
 	}
 }
 
+func TestSetColumnDefaultDDL_MySQLFunctionDefaultUsesExpressionForm(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	r = r.WithSource("postgres")
+
+	got, err := r.SetColumnDefaultDDL("events", driver.Column{Name: "created_at", DataType: "datetime", DefaultExpression: "now()"})
+	if err != nil {
+		t.Fatalf("SetColumnDefaultDDL function: %v", err)
+	}
+	want := "ALTER TABLE `crm`.`events` ALTER COLUMN `created_at` SET DEFAULT (CURRENT_TIMESTAMP(6))"
+	if got != want {
+		t.Fatalf("SetColumnDefaultDDL function = %q, want %q", got, want)
+	}
+
+	got, err = r.SetColumnDefaultDDL("events", driver.Column{Name: "quantity", DataType: "int", DefaultExpression: "1"})
+	if err != nil {
+		t.Fatalf("SetColumnDefaultDDL literal: %v", err)
+	}
+	want = "ALTER TABLE `crm`.`events` ALTER COLUMN `quantity` SET DEFAULT 1"
+	if got != want {
+		t.Fatalf("SetColumnDefaultDDL literal = %q, want %q", got, want)
+	}
+
+	def, _, err := r.ColumnDefinition(driver.Column{Name: "created_at", DataType: "datetime", IsNullable: false, DefaultExpression: "now()"})
+	if err != nil {
+		t.Fatalf("ColumnDefinition: %v", err)
+	}
+	if !strings.Contains(def, "DEFAULT CURRENT_TIMESTAMP(6)") || strings.Contains(def, "DEFAULT (CURRENT_TIMESTAMP(6))") {
+		t.Fatalf("column definition default form changed unexpectedly: %q", def)
+	}
+}
+
+func TestColumnDefault_EmptyStringDefaultPresence(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	cases := []struct {
+		col  driver.Column
+		want string
+	}{
+		{driver.Column{Name: "status", DataType: "varchar", MaxLength: 10, HasDefault: true}, "''"},
+		{driver.Column{Name: "status", DataType: "varchar", MaxLength: 10, DefaultExpression: " ", HasDefault: true}, "' '"},
+		{driver.Column{Name: "note", DataType: "text", HasDefault: true}, "('')"},
+	}
+	for _, tc := range cases {
+		got, err := r.ColumnDefault(tc.col)
+		if err != nil {
+			t.Fatalf("ColumnDefault(%#v): %v", tc.col, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ColumnDefault(%#v) = %q, want %q", tc.col, got, tc.want)
+		}
+	}
+}
+
+func TestCreateIndexDDL_MySQLPrefixAndFunctionalParts(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	got, err := r.CreateIndexDDL(&driver.Table{Name: "docs"}, &driver.Index{
+		Name:                "idx_docs_body_name",
+		Columns:             []string{"body", "lower(`name`)"},
+		ColumnPrefixLengths: []int{100, 0},
+		ColumnExpressions:   []bool{false, true},
+	})
+	if err != nil {
+		t.Fatalf("CreateIndexDDL: %v", err)
+	}
+	want := "CREATE INDEX `idx_docs_body_name` ON `crm`.`docs` (`body`(100), (lower(`name`)))"
+	if got != want {
+		t.Fatalf("CreateIndexDDL = %q, want %q", got, want)
+	}
+}
+
+func TestCreateIndexDDL_MySQLRejectsFilteredIndex(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	_, err = r.CreateIndexDDL(&driver.Table{Name: "users"}, &driver.Index{
+		Name:    "idx_users_active_email",
+		Columns: []string{"email"},
+		Filter:  "deleted_at IS NULL",
+	})
+	if err == nil {
+		t.Fatal("CreateIndexDDL succeeded for filtered index on MySQL target")
+	}
+	if !strings.Contains(err.Error(), "filtered indexes are not supported on mysql target") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // #89 — lengths above the target's maximum degrade to the unbounded form
 // instead of DDL the target rejects.
 func TestColumnType_LengthClamping(t *testing.T) {
@@ -178,6 +276,53 @@ func TestColumnType_LengthClamping(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ColumnType(%s, %s(%d)) = %q, want %q", tc.r.Target(), tc.col.DataType, tc.col.MaxLength, got, tc.want)
 		}
+	}
+}
+
+func TestColumnType_UnknownWarnPolicyLogsFallback(t *testing.T) {
+	originalLevel := logging.GetLevel()
+	var buf bytes.Buffer
+	logging.SetOutput(&buf)
+	logging.SetLevel(logging.LevelWarn)
+	logging.SetFormat("text")
+	t.Cleanup(func() {
+		logging.SetLevel(originalLevel)
+		logging.SetOutput(nil)
+		logging.SetFormat("text")
+	})
+
+	r, err := NewRenderer("mssql", "dbo", "warn")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	got, err := r.ColumnType(driver.Column{Name: "Path", DataType: "hierarchyid"})
+	if err != nil {
+		t.Fatalf("ColumnType warn: %v", err)
+	}
+	if got != "NVARCHAR(MAX)" {
+		t.Fatalf("ColumnType warn = %q, want NVARCHAR(MAX)", got)
+	}
+	logged := buf.String()
+	for _, want := range []string{"unsupported source type \"hierarchyid\"", "unknown_type_policy=warn", "NVARCHAR(MAX)"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("warning log missing %q:\n%s", want, logged)
+		}
+	}
+
+	buf.Reset()
+	fallback, err := NewRenderer("mysql", "crm", "text_fallback")
+	if err != nil {
+		t.Fatalf("NewRenderer fallback: %v", err)
+	}
+	got, err = fallback.ColumnType(driver.Column{Name: "Path", DataType: "hierarchyid"})
+	if err != nil {
+		t.Fatalf("ColumnType fallback: %v", err)
+	}
+	if got != "TEXT" {
+		t.Fatalf("ColumnType text_fallback = %q, want TEXT", got)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("text_fallback should stay quiet, got log:\n%s", buf.String())
 	}
 }
 
@@ -227,6 +372,69 @@ func TestComputedColumn_MySQLStringConcatStillRewritten(t *testing.T) {
 	}
 	if !strings.Contains(got, "CONCAT(") {
 		t.Fatalf("string concat not rewritten: %q", got)
+	}
+}
+
+func TestComputedColumn_MySQLColumnOnlyStringConcatUsesConcat(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	r = r.WithSource("mssql")
+	tableColumns := []driver.Column{
+		{Name: "first_name", DataType: "nvarchar", MaxLength: 50},
+		{Name: "last_name", DataType: "nvarchar", MaxLength: 50},
+	}
+
+	def, _, err := r.ColumnDefinition(driver.Column{
+		Name:               "combo",
+		DataType:           "varchar",
+		MaxLength:          100,
+		IsNullable:         true,
+		IsComputed:         true,
+		ComputedExpression: "([first_name]+[last_name])",
+		ComputedPersisted:  true,
+	}, tableColumns)
+	if err != nil {
+		t.Fatalf("ColumnDefinition: %v", err)
+	}
+	if !strings.Contains(def, "CONCAT(`first_name`, `last_name`)") {
+		t.Fatalf("string computed column did not render CONCAT:\n%s", def)
+	}
+	if strings.Contains(def, "`first_name` + `last_name`") {
+		t.Fatalf("string computed column kept MySQL numeric addition:\n%s", def)
+	}
+}
+
+func TestComputedColumn_MySQLNumericAdditionStaysArithmetic(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	r = r.WithSource("mssql")
+	tableColumns := []driver.Column{
+		{Name: "subtotal", DataType: "decimal", Precision: 18, Scale: 2},
+		{Name: "tax", DataType: "decimal", Precision: 18, Scale: 2},
+	}
+
+	def, _, err := r.ColumnDefinition(driver.Column{
+		Name:               "total",
+		DataType:           "decimal",
+		Precision:          18,
+		Scale:              2,
+		IsNullable:         true,
+		IsComputed:         true,
+		ComputedExpression: "([subtotal]+[tax])",
+		ComputedPersisted:  true,
+	}, tableColumns)
+	if err != nil {
+		t.Fatalf("ColumnDefinition: %v", err)
+	}
+	if strings.Contains(def, "CONCAT") {
+		t.Fatalf("numeric computed column was rewritten to CONCAT:\n%s", def)
+	}
+	if !strings.Contains(def, "`subtotal`+`tax`") && !strings.Contains(def, "`subtotal` + `tax`") {
+		t.Fatalf("numeric computed column did not preserve arithmetic addition:\n%s", def)
 	}
 }
 

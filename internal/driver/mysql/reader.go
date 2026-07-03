@@ -266,6 +266,15 @@ func parseOnUpdateExpression(extra string) string {
 	return strings.TrimSpace(extra[idx+len("on update "):])
 }
 
+func applyMySQLColumnDefault(c *driver.Column, defaultValue sql.NullString) {
+	c.HasDefault = defaultValue.Valid
+	if defaultValue.Valid {
+		c.DefaultExpression = defaultValue.String
+	} else {
+		c.DefaultExpression = ""
+	}
+}
+
 func parseEnumSetValues(columnType string) ([]string, error) {
 	columnType = strings.TrimSpace(columnType)
 	open := strings.IndexByte(columnType, '(')
@@ -342,7 +351,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			CASE WHEN IS_NULLABLE = 'YES' THEN true ELSE false END,
 			CASE WHEN EXTRA LIKE '%auto_increment%' THEN true ELSE false END,
 			ORDINAL_POSITION,
-			COALESCE(COLUMN_DEFAULT, ''),
+			COLUMN_DEFAULT,
 			COALESCE(EXTRA, ''),
 			COALESCE(GENERATION_EXPRESSION, '')
 		FROM information_schema.COLUMNS
@@ -357,12 +366,14 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var c driver.Column
 		var columnType, extra, generationExpr string
+		var defaultValue sql.NullString
 		var dtPrecision int
 		if err := rows.Scan(&c.Name, &c.DataType, &columnType, &c.MaxLength, &c.Precision, &c.Scale,
 			&dtPrecision, &c.IsNullable, &c.IsIdentity, &c.OrdinalPos,
-			&c.DefaultExpression, &extra, &generationExpr); err != nil {
+			&defaultValue, &extra, &generationExpr); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
+		applyMySQLColumnDefault(&c, defaultValue)
 		if dtPrecision >= 0 {
 			p := dtPrecision
 			c.DatetimePrecision = &p
@@ -387,6 +398,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			// any value information_schema reports here so the downstream
 			// prompt doesn't double-emit.
 			c.DefaultExpression = ""
+			c.HasDefault = false
 			c.OnUpdateExpression = ""
 		}
 		t.Columns = append(t.Columns, c)
@@ -452,33 +464,113 @@ func (r *Reader) loadPrimaryKey(ctx context.Context, t *driver.Table) error {
 	return rows.Err()
 }
 
-// LoadIndexes loads index metadata for a table.
-func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
-	rows, err := r.db.QueryContext(ctx, `
+type mysqlIndexPart struct {
+	indexName  string
+	isUnique   bool
+	columnName sql.NullString
+	expression sql.NullString
+	subPart    sql.NullInt64
+}
+
+func mysqlIndexQuery(includeExpression bool) string {
+	exprSelect := "NULL AS EXPRESSION"
+	if includeExpression {
+		exprSelect = "EXPRESSION"
+	}
+	return fmt.Sprintf(`
 		SELECT
 			INDEX_NAME,
 			NOT NON_UNIQUE AS is_unique,
-			GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns
+			COLUMN_NAME,
+			%s,
+			SUB_PART
 		FROM information_schema.STATISTICS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME != 'PRIMARY'
-		GROUP BY INDEX_NAME, NON_UNIQUE
-		ORDER BY INDEX_NAME
-	`, t.Schema, t.Name)
+		ORDER BY INDEX_NAME, SEQ_IN_INDEX
+	`, exprSelect)
+}
+
+func appendMySQLIndexPart(idx *driver.Index, part mysqlIndexPart) error {
+	columnName := strings.TrimSpace(part.columnName.String)
+	expression := strings.TrimSpace(part.expression.String)
+	isExpression := !part.columnName.Valid || columnName == ""
+	keyPart := columnName
+	if isExpression {
+		keyPart = expression
+	}
+	if keyPart == "" {
+		return fmt.Errorf("index %s has an empty key part", part.indexName)
+	}
+	idx.Columns = append(idx.Columns, keyPart)
+	idx.ColumnExpressions = append(idx.ColumnExpressions, isExpression)
+	prefixLength := 0
+	if part.subPart.Valid && part.subPart.Int64 > 0 {
+		prefixLength = int(part.subPart.Int64)
+	}
+	idx.ColumnPrefixLengths = append(idx.ColumnPrefixLengths, prefixLength)
+	return nil
+}
+
+func compactIndexKeyPartMetadata(idx *driver.Index) {
+	hasExpression := false
+	for _, isExpression := range idx.ColumnExpressions {
+		if isExpression {
+			hasExpression = true
+			break
+		}
+	}
+	if !hasExpression {
+		idx.ColumnExpressions = nil
+	}
+	hasPrefix := false
+	for _, prefixLength := range idx.ColumnPrefixLengths {
+		if prefixLength > 0 {
+			hasPrefix = true
+			break
+		}
+	}
+	if !hasPrefix {
+		idx.ColumnPrefixLengths = nil
+	}
+}
+
+// LoadIndexes loads index metadata for a table.
+func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
+	includeExpression := !r.isMariaDB
+	rows, err := r.db.QueryContext(ctx, mysqlIndexQuery(includeExpression), t.Schema, t.Name)
+	if err != nil && includeExpression && isUnknownExpressionColumnError(err) {
+		rows, err = r.db.QueryContext(ctx, mysqlIndexQuery(false), t.Schema, t.Name)
+	}
 	if err != nil {
 		return fmt.Errorf("querying indexes: %w", err)
 	}
 	defer rows.Close()
 
+	indexByName := make(map[string]int)
 	for rows.Next() {
-		var idx driver.Index
-		var columns string
-		if err := rows.Scan(&idx.Name, &idx.IsUnique, &columns); err != nil {
+		var part mysqlIndexPart
+		if err := rows.Scan(&part.indexName, &part.isUnique, &part.columnName, &part.expression, &part.subPart); err != nil {
 			return err
 		}
-		idx.Columns = strings.Split(columns, ",")
-		t.Indexes = append(t.Indexes, idx)
+		idxPos, ok := indexByName[part.indexName]
+		if !ok {
+			t.Indexes = append(t.Indexes, driver.Index{Name: part.indexName, IsUnique: part.isUnique})
+			idxPos = len(t.Indexes) - 1
+			indexByName[part.indexName] = idxPos
+		}
+		if err := appendMySQLIndexPart(&t.Indexes[idxPos], part); err != nil {
+			return err
+		}
+	}
+	for i := range t.Indexes {
+		compactIndexKeyPartMetadata(&t.Indexes[i])
 	}
 	return rows.Err()
+}
+
+func isUnknownExpressionColumnError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unknown column") && strings.Contains(msg, "expression")
 }
 
 // LoadForeignKeys loads foreign key metadata for a table.
@@ -524,18 +616,7 @@ func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
 // LoadCheckConstraints loads check constraint metadata for a table.
 func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) error {
 	// MySQL 8.0.16+ and MariaDB 10.2.1+ support check constraints
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT
-			CONSTRAINT_NAME,
-			CHECK_CLAUSE
-		FROM information_schema.CHECK_CONSTRAINTS
-		WHERE CONSTRAINT_SCHEMA = ?
-		AND CONSTRAINT_NAME IN (
-			SELECT CONSTRAINT_NAME
-			FROM information_schema.TABLE_CONSTRAINTS
-			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_TYPE = 'CHECK'
-		)
-	`, t.Schema, t.Schema, t.Name)
+	rows, err := r.db.QueryContext(ctx, mysqlCheckConstraintsQuery(r.isMariaDB), t.Schema, t.Name)
 	if err != nil {
 		// Check constraints not supported in older versions
 		logging.Warn("Warning: loading check constraints for %s: %v", t.Name, err)
@@ -551,6 +632,24 @@ func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) erro
 		t.CheckConstraints = append(t.CheckConstraints, chk)
 	}
 	return rows.Err()
+}
+
+func mysqlCheckConstraintsQuery(isMariaDB bool) string {
+	tableJoin := ""
+	if isMariaDB {
+		tableJoin = "AND cc.TABLE_NAME = tc.TABLE_NAME"
+	}
+	return fmt.Sprintf(`
+		SELECT
+			cc.CONSTRAINT_NAME,
+			cc.CHECK_CLAUSE
+		FROM information_schema.TABLE_CONSTRAINTS tc
+		JOIN information_schema.CHECK_CONSTRAINTS cc
+		  ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+		 AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+		 %s
+		WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ? AND tc.CONSTRAINT_TYPE = 'CHECK'
+	`, tableJoin)
 }
 
 // ReadTable reads data from a table and returns batches via a channel.

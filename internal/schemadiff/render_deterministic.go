@@ -94,14 +94,28 @@ func (r deterministicRenderer) render(diff Diff) (Plan, error) {
 			return Plan{}, err
 		}
 	}
-	if err := r.renderAddedTableSideObjects(&plan, diff.AddedTables); err != nil {
-		return Plan{}, err
+
+	for _, td := range diff.ChangedTables {
+		r.renderRemovedForeignKeys(&plan, td)
 	}
 
 	for _, td := range diff.ChangedTables {
 		if err := r.renderTableDiff(&plan, td); err != nil {
 			return Plan{}, err
 		}
+	}
+
+	if err := r.renderAddedTableNonForeignKeySideObjects(&plan, diff.AddedTables); err != nil {
+		return Plan{}, err
+	}
+
+	for _, td := range diff.ChangedTables {
+		if err := r.renderAddedForeignKeys(&plan, td); err != nil {
+			return Plan{}, err
+		}
+	}
+	if err := r.renderAddedTableForeignKeys(&plan, diff.AddedTables); err != nil {
+		return Plan{}, err
 	}
 
 	for _, action := range orderTablesForDrop(diff.RemovedTables) {
@@ -255,7 +269,7 @@ func (r deterministicRenderer) renderAddedTableDefinition(plan *Plan, t driver.T
 	return nil
 }
 
-func (r deterministicRenderer) renderAddedTableSideObjects(plan *Plan, tables []driver.Table) error {
+func (r deterministicRenderer) renderAddedTableNonForeignKeySideObjects(plan *Plan, tables []driver.Table) error {
 	for _, t := range tables {
 		for _, idx := range t.Indexes {
 			if err := r.renderAddedIndex(plan, t, idx); err != nil {
@@ -270,6 +284,10 @@ func (r deterministicRenderer) renderAddedTableSideObjects(plan *Plan, tables []
 			}
 		}
 	}
+	return nil
+}
+
+func (r deterministicRenderer) renderAddedTableForeignKeys(plan *Plan, tables []driver.Table) error {
 	for _, t := range tables {
 		for _, fk := range t.ForeignKeys {
 			if err := r.renderAddedForeignKey(plan, t.Name, fk); err != nil {
@@ -280,9 +298,8 @@ func (r deterministicRenderer) renderAddedTableSideObjects(plan *Plan, tables []
 	return nil
 }
 
-func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
+func (r deterministicRenderer) renderRemovedForeignKeys(plan *Plan, td TableDiff) {
 	tableName := td.Name
-
 	for _, fk := range td.RemovedForeignKeys {
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
@@ -291,6 +308,29 @@ func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 			Risk:        RiskSafe,
 		})
 	}
+}
+
+func (r deterministicRenderer) renderAddedForeignKeys(plan *Plan, td TableDiff) error {
+	tableName := td.Name
+	for _, fk := range td.AddedForeignKeys {
+		if err := r.renderAddedForeignKey(plan, tableName, fk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
+	tableName := td.Name
+
+	if td.PrimaryKeyChanged {
+		plan.Unsupported = append(plan.Unsupported, UnsupportedChange{
+			Table:       tableName,
+			Description: "change primary key",
+			Reason:      fmt.Sprintf("primary key changes are not supported by deterministic %s sync (old: %s; new: %s)", r.target, strings.Join(td.OldPrimaryKey, ","), strings.Join(td.NewPrimaryKey, ",")),
+		})
+	}
+
 	for _, chk := range td.RemovedChecks {
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
@@ -315,7 +355,7 @@ func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 		}
 		risk := RiskSafe
 		notes := ""
-		if !c.IsNullable && strings.TrimSpace(c.DefaultExpression) == "" && !c.IsIdentity {
+		if !c.IsNullable && !driver.ColumnHasDefault(c) && !c.IsIdentity {
 			risk = RiskBlocking
 			notes = "adding a NOT NULL column without a default may fail or require a table rewrite on non-empty tables"
 		}
@@ -350,11 +390,6 @@ func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 			return err
 		}
 	}
-	for _, fk := range td.AddedForeignKeys {
-		if err := r.renderAddedForeignKey(plan, tableName, fk); err != nil {
-			return err
-		}
-	}
 	for _, chk := range td.AddedChecks {
 		if err := r.renderAddedCheck(plan, td.Curr, chk); err != nil {
 			return err
@@ -368,6 +403,7 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 	if cc.Old.IsComputed || cc.New.IsComputed {
 		return fmt.Errorf("computed column %s changes are not supported by deterministic %s sync", cc.Name, r.target)
 	}
+	statementCount := len(plan.Statements)
 
 	oldType, err := r.columnTypeWithSource(cc.Old, r.existingDialect)
 	if err != nil {
@@ -378,17 +414,17 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 		return err
 	}
 
-	oldDefault := strings.TrimSpace(cc.Old.DefaultExpression)
-	newDefault := strings.TrimSpace(cc.New.DefaultExpression)
+	oldHasDefault := driver.ColumnHasDefault(cc.Old)
+	newHasDefault := driver.ColumnHasDefault(cc.New)
 	typeChanged := oldType != newType
-	defaultChanged := oldDefault != newDefault
+	defaultChanged := !driver.ColumnDefaultsEqual(cc.Old, cc.New)
 	nullabilityChanged := cc.Old.IsNullable != cc.New.IsNullable
 	if len(cc.Criteria) > 0 {
 		typeChanged = hasAnyCriterion(cc.Criteria, "type", "max_length", "precision", "scale", "tz_class")
 		defaultChanged = hasAnyCriterion(cc.Criteria, "default")
 		nullabilityChanged = hasAnyCriterion(cc.Criteria, "nullability")
 	}
-	preDropDefault := oldDefault != "" && (typeChanged || (r.target == "mssql" && defaultChanged))
+	preDropDefault := oldHasDefault && (typeChanged || (r.target == "mssql" && defaultChanged))
 
 	if preDropDefault {
 		plan.Statements = append(plan.Statements, Statement{
@@ -434,7 +470,7 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 	}
 
 	if defaultChanged || preDropDefault {
-		if newDefault == "" {
+		if !newHasDefault {
 			if !preDropDefault {
 				plan.Statements = append(plan.Statements, Statement{
 					Table:       tableName,
@@ -456,7 +492,37 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 			})
 		}
 	}
+	if len(plan.Statements) == statementCount {
+		plan.Unsupported = append(plan.Unsupported, UnsupportedChange{
+			Table:       tableName,
+			Description: fmt.Sprintf("change column %s", cc.Name),
+			Reason:      unsupportedColumnChangeReason(cc),
+		})
+	}
 	return nil
+}
+
+func unsupportedColumnChangeReason(cc ColumnChange) string {
+	var attrs []string
+	if strings.TrimSpace(cc.Old.OnUpdateExpression) != strings.TrimSpace(cc.New.OnUpdateExpression) {
+		attrs = append(attrs, "on_update")
+	}
+	if cc.Old.SRID != cc.New.SRID {
+		attrs = append(attrs, "srid")
+	}
+	if cc.Old.DisplayWidth != cc.New.DisplayWidth {
+		attrs = append(attrs, "display_width")
+	}
+	if !stringSlicesEqual(cc.Old.EnumValues, cc.New.EnumValues) {
+		attrs = append(attrs, "enum_values")
+	}
+	if len(attrs) == 0 && len(cc.Criteria) > 0 {
+		attrs = append(attrs, cc.Criteria...)
+	}
+	if len(attrs) == 0 {
+		attrs = append(attrs, "attributes")
+	}
+	return "deterministic renderer cannot alter " + strings.Join(attrs, ", ")
 }
 
 func (r deterministicRenderer) columnTypeWithSource(col driver.Column, sourceDialect string) (string, error) {

@@ -20,14 +20,16 @@ const (
 	Unknown Kind = iota // not yet classified / sentinel
 
 	Boolean
-	TinyInt   // 8-bit  (MySQL/MSSQL TINYINT; pg widens to smallint)
-	SmallInt  // 16-bit
-	MediumInt // 24-bit (MySQL only; others widen to 32-bit)
-	Integer   // 32-bit
-	BigInt    // 64-bit
-	Decimal   // exact numeric, Precision/Scale
-	Real      // 32-bit float
-	Double    // 64-bit float
+	BitString    // fixed-length bit string, Length in bits
+	VarBitString // variable-length bit string, Length in bits when bounded
+	TinyInt      // 8-bit  (MySQL/MSSQL TINYINT; pg widens to smallint)
+	SmallInt     // 16-bit
+	MediumInt    // 24-bit (MySQL only; others widen to 32-bit)
+	Integer      // 32-bit
+	BigInt       // 64-bit
+	Decimal      // exact numeric, Precision/Scale
+	Real         // 32-bit float
+	Double       // 64-bit float
 
 	Varchar // variable-length char, Length (0/-1 = unbounded)
 	Char    // fixed-length char, Length
@@ -62,8 +64,9 @@ const (
 type CanonicalType struct {
 	Kind Kind
 
-	// Length is the declared character or byte length for Varchar/Char/
-	// Binary/VarBinary. <= 0 (and the MSSQL -1 MAX sentinel) means unbounded.
+	// Length is the declared character, byte, or bit length for Varchar/Char/
+	// Binary/VarBinary/BitString. <= 0 (and the MSSQL -1 MAX sentinel) means
+	// unbounded or unspecified.
 	Length int
 
 	// Precision/Scale apply to Decimal. Precision <= 0 means unspecified
@@ -89,10 +92,10 @@ type CanonicalType struct {
 	// can't represent it (everything except MySQL) can widen deterministically.
 	Unsigned bool
 
-	// National marks a Unicode character type (MSSQL nvarchar/nchar/ntext).
-	// MSSQL's plain varchar/char are NON-Unicode, so this distinction is a
-	// real fidelity fact for a MSSQL target; pg/mysql are Unicode by default
-	// and ignore it.
+	// National marks a Unicode character type. MSSQL's plain varchar/char are
+	// NON-Unicode, so this distinction is a real fidelity fact for a MSSQL
+	// target; pg/mysql character types are Unicode by default and set this when
+	// targeting MSSQL.
 	National bool
 
 	// EnumValues holds the member list for Enum/Set.

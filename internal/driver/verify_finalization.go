@@ -148,6 +148,11 @@ func compareForeignKeyDDL(req VerifyFinalizationDDLRequest) ([]FinalizationDelta
 	if gotRefTable := finalizationNameKey(target, got.RefTable); gotRefTable != finalizationNameKey(target, req.ForeignKey.RefTable) {
 		deltas = append(deltas, finalizationDelta(obj, "ref_table", finalizationNameKey(target, req.ForeignKey.RefTable), gotRefTable))
 	}
+	if strings.TrimSpace(req.ForeignKey.RefSchema) != "" {
+		if gotRefSchema := finalizationNameKey(target, got.RefSchema); gotRefSchema != finalizationNameKey(target, req.ForeignKey.RefSchema) {
+			deltas = append(deltas, finalizationDelta(obj, "ref_schema", finalizationNameKey(target, req.ForeignKey.RefSchema), gotRefSchema))
+		}
+	}
 	if !stringSlicesEqualOrdered(finalizationNameKeys(target, req.ForeignKey.RefColumns), finalizationNameKeys(target, got.RefColumns)) {
 		deltas = append(deltas, finalizationDelta(obj, "ref_columns", strings.Join(finalizationNameKeys(target, req.ForeignKey.RefColumns), ","), strings.Join(finalizationNameKeys(target, got.RefColumns), ",")))
 	}

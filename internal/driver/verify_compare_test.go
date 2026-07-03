@@ -284,6 +284,24 @@ func TestDefaultExpressionClassForColumn(t *testing.T) {
 	}
 }
 
+func TestCompareColumns_EmptyStringDefaultPresence(t *testing.T) {
+	src := []Column{{Name: "status", DataType: "varchar", MaxLength: 10, HasDefault: true}}
+	noDefault := []Column{{Name: "status", DataType: "varchar", MaxLength: 10}}
+	if deltas := CompareColumns(src, noDefault, "mysql", "mysql"); !hasCriterion(deltas, "default") {
+		t.Fatalf("dropped DEFAULT '' should be a default delta, got %v", deltas)
+	}
+
+	renderedEmpty := []Column{{Name: "status", DataType: "varchar", MaxLength: 10, DefaultExpression: "''"}}
+	if deltas := CompareColumns(src, renderedEmpty, "mysql", "mysql"); hasCriterion(deltas, "default") {
+		t.Fatalf("DEFAULT '' should match rendered empty-string literal, got %v", deltas)
+	}
+
+	blank := []Column{{Name: "status", DataType: "varchar", MaxLength: 10, DefaultExpression: " ", HasDefault: true}}
+	if deltas := CompareColumns(blank, renderedEmpty, "mysql", "mysql"); !hasCriterion(deltas, "default") {
+		t.Fatalf("DEFAULT ' ' must not compare equal to DEFAULT '', got %v", deltas)
+	}
+}
+
 func TestCompareColumns_DefaultClassColumnAware(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -326,6 +344,42 @@ func TestCompareColumns_DefaultClassColumnAware(t *testing.T) {
 				t.Fatalf("expected zero deltas, got %v", d)
 			}
 		})
+	}
+}
+
+func TestCompareColumns_OnUpdateExpression(t *testing.T) {
+	src := []Column{{
+		Name:               "updated_at",
+		DataType:           "timestamp",
+		DefaultExpression:  "CURRENT_TIMESTAMP",
+		OnUpdateExpression: "CURRENT_TIMESTAMP",
+	}}
+	same := []Column{{
+		Name:               "updated_at",
+		DataType:           "timestamp",
+		DefaultExpression:  "CURRENT_TIMESTAMP",
+		OnUpdateExpression: "(current_timestamp)",
+	}}
+	if deltas := CompareColumns(src, same, "mysql", "mysql"); len(deltas) != 0 {
+		t.Fatalf("equivalent ON UPDATE expressions should compare cleanly, got %v", deltas)
+	}
+
+	missing := []Column{{
+		Name:              "updated_at",
+		DataType:          "timestamp",
+		DefaultExpression: "CURRENT_TIMESTAMP",
+	}}
+	if deltas := CompareColumns(src, missing, "mysql", "mysql"); !hasCriterion(deltas, "on_update") {
+		t.Fatalf("missing ON UPDATE should flag on_update, got %v", deltas)
+	}
+}
+
+func TestNormalizedDefaultLiteralIgnoresCastInsideQuotedLiteral(t *testing.T) {
+	if got := normalizedDefaultLiteral("'weird::thing'"); got != "'weird::thing'" {
+		t.Fatalf("quoted literal containing :: normalized to %q", got)
+	}
+	if got := normalizedDefaultLiteral("'weird::thing'::jsonb"); got != "'weird::thing'" {
+		t.Fatalf("postgres cast outside literal not stripped correctly: %q", got)
 	}
 }
 
@@ -402,6 +456,71 @@ func TestCompareColumns_BoundedVsUnbounded(t *testing.T) {
 	}
 	if deltas[0].Criterion != "max_length" {
 		t.Errorf("expected criterion=max_length, got %q", deltas[0].Criterion)
+	}
+}
+
+func TestCompareColumns_MySQLOversizedVarcharLOBEquivalence(t *testing.T) {
+	pass := []struct {
+		name     string
+		src, tgt Column
+	}{
+		{
+			name: "threshold stays varchar",
+			src:  Column{Name: "body", DataType: "character varying", MaxLength: 16383},
+			tgt:  Column{Name: "body", DataType: "varchar", MaxLength: 16383},
+		},
+		{
+			name: "above threshold maps to mediumtext",
+			src:  Column{Name: "body", DataType: "character varying", MaxLength: 16384},
+			tgt:  Column{Name: "body", DataType: "mediumtext", MaxLength: 0},
+		},
+		{
+			name: "mediumtext capacity report also accepted",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 20000},
+			tgt:  Column{Name: "body", DataType: "mediumtext", MaxLength: 16777215},
+		},
+		{
+			name: "very large varchar maps to longtext",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 4194304},
+			tgt:  Column{Name: "body", DataType: "longtext", MaxLength: 0},
+		},
+	}
+	for _, tc := range pass {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, "postgres", "mysql")
+			if len(deltas) != 0 {
+				t.Fatalf("expected oversized varchar mapping to compare cleanly, got %v", deltas)
+			}
+		})
+	}
+
+	flag := []struct {
+		name     string
+		src, tgt Column
+	}{
+		{
+			name: "below threshold cannot become mediumtext",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 16383},
+			tgt:  Column{Name: "body", DataType: "mediumtext", MaxLength: 0},
+		},
+		{
+			name: "wrong lob tier still flags",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 20000},
+			tgt:  Column{Name: "body", DataType: "text", MaxLength: 0},
+		},
+		{
+			name: "bounded varchar regression still flags",
+			src:  Column{Name: "body", DataType: "varchar", MaxLength: 20000},
+			tgt:  Column{Name: "body", DataType: "varchar", MaxLength: 16383},
+		},
+	}
+	for _, tc := range flag {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, "postgres", "mysql")
+			if !hasCriterion(deltas, "max_length") {
+				t.Fatalf("expected max_length delta, got %v", deltas)
+			}
+		})
 	}
 }
 
@@ -525,11 +644,20 @@ func TestCompareColumns_CanonicalTypeMismatch(t *testing.T) {
 }
 
 func TestCompareColumns_CanonicalTypeCatchesMySQLUnsigned(t *testing.T) {
-	src := []Column{{Name: "n", DataType: "int", IsUnsigned: true}}
-	tgt := []Column{{Name: "n", DataType: "int"}}
-	deltas := CompareColumns(src, tgt, "mysql", "mysql")
-	if len(deltas) != 1 || deltas[0].Criterion != "type" {
-		t.Fatalf("expected one canonical type delta for lost unsigned flag, got %v", deltas)
+	cases := []struct {
+		name     string
+		src, tgt Column
+	}{
+		{"integer", Column{Name: "n", DataType: "int", IsUnsigned: true}, Column{Name: "n", DataType: "int"}},
+		{"decimal", Column{Name: "n", DataType: "decimal", Precision: 10, Scale: 2, IsUnsigned: true}, Column{Name: "n", DataType: "decimal", Precision: 10, Scale: 2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deltas := CompareColumns([]Column{tc.src}, []Column{tc.tgt}, "mysql", "mysql")
+			if len(deltas) != 1 || deltas[0].Criterion != "type" {
+				t.Fatalf("expected one canonical type delta for lost unsigned flag, got %v", deltas)
+			}
+		})
 	}
 }
 
@@ -747,6 +875,21 @@ func TestCompareColumns_MySQLLOBTiers(t *testing.T) {
 	}
 }
 
+func TestCompareColumns_BitStringDoesNotEqualBoolean(t *testing.T) {
+	src := []Column{{Name: "flags", DataType: "bit", Precision: 64}}
+	tgt := []Column{{Name: "flags", DataType: "boolean"}}
+	deltas := CompareColumns(src, tgt, "mysql", "postgres")
+	if !hasCriterion(deltas, "type") {
+		t.Fatalf("expected bit(64) -> boolean to report a type delta, got %v", deltas)
+	}
+
+	bitOne := []Column{{Name: "ok", DataType: "bit", Precision: 1}}
+	boolTarget := []Column{{Name: "ok", DataType: "boolean"}}
+	if deltas := CompareColumns(bitOne, boolTarget, "mysql", "postgres"); len(deltas) != 0 {
+		t.Fatalf("expected mysql bit(1) boolean convention to compare cleanly, got %v", deltas)
+	}
+}
+
 // PG renders MSSQL GETUTCDATE()/SYSUTCDATETIME() as CURRENT_TIMESTAMP AT TIME
 // ZONE 'UTC'. Both are current-datetime defaults; the comparator must treat
 // them as equivalent so a freshly-created target doesn't report drift.
@@ -917,7 +1060,7 @@ func TestCompareColumns_ParserContractFields(t *testing.T) {
 // positive regardless of model.
 func TestBuildVerifyParsePrompt_ContractFields(t *testing.T) {
 	p := buildVerifyParsePrompt("CREATE TABLE t (id INT)", "mysql")
-	for _, field := range []string{"datetime_precision", "is_unsigned", "display_width", "enum_values"} {
+	for _, field := range []string{"datetime_precision", "is_unsigned", "display_width", "enum_values", "BIT(N)"} {
 		if !strings.Contains(p, field) {
 			t.Errorf("parser prompt is missing the %q field — comparator will false-positive", field)
 		}

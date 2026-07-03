@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -52,6 +53,17 @@ func NewFileState(path string) (*FileState, error) {
 		if err := yaml.Unmarshal(data, fs.state); err != nil {
 			return nil, fmt.Errorf("parsing state file: %w", err)
 		}
+		if fs.state.RunID != "" && fs.state.Status == "running" {
+			now := time.Now().UTC()
+			fs.state.Status = "failed"
+			fs.state.CompletedAt = &now
+			if fs.state.Error == "" {
+				fs.state.Error = interruptedRunError
+			}
+			if err := fs.save(); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return fs, nil
@@ -63,8 +75,30 @@ func (fs *FileState) save() error {
 	if err != nil {
 		return fmt.Errorf("marshaling state: %w", err)
 	}
-	if err := os.WriteFile(fs.path, data, 0600); err != nil {
+	dir := filepath.Dir(fs.path)
+	tmp, err := os.CreateTemp(dir, ".smt-state-*")
+	if err != nil {
+		return fmt.Errorf("creating temp state file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("setting temp state file permissions: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("writing state file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing state file: %w", err)
+	}
+	if err := os.Rename(tmpName, fs.path); err != nil {
+		return fmt.Errorf("replacing state file: %w", err)
+	}
+	if err := os.Chmod(fs.path, 0600); err != nil {
+		return fmt.Errorf("setting state file permissions: %w", err)
 	}
 	return nil
 }
@@ -82,8 +116,9 @@ func (fs *FileState) CreateRun(id, kind, sourceSchema, targetSchema string, conf
 
 	fs.state = &fileStateData{
 		RunID:        id,
-		StartedAt:    time.Now(),
+		StartedAt:    time.Now().UTC(),
 		Status:       "running",
+		Phase:        "initializing",
 		SourceSchema: sourceSchema,
 		TargetSchema: targetSchema,
 		ConfigHash:   hex.EncodeToString(hash[:8]), // First 8 bytes
@@ -103,7 +138,7 @@ func (fs *FileState) CompleteRun(id string, status string, errorMsg string) erro
 		return fmt.Errorf("run ID mismatch: expected %s, got %s", fs.state.RunID, id)
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	fs.state.Status = status
 	fs.state.CompletedAt = &now
 	fs.state.Error = errorMsg
