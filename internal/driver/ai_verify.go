@@ -2,8 +2,8 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"smt/internal/logging"
 )
@@ -53,7 +53,7 @@ func (m *AITypeMapper) VerifyTableDDL(ctx context.Context, req VerifyTableDDLReq
 
 	parsedCols, err := m.parseTargetDDLToColumns(ctx, req.ProposedDDL, req.TargetDBType)
 	if err != nil {
-		if strings.Contains(err.Error(), "AI parse call failed") {
+		if errors.Is(err, errParseCall) {
 			return nil, err
 		}
 		// Bad JSON / no columns / no JSON object — retryable signal. Surface

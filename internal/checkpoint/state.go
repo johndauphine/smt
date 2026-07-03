@@ -44,6 +44,13 @@ const (
 	sqliteLegacyTimeLayout = "2006-01-02 15:04:05"
 	sqliteUTCNow           = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
 	interruptedRunError    = "run interrupted before completion; marked failed on next SMT start"
+	// reconcileStaleModifier is the SQLite datetime modifier bounding which
+	// 'running' rows reconcileRunningRuns may fail. Schema migrations are
+	// short and synchronous, so a run still 'running' after this window is a
+	// crash orphan, not a live concurrent run. The window must exceed any
+	// plausible real run so opening the state DB (including from read-only
+	// commands or a second process) can never flip an in-progress run.
+	reconcileStaleModifier = "-24 hours"
 )
 
 // New creates a new state manager
@@ -347,6 +354,7 @@ func (s *State) reconcileRunningRuns() error {
 		    completed_at = `+sqliteUTCNow+`,
 		    error = CASE WHEN error IS NULL OR error = '' THEN ? ELSE error END
 		WHERE status = 'running'
+		  AND started_at < strftime('%Y-%m-%dT%H:%M:%SZ','now','`+reconcileStaleModifier+`')
 	`, interruptedRunError)
 	return err
 }

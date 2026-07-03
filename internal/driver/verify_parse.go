@@ -19,6 +19,13 @@ import (
 
 const verifyParseMaxAttempts = 2
 
+// errParseCall marks a failure to reach/complete the AI parser call (network,
+// provider, token limits) as opposed to a malformed-but-received response.
+// VerifyTableDDL treats the former as a hard error (fail-closed) and the
+// latter as a retryable verdict, so the distinction is made with errors.Is
+// rather than a brittle substring match on the message (#219 follow-up).
+var errParseCall = errors.New("AI parse call failed")
+
 // parsedTargetDDL is the AI-parser response shape. The JSON returned by the
 // model is decoded directly into this struct; Columns can then be fed to
 // CompareColumns without an intermediate translation.
@@ -46,10 +53,10 @@ func (m *AITypeMapper) parseTargetDDLToColumns(ctx context.Context, ddl string, 
 		raw, err := m.CallAI(ctx, prompt)
 		if err != nil {
 			if errors.Is(err, errAnthropicMaxTokens) {
-				lastErr = fmt.Errorf("AI parse call failed: %w", err)
+				lastErr = fmt.Errorf("%w: %w", errParseCall, err)
 				continue
 			}
-			return nil, fmt.Errorf("AI parse call failed: %w", err)
+			return nil, fmt.Errorf("%w: %w", errParseCall, err)
 		}
 
 		cols, err := parseTargetDDLResponse(raw)

@@ -56,7 +56,10 @@ func (s *State) ensureSnapshotsTable() error {
 		}
 	}
 	if !hasSourceIdentity {
-		if _, err := s.db.Exec(`ALTER TABLE schema_snapshots ADD COLUMN source_identity TEXT NOT NULL DEFAULT ''`); err != nil {
+		// Ignore a concurrent process winning the ALTER race (duplicate
+		// column), matching ensureRunColumns' handling of the same pattern.
+		_, err := s.db.Exec(`ALTER TABLE schema_snapshots ADD COLUMN source_identity TEXT NOT NULL DEFAULT ''`)
+		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
 	}

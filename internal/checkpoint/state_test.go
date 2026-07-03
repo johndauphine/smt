@@ -57,14 +57,25 @@ func TestRunLifecycle(t *testing.T) {
 	}
 }
 
-func TestReopenMarksRunningRunsFailed(t *testing.T) {
+func TestReopenReconcilesStaleRunningRunsOnly(t *testing.T) {
 	dir := t.TempDir()
 	state, err := New(dir)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
+	// A crash orphan: still 'running' but started well beyond the reconcile
+	// window. A live concurrent run: 'running' and started just now — it must
+	// NOT be reconciled, or a second process opening the DB would fail it.
 	if err := state.CreateRun("stale", RunKindApply, "dbo", "public", nil, "", ""); err != nil {
-		t.Fatalf("CreateRun: %v", err)
+		t.Fatalf("CreateRun(stale): %v", err)
+	}
+	if err := state.CreateRun("fresh", RunKindApply, "dbo", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun(fresh): %v", err)
+	}
+	if _, err := state.db.Exec(
+		`UPDATE runs SET started_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','-25 hours') WHERE id = 'stale'`,
+	); err != nil {
+		t.Fatalf("backdating stale run: %v", err)
 	}
 	state.Close()
 
@@ -74,18 +85,29 @@ func TestReopenMarksRunningRunsFailed(t *testing.T) {
 	}
 	defer reopened.Close()
 
-	r, err := reopened.GetRunByID("stale")
-	if err != nil || r == nil {
-		t.Fatalf("GetRunByID: %v %v", r, err)
+	stale, err := reopened.GetRunByID("stale")
+	if err != nil || stale == nil {
+		t.Fatalf("GetRunByID(stale): %v %v", stale, err)
 	}
-	if r.Status != "failed" {
-		t.Fatalf("Status = %q, want failed", r.Status)
+	if stale.Status != "failed" {
+		t.Fatalf("stale.Status = %q, want failed", stale.Status)
 	}
-	if r.CompletedAt == nil {
-		t.Fatal("CompletedAt = nil, want reconciliation timestamp")
+	if stale.CompletedAt == nil {
+		t.Fatal("stale.CompletedAt = nil, want reconciliation timestamp")
 	}
-	if !strings.Contains(r.Error, "interrupted before completion") {
-		t.Fatalf("Error = %q, want interrupted message", r.Error)
+	if !strings.Contains(stale.Error, "interrupted before completion") {
+		t.Fatalf("stale.Error = %q, want interrupted message", stale.Error)
+	}
+
+	fresh, err := reopened.GetRunByID("fresh")
+	if err != nil || fresh == nil {
+		t.Fatalf("GetRunByID(fresh): %v %v", fresh, err)
+	}
+	if fresh.Status != "running" {
+		t.Fatalf("fresh.Status = %q, want running (a live concurrent run must not be reconciled)", fresh.Status)
+	}
+	if fresh.CompletedAt != nil {
+		t.Fatal("fresh.CompletedAt != nil, want nil (not reconciled)")
 	}
 }
 
