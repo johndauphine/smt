@@ -94,14 +94,28 @@ func (r deterministicRenderer) render(diff Diff) (Plan, error) {
 			return Plan{}, err
 		}
 	}
-	if err := r.renderAddedTableSideObjects(&plan, diff.AddedTables); err != nil {
-		return Plan{}, err
+
+	for _, td := range diff.ChangedTables {
+		r.renderRemovedForeignKeys(&plan, td)
 	}
 
 	for _, td := range diff.ChangedTables {
 		if err := r.renderTableDiff(&plan, td); err != nil {
 			return Plan{}, err
 		}
+	}
+
+	if err := r.renderAddedTableNonForeignKeySideObjects(&plan, diff.AddedTables); err != nil {
+		return Plan{}, err
+	}
+
+	for _, td := range diff.ChangedTables {
+		if err := r.renderAddedForeignKeys(&plan, td); err != nil {
+			return Plan{}, err
+		}
+	}
+	if err := r.renderAddedTableForeignKeys(&plan, diff.AddedTables); err != nil {
+		return Plan{}, err
 	}
 
 	for _, action := range orderTablesForDrop(diff.RemovedTables) {
@@ -255,7 +269,7 @@ func (r deterministicRenderer) renderAddedTableDefinition(plan *Plan, t driver.T
 	return nil
 }
 
-func (r deterministicRenderer) renderAddedTableSideObjects(plan *Plan, tables []driver.Table) error {
+func (r deterministicRenderer) renderAddedTableNonForeignKeySideObjects(plan *Plan, tables []driver.Table) error {
 	for _, t := range tables {
 		for _, idx := range t.Indexes {
 			if err := r.renderAddedIndex(plan, t, idx); err != nil {
@@ -270,11 +284,37 @@ func (r deterministicRenderer) renderAddedTableSideObjects(plan *Plan, tables []
 			}
 		}
 	}
+	return nil
+}
+
+func (r deterministicRenderer) renderAddedTableForeignKeys(plan *Plan, tables []driver.Table) error {
 	for _, t := range tables {
 		for _, fk := range t.ForeignKeys {
 			if err := r.renderAddedForeignKey(plan, t.Name, fk); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func (r deterministicRenderer) renderRemovedForeignKeys(plan *Plan, td TableDiff) {
+	tableName := td.Name
+	for _, fk := range td.RemovedForeignKeys {
+		plan.Statements = append(plan.Statements, Statement{
+			Table:       tableName,
+			Description: fmt.Sprintf("drop foreign key %s", fk.Name),
+			SQL:         r.renderer.DropForeignKeyDDL(tableName, fk.Name),
+			Risk:        RiskSafe,
+		})
+	}
+}
+
+func (r deterministicRenderer) renderAddedForeignKeys(plan *Plan, td TableDiff) error {
+	tableName := td.Name
+	for _, fk := range td.AddedForeignKeys {
+		if err := r.renderAddedForeignKey(plan, tableName, fk); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -291,14 +331,6 @@ func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 		})
 	}
 
-	for _, fk := range td.RemovedForeignKeys {
-		plan.Statements = append(plan.Statements, Statement{
-			Table:       tableName,
-			Description: fmt.Sprintf("drop foreign key %s", fk.Name),
-			SQL:         r.renderer.DropForeignKeyDDL(tableName, fk.Name),
-			Risk:        RiskSafe,
-		})
-	}
 	for _, chk := range td.RemovedChecks {
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
@@ -355,11 +387,6 @@ func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 
 	for _, idx := range td.AddedIndexes {
 		if err := r.renderAddedIndex(plan, td.Curr, idx); err != nil {
-			return err
-		}
-	}
-	for _, fk := range td.AddedForeignKeys {
-		if err := r.renderAddedForeignKey(plan, tableName, fk); err != nil {
 			return err
 		}
 	}

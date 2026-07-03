@@ -16,6 +16,18 @@ func table(name string, cols ...driver.Column) driver.Table {
 	return driver.Table{Schema: "dbo", Name: name, Columns: cols}
 }
 
+func assertSQLOrder(t *testing.T, sql, before, after string) {
+	t.Helper()
+	beforePos := strings.Index(sql, before)
+	afterPos := strings.Index(sql, after)
+	if beforePos < 0 || afterPos < 0 {
+		t.Fatalf("expected SQL to contain %q before %q, got:\n%s", before, after, sql)
+	}
+	if beforePos > afterPos {
+		t.Fatalf("expected %q before %q, got:\n%s", before, after, sql)
+	}
+}
+
 func TestColumnsEqualDefaultPresenceDistinguishesEmptyDefault(t *testing.T) {
 	noDefault := driver.Column{Name: "status", DataType: "varchar", MaxLength: 10}
 	emptyDefault := noDefault
@@ -479,6 +491,93 @@ func TestRenderDeterministic_AddedTableForeignKeysAfterAllCreateTables(t *testin
 	if fkPos < commentsPos || fkPos < postsPos {
 		t.Fatalf("expected FK after both CREATE TABLE statements, got:\n%s", sql)
 	}
+}
+
+func TestRenderDeterministic_DropsForeignKeysBeforeDependentColumns(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{
+		{
+			Name:           "accounts",
+			RemovedColumns: []driver.Column{{Name: "code", DataType: "varchar"}},
+			Curr:           driver.Table{Name: "accounts"},
+		},
+		{
+			Name: "users",
+			RemovedForeignKeys: []driver.ForeignKey{{
+				Name:       "fk_users_accounts_code",
+				Columns:    []string{"account_code"},
+				RefTable:   "accounts",
+				RefColumns: []string{"code"},
+			}},
+			Curr: driver.Table{Name: "users"},
+		},
+	}}
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	assertSQLOrder(t, plan.SQL(), "drop foreign key fk_users_accounts_code", "drop column code")
+}
+
+func TestRenderDeterministic_AddsReferencedColumnsBeforeForeignKeys(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{
+		{
+			Name: "aaa",
+			Curr: driver.Table{Name: "aaa", Columns: []driver.Column{
+				{Name: "tenant_id", DataType: "int", IsNullable: false},
+			}},
+			AddedForeignKeys: []driver.ForeignKey{{
+				Name:       "fk_aaa_zzz_tenant",
+				Columns:    []string{"tenant_id"},
+				RefTable:   "zzz",
+				RefColumns: []string{"tenant_id"},
+			}},
+		},
+		{
+			Name: "zzz",
+			Curr: driver.Table{Name: "zzz", Columns: []driver.Column{
+				{Name: "tenant_id", DataType: "int", IsNullable: false},
+			}},
+			AddedColumns: []driver.Column{{Name: "tenant_id", DataType: "int", IsNullable: false}},
+		},
+	}}
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	assertSQLOrder(t, plan.SQL(), "add column tenant_id", "create foreign key fk_aaa_zzz_tenant")
+}
+
+func TestRenderDeterministic_AddedTableForeignKeyWaitsForExistingTableColumnAdd(t *testing.T) {
+	d := Diff{
+		AddedTables: []driver.Table{{
+			Name: "new_child",
+			Columns: []driver.Column{
+				{Name: "id", DataType: "int", IsNullable: false},
+				{Name: "tenant_id", DataType: "int", IsNullable: false},
+			},
+			ForeignKeys: []driver.ForeignKey{{
+				Name:       "fk_new_child_accounts_tenant",
+				Columns:    []string{"tenant_id"},
+				RefTable:   "accounts",
+				RefColumns: []string{"tenant_id"},
+			}},
+		}},
+		ChangedTables: []TableDiff{{
+			Name: "accounts",
+			Curr: driver.Table{Name: "accounts", Columns: []driver.Column{
+				{Name: "tenant_id", DataType: "int", IsNullable: false},
+			}},
+			AddedColumns: []driver.Column{{Name: "tenant_id", DataType: "int", IsNullable: false}},
+		}},
+	}
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	assertSQLOrder(t, plan.SQL(), "add column tenant_id", "create foreign key fk_new_child_accounts_tenant")
 }
 
 func TestRenderDeterministic_ColumnTypeAndDefaultChangeDropsDefaultFirst(t *testing.T) {
