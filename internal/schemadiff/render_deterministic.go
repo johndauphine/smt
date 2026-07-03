@@ -283,6 +283,14 @@ func (r deterministicRenderer) renderAddedTableSideObjects(plan *Plan, tables []
 func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 	tableName := td.Name
 
+	if td.PrimaryKeyChanged {
+		plan.Unsupported = append(plan.Unsupported, UnsupportedChange{
+			Table:       tableName,
+			Description: "change primary key",
+			Reason:      fmt.Sprintf("primary key changes are not supported by deterministic %s sync (old: %s; new: %s)", r.target, strings.Join(td.OldPrimaryKey, ","), strings.Join(td.NewPrimaryKey, ",")),
+		})
+	}
+
 	for _, fk := range td.RemovedForeignKeys {
 		plan.Statements = append(plan.Statements, Statement{
 			Table:       tableName,
@@ -368,6 +376,7 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 	if cc.Old.IsComputed || cc.New.IsComputed {
 		return fmt.Errorf("computed column %s changes are not supported by deterministic %s sync", cc.Name, r.target)
 	}
+	statementCount := len(plan.Statements)
 
 	oldType, err := r.columnTypeWithSource(cc.Old, r.existingDialect)
 	if err != nil {
@@ -456,7 +465,37 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 			})
 		}
 	}
+	if len(plan.Statements) == statementCount {
+		plan.Unsupported = append(plan.Unsupported, UnsupportedChange{
+			Table:       tableName,
+			Description: fmt.Sprintf("change column %s", cc.Name),
+			Reason:      unsupportedColumnChangeReason(cc),
+		})
+	}
 	return nil
+}
+
+func unsupportedColumnChangeReason(cc ColumnChange) string {
+	var attrs []string
+	if strings.TrimSpace(cc.Old.OnUpdateExpression) != strings.TrimSpace(cc.New.OnUpdateExpression) {
+		attrs = append(attrs, "on_update")
+	}
+	if cc.Old.SRID != cc.New.SRID {
+		attrs = append(attrs, "srid")
+	}
+	if cc.Old.DisplayWidth != cc.New.DisplayWidth {
+		attrs = append(attrs, "display_width")
+	}
+	if !stringSlicesEqual(cc.Old.EnumValues, cc.New.EnumValues) {
+		attrs = append(attrs, "enum_values")
+	}
+	if len(attrs) == 0 && len(cc.Criteria) > 0 {
+		attrs = append(attrs, cc.Criteria...)
+	}
+	if len(attrs) == 0 {
+		attrs = append(attrs, "attributes")
+	}
+	return "deterministic renderer cannot alter " + strings.Join(attrs, ", ")
 }
 
 func (r deterministicRenderer) columnTypeWithSource(col driver.Column, sourceDialect string) (string, error) {

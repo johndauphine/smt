@@ -36,6 +36,10 @@ type TableDiff struct {
 	RemovedColumns []driver.Column `json:"removed_columns"`
 	ChangedColumns []ColumnChange  `json:"changed_columns"`
 
+	PrimaryKeyChanged bool     `json:"primary_key_changed,omitempty"`
+	OldPrimaryKey     []string `json:"old_primary_key,omitempty"`
+	NewPrimaryKey     []string `json:"new_primary_key,omitempty"`
+
 	AddedIndexes   []driver.Index `json:"added_indexes"`
 	RemovedIndexes []driver.Index `json:"removed_indexes"`
 
@@ -76,6 +80,7 @@ func (td TableDiff) IsEmpty() bool {
 	return len(td.AddedColumns) == 0 &&
 		len(td.RemovedColumns) == 0 &&
 		len(td.ChangedColumns) == 0 &&
+		!td.PrimaryKeyChanged &&
 		len(td.AddedIndexes) == 0 &&
 		len(td.RemovedIndexes) == 0 &&
 		len(td.AddedForeignKeys) == 0 &&
@@ -286,9 +291,12 @@ func normalizeTable(t driver.Table, norm func(string) string) driver.Table {
 
 func normalizeTableDiff(td TableDiff, norm func(string) string) TableDiff {
 	out := TableDiff{
-		Schema: td.Schema,
-		Name:   norm(td.Name),
-		Curr:   normalizeTable(td.Curr, norm),
+		Schema:            td.Schema,
+		Name:              norm(td.Name),
+		Curr:              normalizeTable(td.Curr, norm),
+		PrimaryKeyChanged: td.PrimaryKeyChanged,
+		OldPrimaryKey:     normalizeNameSlice(td.OldPrimaryKey, norm),
+		NewPrimaryKey:     normalizeNameSlice(td.NewPrimaryKey, norm),
 	}
 	for _, c := range td.AddedColumns {
 		c.Name = norm(c.Name)
@@ -452,6 +460,11 @@ func diffTable(prev, curr driver.Table) TableDiff {
 	td := TableDiff{Schema: curr.Schema, Name: curr.Name, Curr: curr}
 
 	td.AddedColumns, td.RemovedColumns, td.ChangedColumns = diffColumns(prev.Columns, curr.Columns)
+	if !stringSlicesEqual(prev.PrimaryKey, curr.PrimaryKey) {
+		td.PrimaryKeyChanged = true
+		td.OldPrimaryKey = append([]string(nil), prev.PrimaryKey...)
+		td.NewPrimaryKey = append([]string(nil), curr.PrimaryKey...)
+	}
 	td.AddedIndexes, td.RemovedIndexes = diffIndexes(prev.Indexes, curr.Indexes)
 	td.AddedForeignKeys, td.RemovedForeignKeys = diffForeignKeys(prev.ForeignKeys, curr.ForeignKeys)
 	td.AddedChecks, td.RemovedChecks = diffChecks(prev.CheckConstraints, curr.CheckConstraints)
@@ -529,6 +542,17 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
+func normalizeNameSlice(in []string, norm func(string) string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, name := range in {
+		out[i] = norm(name)
+	}
+	return out
+}
+
 func diffIndexes(prev, curr []driver.Index) (added, removed []driver.Index) {
 	prevByName := make(map[string]driver.Index, len(prev))
 	for _, i := range prev {
@@ -539,16 +563,27 @@ func diffIndexes(prev, curr []driver.Index) (added, removed []driver.Index) {
 		currByName[i.Name] = i
 	}
 	for _, i := range curr {
-		if _, existed := prevByName[i.Name]; !existed {
+		old, existed := prevByName[i.Name]
+		if !existed || !indexesEqual(old, i) {
 			added = append(added, i)
 		}
 	}
 	for _, i := range prev {
-		if _, stillThere := currByName[i.Name]; !stillThere {
+		next, stillThere := currByName[i.Name]
+		if !stillThere || !indexesEqual(i, next) {
 			removed = append(removed, i)
 		}
 	}
 	return added, removed
+}
+
+func indexesEqual(a, b driver.Index) bool {
+	return a.IsUnique == b.IsUnique &&
+		stringSlicesEqual(a.Columns, b.Columns) &&
+		boolSlicesEqualPaddedFalse(a.ColumnExpressions, b.ColumnExpressions) &&
+		intSlicesEqualPaddedZero(a.ColumnPrefixLengths, b.ColumnPrefixLengths) &&
+		stringSlicesEqual(a.IncludeCols, b.IncludeCols) &&
+		strings.TrimSpace(a.Filter) == strings.TrimSpace(b.Filter)
 }
 
 func diffForeignKeys(prev, curr []driver.ForeignKey) (added, removed []driver.ForeignKey) {
@@ -561,16 +596,27 @@ func diffForeignKeys(prev, curr []driver.ForeignKey) (added, removed []driver.Fo
 		currByName[f.Name] = f
 	}
 	for _, f := range curr {
-		if _, existed := prevByName[f.Name]; !existed {
+		old, existed := prevByName[f.Name]
+		if !existed || !foreignKeysEqual(old, f) {
 			added = append(added, f)
 		}
 	}
 	for _, f := range prev {
-		if _, stillThere := currByName[f.Name]; !stillThere {
+		next, stillThere := currByName[f.Name]
+		if !stillThere || !foreignKeysEqual(f, next) {
 			removed = append(removed, f)
 		}
 	}
 	return added, removed
+}
+
+func foreignKeysEqual(a, b driver.ForeignKey) bool {
+	return stringSlicesEqual(a.Columns, b.Columns) &&
+		a.RefSchema == b.RefSchema &&
+		a.RefTable == b.RefTable &&
+		stringSlicesEqual(a.RefColumns, b.RefColumns) &&
+		strings.EqualFold(strings.TrimSpace(a.OnDelete), strings.TrimSpace(b.OnDelete)) &&
+		strings.EqualFold(strings.TrimSpace(a.OnUpdate), strings.TrimSpace(b.OnUpdate))
 }
 
 func diffChecks(prev, curr []driver.CheckConstraint) (added, removed []driver.CheckConstraint) {
@@ -583,14 +629,54 @@ func diffChecks(prev, curr []driver.CheckConstraint) (added, removed []driver.Ch
 		currByName[c.Name] = c
 	}
 	for _, c := range curr {
-		if _, existed := prevByName[c.Name]; !existed {
+		old, existed := prevByName[c.Name]
+		if !existed || !checksEqual(old, c) {
 			added = append(added, c)
 		}
 	}
 	for _, c := range prev {
-		if _, stillThere := currByName[c.Name]; !stillThere {
+		next, stillThere := currByName[c.Name]
+		if !stillThere || !checksEqual(c, next) {
 			removed = append(removed, c)
 		}
 	}
 	return added, removed
+}
+
+func checksEqual(a, b driver.CheckConstraint) bool {
+	return strings.TrimSpace(a.Definition) == strings.TrimSpace(b.Definition)
+}
+
+func boolSlicesEqualPaddedFalse(a, b []bool) bool {
+	n := max(len(a), len(b))
+	for i := 0; i < n; i++ {
+		var av, bv bool
+		if i < len(a) {
+			av = a[i]
+		}
+		if i < len(b) {
+			bv = b[i]
+		}
+		if av != bv {
+			return false
+		}
+	}
+	return true
+}
+
+func intSlicesEqualPaddedZero(a, b []int) bool {
+	n := max(len(a), len(b))
+	for i := 0; i < n; i++ {
+		var av, bv int
+		if i < len(a) {
+			av = a[i]
+		}
+		if i < len(b) {
+			bv = b[i]
+		}
+		if av != bv {
+			return false
+		}
+	}
+	return true
 }

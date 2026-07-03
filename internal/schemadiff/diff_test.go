@@ -143,6 +143,94 @@ func TestCompute_ChangedMySQLColumnFlags(t *testing.T) {
 	}
 }
 
+func TestCompute_SideObjectDefinitionChanges(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{{
+		Name: "Orders",
+		Indexes: []driver.Index{{
+			Name:    "ix_orders_status",
+			Columns: []string{"status"},
+			Filter:  "status <> 'deleted'",
+		}},
+		ForeignKeys: []driver.ForeignKey{{
+			Name:       "fk_orders_customers",
+			Columns:    []string{"customer_id"},
+			RefTable:   "Customers",
+			RefColumns: []string{"id"},
+			OnDelete:   "NO ACTION",
+		}},
+		CheckConstraints: []driver.CheckConstraint{{
+			Name:       "ck_orders_status",
+			Definition: "status IN ('new','paid')",
+		}},
+	}}}
+	curr := Snapshot{Tables: []driver.Table{{
+		Name: "Orders",
+		Indexes: []driver.Index{{
+			Name:     "ix_orders_status",
+			Columns:  []string{"status", "created_at"},
+			IsUnique: true,
+			Filter:   "status <> 'deleted'",
+		}},
+		ForeignKeys: []driver.ForeignKey{{
+			Name:       "fk_orders_customers",
+			Columns:    []string{"customer_id"},
+			RefTable:   "Customers",
+			RefColumns: []string{"customer_id"},
+			OnDelete:   "CASCADE",
+		}},
+		CheckConstraints: []driver.CheckConstraint{{
+			Name:       "ck_orders_status",
+			Definition: "status IN ('new','paid','shipped')",
+		}},
+	}}}
+
+	d := Compute(prev, curr)
+	if len(d.ChangedTables) != 1 {
+		t.Fatalf("expected one changed table, got %+v", d)
+	}
+	td := d.ChangedTables[0]
+	if len(td.AddedIndexes) != 1 || len(td.RemovedIndexes) != 1 {
+		t.Fatalf("index definition change should be add+remove, got added=%+v removed=%+v", td.AddedIndexes, td.RemovedIndexes)
+	}
+	if len(td.AddedForeignKeys) != 1 || len(td.RemovedForeignKeys) != 1 {
+		t.Fatalf("FK definition change should be add+remove, got added=%+v removed=%+v", td.AddedForeignKeys, td.RemovedForeignKeys)
+	}
+	if len(td.AddedChecks) != 1 || len(td.RemovedChecks) != 1 {
+		t.Fatalf("check definition change should be add+remove, got added=%+v removed=%+v", td.AddedChecks, td.RemovedChecks)
+	}
+}
+
+func TestCompute_PrimaryKeyChange(t *testing.T) {
+	prev := Snapshot{Tables: []driver.Table{{
+		Name:       "Orders",
+		PrimaryKey: []string{"id"},
+		Columns: []driver.Column{
+			col("tenant_id", "int", false),
+			col("id", "int", false),
+		},
+	}}}
+	curr := Snapshot{Tables: []driver.Table{{
+		Name:       "Orders",
+		PrimaryKey: []string{"tenant_id", "id"},
+		Columns: []driver.Column{
+			col("tenant_id", "int", false),
+			col("id", "int", false),
+		},
+	}}}
+
+	d := Compute(prev, curr)
+	if d.IsEmpty() {
+		t.Fatal("primary-key change produced an empty diff")
+	}
+	if len(d.ChangedTables) != 1 || !d.ChangedTables[0].PrimaryKeyChanged {
+		t.Fatalf("expected primary-key changed table diff, got %+v", d)
+	}
+	if !stringSlicesEqual(d.ChangedTables[0].OldPrimaryKey, []string{"id"}) ||
+		!stringSlicesEqual(d.ChangedTables[0].NewPrimaryKey, []string{"tenant_id", "id"}) {
+		t.Fatalf("unexpected primary-key change: %+v", d.ChangedTables[0])
+	}
+}
+
 func TestCompute_AddedAndRemovedTables(t *testing.T) {
 	prev := Snapshot{Tables: []driver.Table{table("Users"), table("Sessions")}}
 	curr := Snapshot{Tables: []driver.Table{table("Users"), table("Audit")}}
@@ -466,6 +554,59 @@ func TestRenderDeterministic_ComputedColumnChangeFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "computed column") {
 		t.Fatalf("expected computed column error, got %v", err)
+	}
+}
+
+func TestRenderDeterministic_PrimaryKeyChangeUnsupported(t *testing.T) {
+	d := Diff{ChangedTables: []TableDiff{{
+		Name:              "orders",
+		PrimaryKeyChanged: true,
+		OldPrimaryKey:     []string{"id"},
+		NewPrimaryKey:     []string{"tenant_id", "id"},
+		Curr: driver.Table{
+			Name:       "orders",
+			PrimaryKey: []string{"tenant_id", "id"},
+			Columns: []driver.Column{
+				col("tenant_id", "int", false),
+				col("id", "int", false),
+			},
+		},
+	}}}
+
+	plan, err := RenderDeterministic(d, "public", "postgres")
+	if err != nil {
+		t.Fatalf("RenderDeterministic: %v", err)
+	}
+	if len(plan.Unsupported) != 1 {
+		t.Fatalf("expected one unsupported primary-key change, got %+v", plan)
+	}
+	if !strings.Contains(plan.Unsupported[0].Reason, "primary key changes are not supported") {
+		t.Fatalf("unexpected unsupported reason: %+v", plan.Unsupported[0])
+	}
+}
+
+func TestRenderDeterministic_UnsupportedColumnOnlyChange(t *testing.T) {
+	oldUpdated := driver.Column{Name: "updated_at", DataType: "datetime", IsNullable: true}
+	newUpdated := oldUpdated
+	newUpdated.OnUpdateExpression = "CURRENT_TIMESTAMP"
+	d := Compute(
+		Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("events", oldUpdated)}},
+		Snapshot{Version: CurrentSnapshotVersion, Tables: []driver.Table{table("events", newUpdated)}},
+	)
+
+	plan, err := RenderDeterministicWithOptions(d, RenderOptions{
+		TargetSchema:  "crm",
+		TargetDialect: "mysql",
+		SourceDialect: "mysql",
+	})
+	if err != nil {
+		t.Fatalf("RenderDeterministicWithOptions: %v", err)
+	}
+	if len(plan.Statements) != 0 {
+		t.Fatalf("expected no renderable statements, got %+v", plan.Statements)
+	}
+	if len(plan.Unsupported) != 1 || !strings.Contains(plan.Unsupported[0].Reason, "on_update") {
+		t.Fatalf("expected unsupported on_update change, got %+v", plan.Unsupported)
 	}
 }
 
