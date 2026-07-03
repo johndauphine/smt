@@ -89,13 +89,41 @@ func renderLit(v Lit, o Opts) string {
 				}
 			}
 		}
-		if v.Bare && !o.Col.Textual {
-			// Bare word on a non-textual column: emit as written (legacy
-			// pipelines never quoted these).
-			return v.Str
-		}
-		return "'" + strings.ReplaceAll(v.Str, "'", "''") + "'"
+		return stringLiteral(o.Target, v.Str)
 	}
+}
+
+func stringLiteral(target, s string) string {
+	if target != MySQL {
+		return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('\'')
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case 0:
+			b.WriteString(`\0`)
+		case '\'':
+			b.WriteString("''")
+		case '\\':
+			b.WriteString(`\\`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case 26:
+			b.WriteString(`\Z`)
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
 }
 
 func boolLit(target string, v bool) string {
@@ -261,7 +289,7 @@ func renderLike(v Like, o Opts) (string, error) {
 	if !ok || pat.Kind != LitString {
 		return "", fmt.Errorf("%w: non-literal LIKE/regex pattern", ErrUnsupported)
 	}
-	quoted := "'" + strings.ReplaceAll(pat.Str, "'", "''") + "'"
+	quoted := stringLiteral(o.Target, pat.Str)
 
 	if !v.Regex {
 		// Plain LIKE. MSSQL [class] patterns are native there; pg gets the
@@ -292,7 +320,7 @@ func renderLike(v Like, o Opts) (string, error) {
 }
 
 func renderRegexMatch(operand, pattern string, not bool, o Opts) (string, error) {
-	quoted := "'" + strings.ReplaceAll(pattern, "'", "''") + "'"
+	quoted := stringLiteral(o.Target, pattern)
 	switch o.Target {
 	case Postgres:
 		op := "~"
@@ -315,7 +343,7 @@ func renderRegexMatch(operand, pattern string, not bool, o Opts) (string, error)
 		if not {
 			op = "NOT LIKE"
 		}
-		return "(" + operand + " " + op + " '" + strings.ReplaceAll(like, "'", "''") + "')", nil
+		return "(" + operand + " " + op + " " + stringLiteral(o.Target, like) + ")", nil
 	}
 	return "", fmt.Errorf("%w: regex match for target %s", ErrUnsupported, o.Target)
 }

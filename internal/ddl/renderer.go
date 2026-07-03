@@ -34,7 +34,10 @@ import (
 // translation with a common fail-closed gate; output normalizes spacing and
 // spellings (e.g. UTC now-defaults become UTC_TIMESTAMP() on MySQL, pg's
 // = ANY (ARRAY[...]) checks become IN (...), lexical ::casts are stripped).
-const RendererVersion = "5"
+// "6": MySQL-target string literals from the expression IR escape backslashes
+// and control characters, closing DEFAULT/CHECK corruption and injection paths
+// (#201).
+const RendererVersion = "6"
 
 type Renderer struct {
 	target            string

@@ -319,6 +319,53 @@ func TestParse_StringLiteralRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRender_MySQLStringLiteralsEscapeBackslashes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "regex digit class", in: `^\d+$`, want: `'^\\d+$'`},
+		{name: "literal backslash n", in: `a\nb`, want: `'a\\nb'`},
+		{name: "actual newline", in: "a\nb", want: `'a\nb'`},
+		{name: "trailing backslash", in: `\`, want: `'\\'`},
+		{name: "injection shaped payload", in: `\'); DROP TABLE users; --`, want: `'\\''); DROP TABLE users; --'`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Render(Lit{Kind: LitString, Str: tc.in}, Opts{Target: MySQL, Kind: "default", Col: ColInfo{Textual: true}})
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("Render = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRender_StringLiteralsBackslashUnchangedForPostgresAndMSSQL(t *testing.T) {
+	for _, target := range []string{Postgres, MSSQL} {
+		got, err := Render(Lit{Kind: LitString, Str: `a\nb`}, Opts{Target: target, Kind: "default", Col: ColInfo{Textual: true}})
+		if err != nil {
+			t.Fatalf("%s Render: %v", target, err)
+		}
+		if got != `'a\nb'` {
+			t.Fatalf("%s Render = %q, want %q", target, got, `'a\nb'`)
+		}
+	}
+}
+
+func TestRender_BareDefaultOnNonTextualColumnStaysQuoted(t *testing.T) {
+	got, err := Render(ParseDefault("abc", MySQL), Opts{Target: MySQL, Source: MySQL, Kind: "default"})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got != "'abc'" {
+		t.Fatalf("bare default rendered as %q, want quoted string", got)
+	}
+}
+
 func TestParseDefault_EmptyAndNil(t *testing.T) {
 	if ParseDefault("", "") != nil {
 		t.Error("empty default should parse to nil")
