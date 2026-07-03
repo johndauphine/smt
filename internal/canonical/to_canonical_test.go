@@ -53,6 +53,43 @@ func TestToCanonical_Core(t *testing.T) {
 	}
 }
 
+func TestPostgresArrayRoundTripPreservesElementType(t *testing.T) {
+	cases := []struct {
+		name     string
+		typ      string
+		meta     TypeMeta
+		wantElem CanonicalType
+		wantPG   string
+	}{
+		{"bigint udt", "_int8", TypeMeta{}, CanonicalType{Kind: BigInt}, "bigint[]"},
+		{"smallint udt", "_int2", TypeMeta{}, CanonicalType{Kind: SmallInt}, "smallint[]"},
+		{"varchar udt length", "_varchar", TypeMeta{MaxLength: 20}, CanonicalType{Kind: Varchar, Length: 20}, "character varying(20)[]"},
+		{"varchar spelled length", "varchar[]", TypeMeta{MaxLength: 20}, CanonicalType{Kind: Varchar, Length: 20}, "character varying(20)[]"},
+		{"uuid udt", "_uuid", TypeMeta{}, CanonicalType{Kind: Uuid}, "uuid[]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ToCanonical(tc.typ, tc.meta, "postgres")
+			if got.Kind != Array {
+				t.Fatalf("ToCanonical(%q).Kind = %v, want Array", tc.typ, got.Kind)
+			}
+			if got.Element == nil {
+				t.Fatalf("ToCanonical(%q).Element = nil", tc.typ)
+			}
+			if got.Element.Kind != tc.wantElem.Kind || got.Element.Length != tc.wantElem.Length {
+				t.Fatalf("array element = %+v, want %+v", *got.Element, tc.wantElem)
+			}
+			rendered, err := FromCanonical(got, "postgres", RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonical: %v", err)
+			}
+			if rendered != tc.wantPG {
+				t.Fatalf("rendered array = %q, want %q", rendered, tc.wantPG)
+			}
+		})
+	}
+}
+
 func TestFromCanonical_Spatial(t *testing.T) {
 	ct := CanonicalType{Kind: Spatial, SpatialType: "geometry", SpatialSubType: "point", SRID: 4326}
 	cases := []struct {
@@ -93,6 +130,8 @@ func TestFromCanonicalWithWarnings_Lossy(t *testing.T) {
 		{"mysql timestamp to pg", CanonicalType{Kind: Timestamp, UTCNormalized: true}, "postgres", "timestamp without time zone", "UTC-normalization"},
 		{"fsp clamp", CanonicalType{Kind: Timestamp, Fsp: &fsp7}, "postgres", "timestamp(6) without time zone", "clamped"},
 		{"mysql text tier to pg", CanonicalType{Kind: Text, Length: baseCap}, "postgres", "text", "LOB capacity tier"},
+		{"array to mysql", CanonicalType{Kind: Array, Element: &CanonicalType{Kind: BigInt}}, "mysql", "JSON", "no native array"},
+		{"array element warning", CanonicalType{Kind: Array, Element: &CanonicalType{Kind: TinyInt}}, "postgres", "smallint[]", "array element"},
 		{"postgis dependency", CanonicalType{Kind: Spatial, SpatialType: "geometry"}, "postgres", "geometry", "PostGIS"},
 	}
 	for _, tc := range cases {

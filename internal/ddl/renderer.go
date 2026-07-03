@@ -37,7 +37,9 @@ import (
 // "6": MySQL-target string literals from the expression IR escape backslashes
 // and control characters, closing DEFAULT/CHECK corruption and injection paths
 // (#201).
-const RendererVersion = "6"
+// "7": PostgreSQL array element types are preserved through the canonical
+// mapper, so bigint[] stays bigint[] and varchar(N)[] keeps N (#198).
+const RendererVersion = "7"
 
 type Renderer struct {
 	target            string

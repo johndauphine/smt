@@ -22,6 +22,10 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	dt := strings.ToLower(strings.TrimSpace(typeName))
 	mysql := isMySQL(dialect)
 
+	if ct, ok := toArray(dt, m, dialect); ok {
+		return ct
+	}
+
 	if ct, ok := toSpatial(dt, m, dialect); ok {
 		return ct
 	}
@@ -152,18 +156,24 @@ func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	case "set":
 		return CanonicalType{Kind: Set, Length: m.MaxLength, EnumValues: m.EnumValues}
 
-	// ---- pg arrays ------------------------------------------------------
-	case "_text", "text[]", "_varchar", "varchar[]", "_bpchar", "bpchar[]":
-		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Text}}
-	case "_int2", "int2[]", "_int4", "int4[]", "_int8", "int8[]":
-		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Integer}}
-	case "_uuid", "uuid[]":
-		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Uuid}}
-	case "array":
-		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Text}}
-
 	default:
 		return CanonicalType{Kind: Raw, Raw: dt}
+	}
+}
+
+func toArray(dt string, m TypeMeta, dialect string) (CanonicalType, bool) {
+	switch {
+	case dt == "array":
+		return CanonicalType{Kind: Array, Element: &CanonicalType{Kind: Text}}, true
+	case strings.HasSuffix(dt, "[]"):
+		base := strings.TrimSpace(strings.TrimSuffix(dt, "[]"))
+		elem := ToCanonical(base, m, dialect)
+		return CanonicalType{Kind: Array, Element: &elem}, true
+	case strings.HasPrefix(dt, "_") && len(dt) > 1:
+		elem := ToCanonical(strings.TrimPrefix(dt, "_"), m, dialect)
+		return CanonicalType{Kind: Array, Element: &elem}, true
+	default:
+		return CanonicalType{}, false
 	}
 }
 

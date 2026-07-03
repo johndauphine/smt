@@ -143,18 +143,7 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 	case Enum, Set:
 		return "text", nil
 	case Array:
-		elem := Text
-		if ct.Element != nil {
-			elem = ct.Element.Kind
-		}
-		switch elem {
-		case Integer, SmallInt, BigInt:
-			return "integer[]", nil
-		case Uuid:
-			return "uuid[]", nil
-		default:
-			return "text[]", nil
-		}
+		return pgArrayDDL(ct)
 	case Spatial:
 		return pgSpatialDDL(ct), nil
 	case Raw:
@@ -162,6 +151,18 @@ func fromCanonicalPG(ct CanonicalType, opts RenderOpts) (string, error) {
 	default:
 		return "", fmt.Errorf("%w", ErrUnknownType)
 	}
+}
+
+func pgArrayDDL(ct CanonicalType) (string, error) {
+	elem := CanonicalType{Kind: Text}
+	if ct.Element != nil {
+		elem = *ct.Element
+	}
+	elemDDL, err := fromCanonicalPG(elem, RenderOpts{})
+	if err != nil {
+		return "", err
+	}
+	return elemDDL + "[]", nil
 }
 
 // pgTemporal renders a time/timestamp with its fractional-seconds precision
@@ -607,6 +608,18 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 		}
 		if target == "mysql" && ct.SpatialType == "geography" {
 			add("MySQL has no native geography type; rendered as " + rendered)
+		}
+	case Array:
+		if target != "postgres" {
+			add("target has no native array type; rendered as " + rendered)
+			break
+		}
+		if ct.Element != nil {
+			elemRendered := strings.TrimSuffix(rendered, "[]")
+			for _, w := range mappingWarnings(*ct.Element, target, elemRendered, opts) {
+				w.Reason = "array element: " + w.Reason
+				out = append(out, w)
+			}
 		}
 	}
 	return out

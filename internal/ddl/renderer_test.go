@@ -259,6 +259,34 @@ func TestRenderer_PostgresArrayAliasesMapForMSSQLAndMySQL(t *testing.T) {
 	assertEqualSQL(t, mysqlType, "JSON")
 }
 
+func TestRenderer_PostgresArrayElementFidelity(t *testing.T) {
+	renderer, err := NewRenderer("postgres", "public", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer postgres: %v", err)
+	}
+	renderer = renderer.WithSource("postgres")
+
+	cases := []struct {
+		name string
+		col  driver.Column
+		want string
+	}{
+		{"bigint array", driver.Column{Name: "Ids", DataType: "_int8"}, "bigint[]"},
+		{"smallint array", driver.Column{Name: "SmallIds", DataType: "_int2"}, "smallint[]"},
+		{"varchar length array", driver.Column{Name: "Labels", DataType: "_varchar", MaxLength: 20}, "character varying(20)[]"},
+		{"uuid array", driver.Column{Name: "UUIDs", DataType: "_uuid"}, "uuid[]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := renderer.ColumnType(tc.col)
+			if err != nil {
+				t.Fatalf("ColumnType: %v", err)
+			}
+			assertEqualSQL(t, got, tc.want)
+		})
+	}
+}
+
 func TestRenderer_MySQLTextAliasesMapForPostgresAndMSSQL(t *testing.T) {
 	postgresRenderer, err := NewRenderer("postgres", "public", "fail")
 	if err != nil {
