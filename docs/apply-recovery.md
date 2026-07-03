@@ -25,13 +25,23 @@ target dialect supports it.
 
 ## `smt sync --apply`
 
-`sync --apply` refuses unsupported changes before executing anything. It also
-refuses `data-loss-risk` statements unless `--allow-data-loss` is set.
+`sync --apply` creates a run record and writes the rendered `migration.sql`
+plus a run `manifest.json` under `migration.data_dir/runs/<run-id>/ddl/`
+before executing anything. It refuses unsupported changes before executing
+DDL, and refuses `data-loss-risk` statements unless `--allow-data-loss` is set.
 
 Once execution starts, sync statements run sequentially and stop at the first
 failure. The error includes the failed statement number, description, database
-error, and SQL text. `--save-snapshot` writes a new baseline only after every
-statement succeeds.
+error, and SQL text. The run is marked `failed` with its current phase in the
+state DB. `--save-snapshot` writes a new baseline only after every statement
+succeeds.
+
+For `sync --against snapshot --apply`, a partial failure leaves the saved
+snapshot baseline unchanged. If the latest baseline still predates that failed
+partial apply, SMT refuses a blind snapshot-mode rerun before executing DDL.
+Recover by inspecting the run artifact, making the target correct, then running
+`smt sync --against target --apply` or capturing a new baseline with
+`smt snapshot`.
 
 ## Transactions
 
@@ -51,6 +61,7 @@ Automated coverage pins the v1 failure behavior:
 
 ```bash
 go test ./cmd/smt -run TestApplyPlan_StopsAtFirstFailure
+go test ./cmd/smt -run TestSyncApplyRecordsRunAndArtifactsOnFailure
 go test ./internal/orchestrator -run TestExecutePlanStopsAtFirstFailure
 ```
 

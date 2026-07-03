@@ -353,7 +353,7 @@ func (s *State) UpdatePhase(runID, phase string) error {
 // GetAllRuns returns all runs for history
 func (s *State) GetAllRuns() ([]Run, error) {
 	rows, err := s.db.Query(`
-		SELECT id, COALESCE(kind, 'apply'), started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
+		SELECT id, COALESCE(kind, 'apply'), started_at, completed_at, status, phase, source_schema, target_schema, config, profile_name, config_path, error
 		FROM runs ORDER BY started_at DESC LIMIT 20
 	`)
 	if err != nil {
@@ -368,7 +368,7 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		var completedAtStr sql.NullString
 		var configStr sql.NullString
 		var profileName, configPath, errorMsg sql.NullString
-		if err := rows.Scan(&r.ID, &r.Kind, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
+		if err := rows.Scan(&r.ID, &r.Kind, &startedAtStr, &completedAtStr, &r.Status, &r.Phase, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
@@ -402,9 +402,9 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 
 	var profileName, configPath, errorMsg sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, COALESCE(kind, 'apply'), started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
+		SELECT id, COALESCE(kind, 'apply'), started_at, completed_at, status, phase, source_schema, target_schema, config, profile_name, config_path, error
 		FROM runs WHERE id = ?
-	`, runID).Scan(&r.ID, &r.Kind, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg)
+	`, runID).Scan(&r.ID, &r.Kind, &startedAtStr, &completedAtStr, &r.Status, &r.Phase, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
