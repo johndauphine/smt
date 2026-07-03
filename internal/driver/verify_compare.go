@@ -434,7 +434,15 @@ func cmpIdentity(src, tgt Column, _, _ string) *ColumnDelta {
 	}
 }
 
-func cmpOnUpdate(src, tgt Column, _, _ string) *ColumnDelta {
+func cmpOnUpdate(src, tgt Column, _, tgtDialect string) *ColumnDelta {
+	// ON UPDATE <expr> is a MySQL/MariaDB-only column feature; MSSQL and
+	// PostgreSQL have no equivalent, so a MySQL source's ON UPDATE cannot be
+	// preserved cross-dialect and must not be flagged as a fidelity failure.
+	// Only enforce it when the target is MySQL/MariaDB (e.g. mysql→mysql), where
+	// a dropped ON UPDATE is a real regression (#219).
+	if tgtDialect != "mysql" && tgtDialect != "mariadb" {
+		return nil
+	}
 	srcExpr := normalizedDefaultLiteral(src.OnUpdateExpression)
 	tgtExpr := normalizedDefaultLiteral(tgt.OnUpdateExpression)
 	if srcExpr == tgtExpr {

@@ -20,8 +20,12 @@ func TestToCanonical_Core(t *testing.T) {
 		{"int unsigned carries flag", "int", TypeMeta{IsUnsigned: true}, "mysql", CanonicalType{Kind: Integer, Unsigned: true}},
 		{"mediumint is its own kind", "mediumint", TypeMeta{}, "mysql", CanonicalType{Kind: MediumInt}},
 		{"varchar carries length", "varchar", TypeMeta{MaxLength: 20}, "mssql", CanonicalType{Kind: Varchar, Length: 20}},
-		{"postgres varchar is national", "varchar", TypeMeta{MaxLength: 20}, "postgres", CanonicalType{Kind: Varchar, Length: 20, National: true}},
-		{"mysql char is national", "char", TypeMeta{MaxLength: 10}, "mysql", CanonicalType{Kind: Char, Length: 10, National: true}},
+		// pg/mysql varchar/char do NOT carry National: mapping them to MSSQL
+		// NVARCHAR/NCHAR halves the inline capacity (4000 vs 8000) and forces
+		// length 4001-8000 to (MAX), violating exact-length fidelity. They map
+		// to MSSQL VARCHAR/CHAR (codepage) so the length round-trips.
+		{"postgres varchar not national", "varchar", TypeMeta{MaxLength: 20}, "postgres", CanonicalType{Kind: Varchar, Length: 20}},
+		{"mysql char not national", "char", TypeMeta{MaxLength: 10}, "mysql", CanonicalType{Kind: Char, Length: 10}},
 		{"mssql nvarchar is national", "nvarchar", TypeMeta{MaxLength: 20}, "mssql", CanonicalType{Kind: Varchar, Length: 20, National: true}},
 		{"decimal carries p/s", "decimal", TypeMeta{Precision: 18, Scale: 4}, "postgres", CanonicalType{Kind: Decimal, Precision: 18, Scale: 4}},
 		{"money is decimal(19,4)", "money", TypeMeta{}, "mssql", CanonicalType{Kind: Decimal, Precision: 19, Scale: 4}},
@@ -69,8 +73,8 @@ func TestMinorFidelityMappings(t *testing.T) {
 		{"mysql binary stays fixed", "mysql", "binary", TypeMeta{MaxLength: 16}, "mysql", "BINARY(16)"},
 		{"mssql varbinary stays variable", "mssql", "varbinary", TypeMeta{MaxLength: 16}, "mssql", "VARBINARY(16)"},
 		{"mysql varbinary stays variable", "mysql", "varbinary", TypeMeta{MaxLength: 16}, "mysql", "VARBINARY(16)"},
-		{"postgres varchar to mssql is unicode", "postgres", "varchar", TypeMeta{MaxLength: 50}, "mssql", "NVARCHAR(50)"},
-		{"mysql varchar to mssql is unicode", "mysql", "varchar", TypeMeta{MaxLength: 50}, "mssql", "NVARCHAR(50)"},
+		{"postgres varchar to mssql is codepage", "postgres", "varchar", TypeMeta{MaxLength: 50}, "mssql", "VARCHAR(50)"},
+		{"mysql varchar to mssql is codepage", "mysql", "varchar", TypeMeta{MaxLength: 50}, "mssql", "VARCHAR(50)"},
 		{"mssql varchar stays codepage", "mssql", "varchar", TypeMeta{MaxLength: 50}, "mssql", "VARCHAR(50)"},
 	}
 	for _, tc := range cases {
