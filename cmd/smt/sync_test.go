@@ -192,7 +192,7 @@ func TestLoadPreviousSnapshot_NoSnapshotReturnsHelpfulError(t *testing.T) {
 	}
 	defer state.Close()
 
-	_, err = loadPreviousSnapshot(state, "mssql", "dbo")
+	_, err = loadPreviousSnapshot(state, "mssql", "host=source;port=1433;database=crm", "dbo")
 	if err == nil {
 		t.Fatal("expected error when no snapshot exists")
 	}
@@ -218,11 +218,12 @@ func TestLoadPreviousSnapshot_RoundTrip(t *testing.T) {
 		Tables:     []driver.Table{{Schema: "dbo", Name: "Users"}},
 	}
 	payload, _ := json.Marshal(want)
-	if _, err := state.SaveSnapshot(want.SourceType, want.Schema, want.CapturedAt, payload); err != nil {
+	sourceIdentity := "host=source;port=1433;database=crm"
+	if _, err := state.SaveSnapshot(want.SourceType, sourceIdentity, want.Schema, want.CapturedAt, payload); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	got, err := loadPreviousSnapshot(state, "mssql", "dbo")
+	got, err := loadPreviousSnapshot(state, "mssql", sourceIdentity, "dbo")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -449,11 +450,12 @@ func TestLoadPreviousSnapshot_MalformedPayload(t *testing.T) {
 	defer state.Close()
 
 	// Save a payload that isn't valid JSON for a Snapshot.
-	if _, err := state.SaveSnapshot("mssql", "dbo", time.Now(), []byte("{not json")); err != nil {
+	sourceIdentity := "host=source;port=1433;database=crm"
+	if _, err := state.SaveSnapshot("mssql", sourceIdentity, "dbo", time.Now(), []byte("{not json")); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	_, err = loadPreviousSnapshot(state, "mssql", "dbo")
+	_, err = loadPreviousSnapshot(state, "mssql", sourceIdentity, "dbo")
 	if err == nil {
 		t.Fatal("expected unmarshal error")
 	}

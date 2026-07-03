@@ -24,7 +24,7 @@ func saveSnap(t *testing.T, state *checkpoint.State, src, schema string, capture
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := state.SaveSnapshot(src, schema, capturedAt, payload); err != nil {
+	if _, err := state.SaveSnapshot(src, "host=test;port=0;database="+schema, schema, capturedAt, payload); err != nil {
 		t.Fatalf("SaveSnapshot: %v", err)
 	}
 }

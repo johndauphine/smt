@@ -146,7 +146,7 @@ func runSnapshot(c *cli.Context) error {
 	if !ok {
 		return fmt.Errorf("snapshot storage requires the SQLite state backend")
 	}
-	id, err := state.SaveSnapshot(snap.SourceType, snap.Schema, snap.CapturedAt, payload)
+	id, err := state.SaveSnapshot(snap.SourceType, snapshotSourceIdentity(cfg.Source), snap.Schema, snap.CapturedAt, payload)
 	if err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func runSyncAgainstTarget(c *cli.Context) error {
 		fmt.Println("Renderer returned no statements; nothing to apply.")
 		return nil
 	}
-	return finishSyncPlan(c, ctx, orch, plan, state, currSnap)
+	return finishSyncPlan(c, ctx, orch, plan, state, currSnap, snapshotSourceIdentity(cfg.Source))
 }
 
 // runSyncAgainstSnapshot diffs the current source schema against the latest
@@ -324,7 +324,8 @@ func runSyncAgainstSnapshot(c *cli.Context) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	prevSnap, err := loadPreviousSnapshot(state, cfg.Source.Type, cfg.Source.Schema)
+	sourceIdentity := snapshotSourceIdentity(cfg.Source)
+	prevSnap, err := loadPreviousSnapshot(state, cfg.Source.Type, sourceIdentity, cfg.Source.Schema)
 	if err != nil {
 		return err
 	}
@@ -364,7 +365,7 @@ func runSyncAgainstSnapshot(c *cli.Context) error {
 		fmt.Println("Renderer returned no statements; nothing to apply.")
 		return nil
 	}
-	return finishSyncPlan(c, ctx, orch, plan, state, currSnap)
+	return finishSyncPlan(c, ctx, orch, plan, state, currSnap, sourceIdentity)
 }
 
 // buildSnapshotSyncPlan computes the offline snapshot-to-snapshot diff and
@@ -412,7 +413,7 @@ func buildSnapshotSyncPlan(prev, curr schemadiff.Snapshot, cfg *config.Config) (
 // finishSyncPlan is the shared tail of both sync modes: write the plan to
 // --out for review, or gate (unsupported changes, data-loss risk) and apply
 // it against the target, optionally saving the new baseline snapshot.
-func finishSyncPlan(c *cli.Context, ctx context.Context, orch *orchestrator.Orchestrator, plan schemadiff.Plan, state *checkpoint.State, currSnap schemadiff.Snapshot) error {
+func finishSyncPlan(c *cli.Context, ctx context.Context, orch *orchestrator.Orchestrator, plan schemadiff.Plan, state *checkpoint.State, currSnap schemadiff.Snapshot, sourceIdentity string) error {
 	printPlanSummary(plan)
 
 	if !c.Bool("apply") {
@@ -441,7 +442,7 @@ func finishSyncPlan(c *cli.Context, ctx context.Context, orch *orchestrator.Orch
 
 	if c.Bool("save-snapshot") {
 		payload, _ := json.Marshal(currSnap)
-		id, err := state.SaveSnapshot(currSnap.SourceType, currSnap.Schema, currSnap.CapturedAt, payload)
+		id, err := state.SaveSnapshot(currSnap.SourceType, sourceIdentity, currSnap.Schema, currSnap.CapturedAt, payload)
 		if err != nil {
 			return fmt.Errorf("saving baseline snapshot: %w", err)
 		}
@@ -466,10 +467,10 @@ func gatePlanForApply(plan schemadiff.Plan, allowDataLoss bool) error {
 }
 
 // loadPreviousSnapshot returns the most recent stored snapshot for this
-// (sourceType, schema). It is the baseline loader for `sync --against
+// (sourceType, sourceIdentity, schema). It is the baseline loader for `sync --against
 // snapshot`; live target sync planning does not require a previous snapshot.
-func loadPreviousSnapshot(state *checkpoint.State, sourceType, schema string) (schemadiff.Snapshot, error) {
-	snapRow, err := state.GetLatestSnapshot(sourceType, schema)
+func loadPreviousSnapshot(state *checkpoint.State, sourceType, sourceIdentity, schema string) (schemadiff.Snapshot, error) {
+	snapRow, err := state.GetLatestSnapshot(sourceType, sourceIdentity, schema)
 	if err != nil {
 		return schemadiff.Snapshot{}, err
 	}
@@ -481,6 +482,12 @@ func loadPreviousSnapshot(state *checkpoint.State, sourceType, schema string) (s
 		return schemadiff.Snapshot{}, fmt.Errorf("decoding stored snapshot: %w", err)
 	}
 	return snap, nil
+}
+
+func snapshotSourceIdentity(src config.SourceConfig) string {
+	host := strings.ToLower(strings.TrimSpace(src.Host))
+	database := strings.TrimSpace(src.Database)
+	return fmt.Sprintf("host=%s;port=%d;database=%s", host, src.Port, database)
 }
 
 // constraintLoader is the narrow subset of driver.Reader that
