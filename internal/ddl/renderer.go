@@ -182,7 +182,7 @@ func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.C
 	if !col.IsNullable {
 		b.WriteString(" NOT NULL")
 	}
-	if strings.TrimSpace(col.DefaultExpression) != "" && !col.IsIdentity {
+	if driver.ColumnHasDefault(col) && !col.IsIdentity {
 		def, err := r.ColumnDefault(col)
 		if err != nil {
 			return "", "", err
@@ -235,7 +235,14 @@ func (r Renderer) ColumnDefault(col driver.Column) (string, error) {
 	}
 	raw := strings.TrimSpace(col.DefaultExpression)
 	if raw == "" {
-		return "", nil
+		if !driver.ColumnHasDefault(col) {
+			return "", nil
+		}
+		out := sqlStringLiteral(col.DefaultExpression)
+		if r.target == "mysql" {
+			out = r.mysqlDefaultForm(out, col)
+		}
+		return out, nil
 	}
 	out, err := exprir.Render(exprir.ParseDefault(raw, r.source), r.exprOpts("default", col, nil))
 	if err != nil {
@@ -366,7 +373,7 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 	}
 	cols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
-		cols[i] = r.quote(r.normalize(c))
+		cols[i] = r.indexKeyPartDDL(idx, i, c)
 	}
 	var b strings.Builder
 	b.WriteString("CREATE ")
@@ -390,6 +397,22 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 		b.WriteString(expr)
 	}
 	return b.String(), nil
+}
+
+func (r Renderer) indexKeyPartDDL(idx *driver.Index, i int, column string) string {
+	isExpression := i < len(idx.ColumnExpressions) && idx.ColumnExpressions[i]
+	if isExpression {
+		expr := strings.TrimSpace(column)
+		if r.target == "mysql" && !(strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")")) {
+			expr = "(" + expr + ")"
+		}
+		return expr
+	}
+	part := r.quote(r.normalize(column))
+	if r.target == "mysql" && i < len(idx.ColumnPrefixLengths) && idx.ColumnPrefixLengths[i] > 0 {
+		part += fmt.Sprintf("(%d)", idx.ColumnPrefixLengths[i])
+	}
+	return part
 }
 
 func (r Renderer) CreateForeignKeyDDL(t *driver.Table, fk *driver.ForeignKey) (string, error) {
@@ -759,6 +782,10 @@ func referentialAction(rule string) string {
 
 func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+func sqlStringLiteral(s string) string {
+	return "'" + escapeSQLString(s) + "'"
 }
 
 func isTextualSourceType(dt string) bool {

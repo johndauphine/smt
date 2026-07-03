@@ -500,7 +500,7 @@ func columnsEqual(a, b driver.Column) bool {
 		a.IsUnsigned == b.IsUnsigned &&
 		a.DisplayWidth == b.DisplayWidth &&
 		stringSlicesEqual(a.EnumValues, b.EnumValues) &&
-		strings.TrimSpace(a.DefaultExpression) == strings.TrimSpace(b.DefaultExpression) &&
+		driver.ColumnDefaultsEqual(a, b) &&
 		strings.TrimSpace(a.OnUpdateExpression) == strings.TrimSpace(b.OnUpdateExpression) &&
 		a.IsComputed == b.IsComputed &&
 		strings.TrimSpace(a.ComputedExpression) == strings.TrimSpace(b.ComputedExpression) &&

@@ -1,6 +1,12 @@
 package mysql
 
-import "testing"
+import (
+	"database/sql"
+	"strings"
+	"testing"
+
+	"smt/internal/driver"
+)
 
 // TestParseGeneratedColumnExtra is the regression test for issue #18.
 // MySQL 8.0.13+ writes "DEFAULT_GENERATED" into information_schema.COLUMNS.EXTRA
@@ -97,6 +103,89 @@ func TestParseOnUpdateExpression(t *testing.T) {
 		if got := parseOnUpdateExpression(tt.extra); got != tt.want {
 			t.Fatalf("parseOnUpdateExpression(%q) = %q, want %q", tt.extra, got, tt.want)
 		}
+	}
+}
+
+func TestApplyMySQLColumnDefaultPreservesEmptyString(t *testing.T) {
+	tests := []struct {
+		name        string
+		defaultVal  sql.NullString
+		wantPresent bool
+		wantExpr    string
+	}{
+		{name: "no default", defaultVal: sql.NullString{}, wantPresent: false, wantExpr: ""},
+		{name: "empty string default", defaultVal: sql.NullString{String: "", Valid: true}, wantPresent: true, wantExpr: ""},
+		{name: "whitespace string default", defaultVal: sql.NullString{String: " ", Valid: true}, wantPresent: true, wantExpr: " "},
+		{name: "bare word default", defaultVal: sql.NullString{String: "active", Valid: true}, wantPresent: true, wantExpr: "active"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var col driver.Column
+			applyMySQLColumnDefault(&col, tc.defaultVal)
+			if col.HasDefault != tc.wantPresent {
+				t.Fatalf("HasDefault = %v, want %v", col.HasDefault, tc.wantPresent)
+			}
+			if col.DefaultExpression != tc.wantExpr {
+				t.Fatalf("DefaultExpression = %q, want %q", col.DefaultExpression, tc.wantExpr)
+			}
+		})
+	}
+}
+
+func TestAppendMySQLIndexPartCapturesFunctionalAndPrefixParts(t *testing.T) {
+	idx := driver.Index{Name: "idx_body_name"}
+	if err := appendMySQLIndexPart(&idx, mysqlIndexPart{
+		indexName:  "idx_body_name",
+		columnName: sql.NullString{String: "body", Valid: true},
+		subPart:    sql.NullInt64{Int64: 100, Valid: true},
+	}); err != nil {
+		t.Fatalf("append prefix part: %v", err)
+	}
+	if err := appendMySQLIndexPart(&idx, mysqlIndexPart{
+		indexName:  "idx_body_name",
+		expression: sql.NullString{String: "lower(`name`)", Valid: true},
+	}); err != nil {
+		t.Fatalf("append expression part: %v", err)
+	}
+
+	if got, want := strings.Join(idx.Columns, ","), "body,lower(`name`)"; got != want {
+		t.Fatalf("Columns = %q, want %q", got, want)
+	}
+	if len(idx.ColumnPrefixLengths) != 2 || idx.ColumnPrefixLengths[0] != 100 || idx.ColumnPrefixLengths[1] != 0 {
+		t.Fatalf("ColumnPrefixLengths = %#v, want [100 0]", idx.ColumnPrefixLengths)
+	}
+	if len(idx.ColumnExpressions) != 2 || idx.ColumnExpressions[0] || !idx.ColumnExpressions[1] {
+		t.Fatalf("ColumnExpressions = %#v, want [false true]", idx.ColumnExpressions)
+	}
+}
+
+func TestMySQLIndexQueryAvoidsGroupConcatAndSelectsKeyPartMetadata(t *testing.T) {
+	q := mysqlIndexQuery(true)
+	for _, want := range []string{"EXPRESSION", "SUB_PART", "ORDER BY INDEX_NAME, SEQ_IN_INDEX"} {
+		if !strings.Contains(q, want) {
+			t.Fatalf("mysqlIndexQuery missing %q:\n%s", want, q)
+		}
+	}
+	if strings.Contains(q, "GROUP_CONCAT") {
+		t.Fatalf("mysqlIndexQuery still uses GROUP_CONCAT:\n%s", q)
+	}
+
+	withoutExpression := mysqlIndexQuery(false)
+	if !strings.Contains(withoutExpression, "NULL AS EXPRESSION") {
+		t.Fatalf("fallback index query should avoid MySQL-only EXPRESSION column:\n%s", withoutExpression)
+	}
+}
+
+func TestMySQLCheckConstraintQueryScopesMariaDBByTable(t *testing.T) {
+	mysqlQuery := mysqlCheckConstraintsQuery(false)
+	if strings.Contains(mysqlQuery, "cc.TABLE_NAME = tc.TABLE_NAME") {
+		t.Fatalf("MySQL query should not reference CHECK_CONSTRAINTS.TABLE_NAME:\n%s", mysqlQuery)
+	}
+
+	mariaQuery := mysqlCheckConstraintsQuery(true)
+	if !strings.Contains(mariaQuery, "cc.TABLE_NAME = tc.TABLE_NAME") {
+		t.Fatalf("MariaDB query should join CHECK_CONSTRAINTS by table name:\n%s", mariaQuery)
 	}
 }
 

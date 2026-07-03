@@ -337,7 +337,7 @@ func joinLowerSorted(in []string) string {
 func indexKeys(idxs []driver.Index) []string {
 	out := make([]string, 0, len(idxs))
 	for _, ix := range idxs {
-		key := orderedCols(ix.Columns)
+		key := indexColumnsKey(ix)
 		// Covering-index INCLUDE columns are part of the index's identity:
 		// dropping them changes what the index covers. Identifiers, so they
 		// normalize cleanly across dialects.
@@ -358,6 +358,21 @@ func indexKeys(idxs []driver.Index) []string {
 		out = append(out, key)
 	}
 	return out
+}
+
+func indexColumnsKey(ix driver.Index) string {
+	parts := make([]string, len(ix.Columns))
+	for i, c := range ix.Columns {
+		part := strings.ToLower(c)
+		if i < len(ix.ColumnExpressions) && ix.ColumnExpressions[i] {
+			part = "expr:" + part
+		}
+		if i < len(ix.ColumnPrefixLengths) && ix.ColumnPrefixLengths[i] > 0 {
+			part += "(" + strconv.Itoa(ix.ColumnPrefixLengths[i]) + ")"
+		}
+		parts[i] = part
+	}
+	return strings.Join(parts, ",")
 }
 
 // targetSupportsVirtualComputed reports whether the dialect can represent both

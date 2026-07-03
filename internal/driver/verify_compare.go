@@ -465,16 +465,25 @@ func cmpDefaultClass(src, tgt Column, srcDialect, tgtDialect string) *ColumnDelt
 	if src.IsIdentity || tgt.IsIdentity {
 		return nil
 	}
-	srcClass := defaultExpressionClassForColumn(src.DefaultExpression, src, srcDialect)
-	tgtClass := defaultExpressionClassForColumn(tgt.DefaultExpression, tgt, tgtDialect)
+	srcExpr := defaultExpressionForClass(src)
+	tgtExpr := defaultExpressionForClass(tgt)
+	srcClass := defaultExpressionClassForColumn(srcExpr, src, srcDialect)
+	tgtClass := defaultExpressionClassForColumn(tgtExpr, tgt, tgtDialect)
 	if srcClass == tgtClass || structuredEmptyDefaultEquivalent(srcClass, tgtClass, src, tgt, srcDialect, tgtDialect) {
 		return nil
 	}
 	return &ColumnDelta{
 		Column: src.Name, Criterion: "default",
-		SourceVal: fmt.Sprintf("%s (%q)", srcClass, src.DefaultExpression),
-		TargetVal: fmt.Sprintf("%s (%q)", tgtClass, tgt.DefaultExpression),
+		SourceVal: fmt.Sprintf("%s (%q)", srcClass, srcExpr),
+		TargetVal: fmt.Sprintf("%s (%q)", tgtClass, tgtExpr),
 	}
+}
+
+func defaultExpressionForClass(col Column) string {
+	if ColumnHasDefault(col) && strings.TrimSpace(col.DefaultExpression) == "" {
+		return "'" + strings.ReplaceAll(col.DefaultExpression, "'", "''") + "'"
+	}
+	return col.DefaultExpression
 }
 
 func defaultExpressionClassForColumn(expr string, col Column, dialect string) string {

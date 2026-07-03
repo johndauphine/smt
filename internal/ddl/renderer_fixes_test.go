@@ -139,6 +139,50 @@ func TestColumnDefault_MySQLExpressionForm(t *testing.T) {
 	}
 }
 
+func TestColumnDefault_EmptyStringDefaultPresence(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	cases := []struct {
+		col  driver.Column
+		want string
+	}{
+		{driver.Column{Name: "status", DataType: "varchar", MaxLength: 10, HasDefault: true}, "''"},
+		{driver.Column{Name: "status", DataType: "varchar", MaxLength: 10, DefaultExpression: " ", HasDefault: true}, "' '"},
+		{driver.Column{Name: "note", DataType: "text", HasDefault: true}, "('')"},
+	}
+	for _, tc := range cases {
+		got, err := r.ColumnDefault(tc.col)
+		if err != nil {
+			t.Fatalf("ColumnDefault(%#v): %v", tc.col, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ColumnDefault(%#v) = %q, want %q", tc.col, got, tc.want)
+		}
+	}
+}
+
+func TestCreateIndexDDL_MySQLPrefixAndFunctionalParts(t *testing.T) {
+	r, err := NewRenderer("mysql", "crm", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	got, err := r.CreateIndexDDL(&driver.Table{Name: "docs"}, &driver.Index{
+		Name:                "idx_docs_body_name",
+		Columns:             []string{"body", "lower(`name`)"},
+		ColumnPrefixLengths: []int{100, 0},
+		ColumnExpressions:   []bool{false, true},
+	})
+	if err != nil {
+		t.Fatalf("CreateIndexDDL: %v", err)
+	}
+	want := "CREATE INDEX `idx_docs_body_name` ON `crm`.`docs` (`body`(100), (lower(`name`)))"
+	if got != want {
+		t.Fatalf("CreateIndexDDL = %q, want %q", got, want)
+	}
+}
+
 // #89 — lengths above the target's maximum degrade to the unbounded form
 // instead of DDL the target rejects.
 func TestColumnType_LengthClamping(t *testing.T) {

@@ -16,6 +16,21 @@ func table(name string, cols ...driver.Column) driver.Table {
 	return driver.Table{Schema: "dbo", Name: name, Columns: cols}
 }
 
+func TestColumnsEqualDefaultPresenceDistinguishesEmptyDefault(t *testing.T) {
+	noDefault := driver.Column{Name: "status", DataType: "varchar", MaxLength: 10}
+	emptyDefault := noDefault
+	emptyDefault.HasDefault = true
+	if columnsEqual(noDefault, emptyDefault) {
+		t.Fatal("column with no default compared equal to DEFAULT ''")
+	}
+
+	emptyDefaultAgain := noDefault
+	emptyDefaultAgain.HasDefault = true
+	if !columnsEqual(emptyDefault, emptyDefaultAgain) {
+		t.Fatal("matching DEFAULT '' metadata should compare equal")
+	}
+}
+
 func TestCompute_NoChanges(t *testing.T) {
 	prev := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}
 	curr := Snapshot{Tables: []driver.Table{table("Users", col("Id", "int", false))}}

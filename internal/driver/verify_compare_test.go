@@ -284,6 +284,24 @@ func TestDefaultExpressionClassForColumn(t *testing.T) {
 	}
 }
 
+func TestCompareColumns_EmptyStringDefaultPresence(t *testing.T) {
+	src := []Column{{Name: "status", DataType: "varchar", MaxLength: 10, HasDefault: true}}
+	noDefault := []Column{{Name: "status", DataType: "varchar", MaxLength: 10}}
+	if deltas := CompareColumns(src, noDefault, "mysql", "mysql"); !hasCriterion(deltas, "default") {
+		t.Fatalf("dropped DEFAULT '' should be a default delta, got %v", deltas)
+	}
+
+	renderedEmpty := []Column{{Name: "status", DataType: "varchar", MaxLength: 10, DefaultExpression: "''"}}
+	if deltas := CompareColumns(src, renderedEmpty, "mysql", "mysql"); hasCriterion(deltas, "default") {
+		t.Fatalf("DEFAULT '' should match rendered empty-string literal, got %v", deltas)
+	}
+
+	blank := []Column{{Name: "status", DataType: "varchar", MaxLength: 10, DefaultExpression: " ", HasDefault: true}}
+	if deltas := CompareColumns(blank, renderedEmpty, "mysql", "mysql"); !hasCriterion(deltas, "default") {
+		t.Fatalf("DEFAULT ' ' must not compare equal to DEFAULT '', got %v", deltas)
+	}
+}
+
 func TestCompareColumns_DefaultClassColumnAware(t *testing.T) {
 	cases := []struct {
 		name       string

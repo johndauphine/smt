@@ -315,7 +315,7 @@ func (r deterministicRenderer) renderTableDiff(plan *Plan, td TableDiff) error {
 		}
 		risk := RiskSafe
 		notes := ""
-		if !c.IsNullable && strings.TrimSpace(c.DefaultExpression) == "" && !c.IsIdentity {
+		if !c.IsNullable && !driver.ColumnHasDefault(c) && !c.IsIdentity {
 			risk = RiskBlocking
 			notes = "adding a NOT NULL column without a default may fail or require a table rewrite on non-empty tables"
 		}
@@ -378,17 +378,17 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 		return err
 	}
 
-	oldDefault := strings.TrimSpace(cc.Old.DefaultExpression)
-	newDefault := strings.TrimSpace(cc.New.DefaultExpression)
+	oldHasDefault := driver.ColumnHasDefault(cc.Old)
+	newHasDefault := driver.ColumnHasDefault(cc.New)
 	typeChanged := oldType != newType
-	defaultChanged := oldDefault != newDefault
+	defaultChanged := !driver.ColumnDefaultsEqual(cc.Old, cc.New)
 	nullabilityChanged := cc.Old.IsNullable != cc.New.IsNullable
 	if len(cc.Criteria) > 0 {
 		typeChanged = hasAnyCriterion(cc.Criteria, "type", "max_length", "precision", "scale", "tz_class")
 		defaultChanged = hasAnyCriterion(cc.Criteria, "default")
 		nullabilityChanged = hasAnyCriterion(cc.Criteria, "nullability")
 	}
-	preDropDefault := oldDefault != "" && (typeChanged || (r.target == "mssql" && defaultChanged))
+	preDropDefault := oldHasDefault && (typeChanged || (r.target == "mssql" && defaultChanged))
 
 	if preDropDefault {
 		plan.Statements = append(plan.Statements, Statement{
@@ -434,7 +434,7 @@ func (r deterministicRenderer) renderColumnChange(plan *Plan, tableName string, 
 	}
 
 	if defaultChanged || preDropDefault {
-		if newDefault == "" {
+		if !newHasDefault {
 			if !preDropDefault {
 				plan.Statements = append(plan.Statements, Statement{
 					Table:       tableName,
