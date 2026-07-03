@@ -34,6 +34,9 @@ const (
 
 	// IOError - file I/O errors (recoverable)
 	IOError = 7
+
+	// DriftDetected - smt drift found schema drift (domain result, not an error)
+	DriftDetected = 8
 )
 
 // ExitError wraps an error with an exit code.
@@ -75,6 +78,13 @@ func FromError(err error) int {
 	}
 
 	errStr := strings.ToLower(err.Error())
+
+	// Apply statement failures include SQL text that can contain misleading
+	// classifier keywords ("state", "create table"). Keep the failure class
+	// tied to the apply operation rather than the statement body.
+	if strings.Contains(errStr, "statement ") && strings.Contains(errStr, " failed:") {
+		return TransferError
+	}
 
 	// IO errors - check early for file-related errors (exit code 7)
 	if containsAny(errStr, []string{
@@ -200,6 +210,8 @@ func Description(code int) string {
 		return "state error"
 	case IOError:
 		return "I/O error (recoverable)"
+	case DriftDetected:
+		return "drift detected"
 	default:
 		return "unknown error"
 	}

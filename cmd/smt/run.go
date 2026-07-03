@@ -12,6 +12,7 @@ import (
 
 	"smt/internal/config"
 	"smt/internal/ddl"
+	"smt/internal/exitcodes"
 	"smt/internal/orchestrator"
 )
 
@@ -223,7 +224,7 @@ func withSignalCancel(parent context.Context, timeout time.Duration) (context.Co
 			cancel()
 			time.AfterFunc(timeout, func() {
 				fmt.Fprintln(os.Stderr, "Shutdown timeout reached; forcing exit.")
-				os.Exit(int(syscall.SIGTERM))
+				os.Exit(exitcodes.Cancelled)
 			})
 		case <-ctx.Done():
 		}

@@ -62,9 +62,9 @@ func TestDocumentedCommandExitCodes(t *testing.T) {
 	}
 
 	t.Run("drift detected", func(t *testing.T) {
-		err := cli.Exit("", 3)
-		if got := exitCodeForError(err); got != 3 {
-			t.Fatalf("drift exit code = %d, want 3", got)
+		err := cli.Exit("", exitcodes.DriftDetected)
+		if got := exitCodeForError(err); got != exitcodes.DriftDetected {
+			t.Fatalf("drift exit code = %d, want %d", got, exitcodes.DriftDetected)
 		}
 	})
 }

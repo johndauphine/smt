@@ -30,6 +30,7 @@ import (
 	"smt/internal/checkpoint"
 	"smt/internal/config"
 	"smt/internal/driver"
+	"smt/internal/exitcodes"
 	"smt/internal/logging"
 	"smt/internal/orchestrator"
 	"smt/internal/pool"
@@ -531,7 +532,10 @@ func applyPlan(ctx context.Context, tgt sqlExecutor, plan schemadiff.Plan) error
 	for i, s := range plan.Statements {
 		logging.Info("[%d/%d] %s (risk=%s)", i+1, len(plan.Statements), s.Description, s.Risk)
 		if _, err := tgt.ExecRaw(ctx, s.SQL); err != nil {
-			return fmt.Errorf("statement %d (%s) failed: %w\nSQL: %s", i+1, s.Description, err, s.SQL)
+			return exitcodes.NewExitError(
+				fmt.Errorf("statement %d (%s) failed: %w\nSQL: %s", i+1, s.Description, err, s.SQL),
+				exitcodes.TransferError,
+			)
 		}
 	}
 	return nil

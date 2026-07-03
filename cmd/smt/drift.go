@@ -7,7 +7,7 @@ package main
 // equivalence is handled by the deterministic comparator, so an mssql
 // varchar(20) does not "drift" against a pg character varying(20).
 //
-// Nothing is modified. Exit status: 0 = in sync, 3 = drift detected, non-zero
+// Nothing is modified. Exit status: 0 = in sync, 8 = drift detected, non-zero
 // (cli error) = connection/introspection failure. Useful as a CI gate.
 
 import (
@@ -21,6 +21,7 @@ import (
 
 	"smt/internal/config"
 	"smt/internal/driver"
+	"smt/internal/exitcodes"
 	"smt/internal/logging"
 	"smt/internal/orchestrator"
 	"smt/internal/pool"
@@ -136,7 +137,7 @@ func runDrift(c *cli.Context) error {
 		return nil
 	}
 	// cli.Exit sets the process exit code without printing a Go error trace.
-	return cli.Exit("", 3)
+	return cli.Exit("", exitcodes.DriftDetected)
 }
 
 // targetAsSource adapts the target connection into a SourceConfig so the same

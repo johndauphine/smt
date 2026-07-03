@@ -150,12 +150,13 @@ change in any 1.x release.
 | `0` | Success. |
 | `1` | Configuration, YAML, JSON, or command-line contract error. |
 | `2` | Connection, authentication, pool, DNS, or network error. |
-| `3` | Schema operation failed. For `smt drift`, `3` specifically means drift was detected. |
+| `3` | Schema operation failed. |
 | `4` | Validation error. |
 | `5` | Cancelled by signal or context cancellation. |
 | `6` | State DB, checkpoint, profile, or run-history error. |
 | `7` | File I/O error. |
+| `8` | Drift detected by `smt drift` (domain result, not an execution error). |
 
 `smt drift` is the only stable command that uses a non-error status for a
-domain result: `0` means no drift, `3` means drift detected. Other commands map
+domain result: `0` means no drift, `8` means drift detected. Other commands map
 errors through the shared exit-code classifier above.
