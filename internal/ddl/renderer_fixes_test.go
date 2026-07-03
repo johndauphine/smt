@@ -255,9 +255,14 @@ func TestColumnType_LengthClamping(t *testing.T) {
 	}{
 		{mssql, driver.Column{DataType: "varchar", MaxLength: 10000}, "VARCHAR(MAX)"},
 		{mssql, driver.Column{DataType: "varchar", MaxLength: 8000}, "VARCHAR(8000)"},
-		{mssql, driver.Column{DataType: "nvarchar", MaxLength: 5000}, "NVARCHAR(MAX)"},
+		// #224: a bounded unicode length above NVARCHAR's 4000-char cap keeps the
+		// bound as length-preserving codepage VARCHAR/CHAR (with a MappingWarning)
+		// rather than silently widening to NVARCHAR(MAX). A genuinely unbounded
+		// nvarchar(max) source (MaxLength -1) still renders NVARCHAR(MAX).
+		{mssql, driver.Column{DataType: "nvarchar", MaxLength: 5000}, "VARCHAR(5000)"},
+		{mssql, driver.Column{DataType: "nvarchar", MaxLength: -1}, "NVARCHAR(MAX)"},
 		{mssql, driver.Column{DataType: "char", MaxLength: 9000}, "VARCHAR(MAX)"},
-		{mssql, driver.Column{DataType: "nchar", MaxLength: 5000}, "NVARCHAR(MAX)"},
+		{mssql, driver.Column{DataType: "nchar", MaxLength: 5000}, "CHAR(5000)"},
 		{mssql, driver.Column{DataType: "varbinary", MaxLength: 9000}, "VARBINARY(MAX)"},
 		{mysql, driver.Column{DataType: "varchar", MaxLength: 20000}, "MEDIUMTEXT"},
 		{mysql, driver.Column{DataType: "varchar", MaxLength: 16383}, "VARCHAR(16383)"},

@@ -61,7 +61,11 @@ import (
 // log unknown-type warn fallbacks (#218).
 // "15": Expression parsing folds nested numeric unary minus instead of
 // rendering double-minus SQL that can become a line comment (#221).
-const RendererVersion = "15"
+// "16": pg/mysql varchar/char map to MSSQL NVARCHAR/NCHAR up to 4000 chars
+// (unicode + exact length); above 4000 they fall back to length-preserving
+// codepage VARCHAR/CHAR rather than NVARCHAR(MAX), so exact max_length is
+// never sacrificed for unicode (#224).
+const RendererVersion = "16"
 
 type Renderer struct {
 	target            string

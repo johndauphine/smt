@@ -220,13 +220,27 @@ func fromCanonicalMSSQL(ct CanonicalType, opts RenderOpts) (string, error) {
 		return "FLOAT", nil
 	case Varchar:
 		if ct.National {
+			// Unicode intent (pg/mysql source, or MSSQL nvarchar). NVARCHAR keeps
+			// exact character length AND unicode, but caps at 4000 chars inline.
+			// Above 4000, fall back to length-preserving codepage VARCHAR rather
+			// than NVARCHAR(MAX): exact max_length (criterion 1) outranks unicode
+			// representability, which NVARCHAR cannot deliver bounded here (#224).
+			if ct.Length > 4000 {
+				return sizedCapped("VARCHAR", ct.Length, 8000), nil
+			}
 			return sizedCapped("NVARCHAR", ct.Length, 4000), nil
 		}
 		return sizedCapped("VARCHAR", ct.Length, 8000), nil
 	case Char:
 		if ct.National {
+			// Same length gate as Varchar: NCHAR preserves unicode+length up to
+			// 4000; above that, length-preserving codepage CHAR (fixed CHAR maxes
+			// at 8000; wider still falls to VARCHAR(MAX)).
+			if ct.Length > 8000 {
+				return "VARCHAR(MAX)", nil
+			}
 			if ct.Length > 4000 {
-				return "NVARCHAR(MAX)", nil
+				return sized("CHAR", ct.Length, "1"), nil
 			}
 			return sized("NCHAR", ct.Length, "1"), nil
 		}
@@ -746,6 +760,10 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 	case Text, Blob:
 		if target != "mysql" && mysqlLOBCapacity(ct.Length) {
 			add("MySQL LOB capacity tier is not represented on target; rendered as " + rendered)
+		}
+	case Varchar, Char:
+		if target == "mssql" && ct.National && ct.Length > 4000 {
+			add("unicode source exceeds SQL Server NVARCHAR/NCHAR 4000-char limit; rendered as length-preserving codepage " + rendered + " (characters outside the target collation's code page may be lost)")
 		}
 	case Spatial:
 		if target == "postgres" {
