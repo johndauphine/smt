@@ -632,7 +632,11 @@ func (p *parser) parseUnary() Node {
 			return nil
 		}
 		if lit, ok := x.(Lit); ok && lit.Kind == LitNumber {
-			lit.Num = "-" + lit.Num
+			if strings.HasPrefix(lit.Num, "-") {
+				lit.Num = strings.TrimPrefix(lit.Num, "-")
+			} else {
+				lit.Num = "-" + lit.Num
+			}
 			return lit
 		}
 		return Unary{Op: "-", X: x}

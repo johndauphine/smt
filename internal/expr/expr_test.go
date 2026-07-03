@@ -172,6 +172,19 @@ func TestEqual_AcceptanceCriteria(t *testing.T) {
 			t.Errorf("expected %q ≢ %q", p[0], p[1])
 		}
 	}
+
+	checkEq := func(a, b string) bool {
+		return Equal(ParseCheck(a, ""), ParseCheck(b, ""))
+	}
+	if !checkEq("status IN ('a','b')", "status IN ('b','a')") {
+		t.Error("IN-list membership order must not affect equality")
+	}
+	if !checkEq("status IN ('a','a','b')", "status IN ('b','a')") {
+		t.Error("duplicate IN-list members must not affect equality")
+	}
+	if checkEq("status IN ('a','b')", "status IN ('a','c')") {
+		t.Error("different IN-list members must not compare equal")
+	}
 }
 
 // TestClassLabel_LegacyVocabulary pins the class-label vocabulary carried
@@ -363,6 +376,19 @@ func TestRender_BareDefaultOnNonTextualColumnStaysQuoted(t *testing.T) {
 	}
 	if got != "'abc'" {
 		t.Fatalf("bare default rendered as %q, want quoted string", got)
+	}
+}
+
+func TestParseDefault_DoubleUnaryMinusDoesNotRenderLineComment(t *testing.T) {
+	got, err := Render(ParseDefault("- -1", Postgres), defaultOpts(Postgres))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(got, "--") {
+		t.Fatalf("Render(- -1) = %q, must not emit SQL line-comment token", got)
+	}
+	if got != "1" {
+		t.Fatalf("Render(- -1) = %q, want folded positive literal", got)
 	}
 }
 

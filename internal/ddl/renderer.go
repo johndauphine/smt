@@ -59,7 +59,9 @@ import (
 // "14": Type-IR fidelity fixes preserve fixed binary widths, map UTF-8
 // source varchar/char to MSSQL national types, warn on timetz to MSSQL, and
 // log unknown-type warn fallbacks (#218).
-const RendererVersion = "14"
+// "15": Expression parsing folds nested numeric unary minus instead of
+// rendering double-minus SQL that can become a line comment (#221).
+const RendererVersion = "15"
 
 type Renderer struct {
 	target            string
