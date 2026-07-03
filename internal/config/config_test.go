@@ -111,6 +111,24 @@ func disableSecretsForTest(t *testing.T) {
 	t.Cleanup(secrets.Reset)
 }
 
+func configureSlackWebhookSecretsForTest(t *testing.T) string {
+	t.Helper()
+	webhook := "https://hooks.slack.com/services/SECRET"
+	secretsPath := filepath.Join(t.TempDir(), "secrets.yaml")
+	secretsYAML := `
+notifications:
+  slack:
+    webhook_url: "https://hooks.slack.com/services/SECRET"
+`
+	if err := os.WriteFile(secretsPath, []byte(secretsYAML), 0600); err != nil {
+		t.Fatalf("write secrets: %v", err)
+	}
+	secrets.Reset()
+	t.Setenv(secrets.SecretsFileEnvVar, secretsPath)
+	t.Cleanup(secrets.Reset)
+	return webhook
+}
+
 func TestPostgresDSNURLEncoding(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1341,6 +1359,46 @@ migration:
 	}
 }
 
+func TestSlackExplicitDisableWinsOverSecretsWebhook(t *testing.T) {
+	configureSlackWebhookSecretsForTest(t)
+
+	configYAML := minimalConfigYAML() + `
+slack:
+  enabled: false
+`
+	cfg, err := LoadBytes([]byte(configYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes() unexpected error: %v", err)
+	}
+	if cfg.Slack == nil {
+		t.Fatal("Slack = nil, want explicit disabled config")
+	}
+	if cfg.Slack.Enabled {
+		t.Fatal("Slack.Enabled = true, want explicit false")
+	}
+	if cfg.Slack.WebhookURL != "" {
+		t.Fatalf("Slack.WebhookURL = %q, want no secrets webhook injection when disabled", cfg.Slack.WebhookURL)
+	}
+}
+
+func TestSlackSecretsWebhookAutoEnablesWhenOmitted(t *testing.T) {
+	webhook := configureSlackWebhookSecretsForTest(t)
+
+	cfg, err := LoadBytes([]byte(minimalConfigYAML()))
+	if err != nil {
+		t.Fatalf("LoadBytes() unexpected error: %v", err)
+	}
+	if cfg.Slack == nil {
+		t.Fatal("Slack = nil, want secrets-backed config")
+	}
+	if !cfg.Slack.Enabled {
+		t.Fatal("Slack.Enabled = false, want secrets webhook to auto-enable Slack")
+	}
+	if cfg.Slack.WebhookURL != webhook {
+		t.Fatalf("Slack.WebhookURL = %q, want %q", cfg.Slack.WebhookURL, webhook)
+	}
+}
+
 func TestRequireTargetConnection(t *testing.T) {
 	cfg := &Config{
 		Source: SourceConfig{
@@ -1387,6 +1445,10 @@ func TestSanitizedRedactsPasswords(t *testing.T) {
 		Migration: MigrationConfig{
 			TargetMode: "drop_recreate",
 		},
+		Slack: &SlackConfig{
+			WebhookURL: "https://hooks.slack.com/services/SECRET",
+			Enabled:    true,
+		},
 	}
 
 	sanitized := cfg.Sanitized()
@@ -1398,10 +1460,22 @@ func TestSanitizedRedactsPasswords(t *testing.T) {
 	if sanitized.Target.Password != "[REDACTED]" {
 		t.Errorf("Target password not redacted: %s", sanitized.Target.Password)
 	}
+	if sanitized.Slack == nil {
+		t.Fatal("Sanitized Slack = nil, want redacted Slack config")
+	}
+	if sanitized.Slack.WebhookURL != "[REDACTED]" {
+		t.Errorf("Slack webhook not redacted: %s", sanitized.Slack.WebhookURL)
+	}
 
 	// Verify original is unchanged
 	if cfg.Source.Password == "[REDACTED]" {
 		t.Error("Original source password was modified")
+	}
+	if cfg.Slack.WebhookURL == "[REDACTED]" {
+		t.Error("Original Slack webhook was modified")
+	}
+	if sanitized.Slack == cfg.Slack {
+		t.Error("Sanitized Slack aliases original Slack config")
 	}
 }
 

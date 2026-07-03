@@ -163,6 +163,10 @@ type Config struct {
 	// Tracks migration values supplied by global defaults. Hard-coded defaults
 	// should not overwrite these, especially when a global default is false.
 	migrationDefaultKeys map[string]bool
+
+	// Tracks slack keys present in the loaded YAML so an explicit enabled:false
+	// can override a webhook supplied by the global secrets file.
+	slackKeys map[string]bool
 }
 
 // SlackConfig holds Slack notification settings.
@@ -337,6 +341,7 @@ func LoadBytes(data []byte) (*Config, error) {
 
 	var cfg Config
 	cfg.migrationKeys = migrationKeysFromYAML([]byte(expanded))
+	cfg.slackKeys = slackKeysFromYAML([]byte(expanded))
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
@@ -370,6 +375,24 @@ func migrationKeysFromYAML(data []byte) map[string]bool {
 
 func (c *Config) hasMigrationKey(key string) bool {
 	return c.migrationKeys != nil && c.migrationKeys[key]
+}
+
+func slackKeysFromYAML(data []byte) map[string]bool {
+	var raw struct {
+		Slack map[string]any `yaml:"slack"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil || len(raw.Slack) == 0 {
+		return nil
+	}
+	keys := make(map[string]bool, len(raw.Slack))
+	for key := range raw.Slack {
+		keys[key] = true
+	}
+	return keys
+}
+
+func (c *Config) hasSlackKey(key string) bool {
+	return c.slackKeys != nil && c.slackKeys[key]
 }
 
 func (c *Config) markMigrationDefault(key string) {
@@ -746,9 +769,12 @@ func (c *Config) applyDefaults() error {
 		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
 	}
 
-	// Slack notification: auto-enable when webhook URL is configured
-	// Load webhook from secrets if not provided in config
-	if c.Slack == nil || c.Slack.WebhookURL == "" {
+	slackExplicitlyDisabled := c.Slack != nil && c.hasSlackKey("enabled") && !c.Slack.Enabled
+
+	// Slack notification: auto-enable when webhook URL is configured.
+	// Load webhook from secrets if not provided in config, unless the config
+	// explicitly disabled Slack.
+	if !slackExplicitlyDisabled && (c.Slack == nil || c.Slack.WebhookURL == "") {
 		secretsCfg, err := secrets.Load()
 		if err != nil {
 			// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
@@ -763,7 +789,7 @@ func (c *Config) applyDefaults() error {
 		}
 	}
 	// Auto-enable Slack notifications when webhook URL is available
-	if c.Slack != nil && c.Slack.WebhookURL != "" && !c.Slack.Enabled {
+	if c.Slack != nil && c.Slack.WebhookURL != "" && !c.Slack.Enabled && !slackExplicitlyDisabled {
 		c.Slack.Enabled = true
 	}
 
@@ -1054,7 +1080,13 @@ func (c *Config) Sanitized() *Config {
 	// Redact target credentials
 	sanitized.Target.Password = "[REDACTED]"
 
-	// Note: AI and Slack credentials are in global secrets file, not migration config
+	if c.Slack != nil {
+		slack := *c.Slack
+		if slack.WebhookURL != "" {
+			slack.WebhookURL = "[REDACTED]"
+		}
+		sanitized.Slack = &slack
+	}
 
 	return &sanitized
 }

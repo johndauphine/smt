@@ -161,6 +161,9 @@ func newNotifier(cfg *config.Config) notify.Provider {
 			Enabled:    cfg.Slack.Enabled,
 		})
 	}
+	if cfg.Slack != nil {
+		return notify.New(nil)
+	}
 	return notify.NewFromSecrets()
 }
 
