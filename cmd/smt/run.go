@@ -205,9 +205,9 @@ func runHistory(c *cli.Context) error {
 	defer orch.Close()
 
 	if id := c.String("run"); id != "" {
-		return orch.ShowRunDetails(id)
+		return orch.ShowRunDetails(os.Stdout, id)
 	}
-	return orch.ShowHistory()
+	return orch.ShowHistory(os.Stdout)
 }
 
 // withSignalCancel returns a derived context that is cancelled when the
