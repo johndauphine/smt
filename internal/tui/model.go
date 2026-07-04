@@ -62,8 +62,9 @@ type Model struct {
 	height    int
 
 	// Git integration
-	gitInfo GitInfo
-	cwd     string
+	gitInfo         GitInfo
+	gitInfoInFlight bool // a gitInfoCmd probe is running; don't spawn another
+	cwd             string
 
 	// Single content buffer with memory management
 	content      *strings.Builder
@@ -146,6 +147,16 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second*5, func(t time.Time) tea.Msg {
 		return TickMsg(t)
 	})
+}
+
+// gitInfoMsg carries an async git-probe result back into Update (#188).
+type gitInfoMsg GitInfo
+
+// gitInfoCmd runs GetGitInfo (which shells out to git) off the event loop.
+func gitInfoCmd() tea.Cmd {
+	return func() tea.Msg {
+		return gitInfoMsg(GetGitInfo())
+	}
 }
 
 // InitialModel returns the initial model state
@@ -464,8 +475,21 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 		}
 
 	case TickMsg:
-		m.gitInfo = GetGitInfo()
-		return m, tickCmd()
+		// GetGitInfo shells out to git; never run it inside Update() — a slow
+		// `git status` (large repo, WSL /mnt) would block the whole event loop
+		// every tick. Probe asynchronously via a tea.Cmd, at most one in flight
+		// so slow probes can't pile up (#188).
+		cmds := []tea.Cmd{tickCmd()}
+		if !m.gitInfoInFlight {
+			m.gitInfoInFlight = true
+			cmds = append(cmds, gitInfoCmd())
+		}
+		return m, tea.Batch(cmds...)
+
+	case gitInfoMsg:
+		m.gitInfo = GitInfo(msg)
+		m.gitInfoInFlight = false
+		return m, nil
 	}
 
 	m.textInput, tiCmd = m.textInput.Update(msg)
