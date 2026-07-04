@@ -304,6 +304,19 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 			return m, tea.Quit
 
 		case tea.KeyEsc:
+			// Mirror Ctrl+C: never quit out from under a running schema
+			// operation. Cancelling it via the migration context lets the
+			// orchestrator unwind (close connections, mark the run) instead
+			// of the process dying mid-DDL. Only quit when idle.
+			if m.migrationStatus == "running" {
+				if m.migrationCancel != nil {
+					m.migrationCancel()
+					m.appendOutput(styleSystemOutput.Render("Cancelling migration... please wait") + "\n")
+				} else {
+					m.appendOutput(styleSystemOutput.Render("Schema operation is starting; cancel will be available shortly.") + "\n")
+				}
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case tea.KeyEnter:
