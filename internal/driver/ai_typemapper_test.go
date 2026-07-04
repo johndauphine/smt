@@ -696,6 +696,30 @@ func TestSanitizeErrorResponse(t *testing.T) {
 	}
 }
 
+// TestSanitizeErrorResponse_NonASCII guards #186: the redactor must fold case
+// on a byte-length-preserving copy. A rune whose Unicode lowercase form has a
+// different byte length (İ U+0130 → i̇, 2 bytes → 3) before an embedded key
+// used to shift the match offset past the original string and panic (or redact
+// the wrong bytes).
+func TestSanitizeErrorResponse_NonASCII(t *testing.T) {
+	inputs := []string{
+		"İİİ error: sk-ant-api03-secret",        // length-changing runes before the key
+		"prefix İ İ İ sk-ant-api03-leak suffix", // interleaved
+		"Ⱥ Ⱥ Ⱥ token-abcdefghijklmnop",          // U+023A, another length-changer
+	}
+	for _, in := range inputs {
+		// Must not panic, and must still redact the key.
+		result := sanitizeErrorResponse([]byte(in), 200)
+		if strings.Contains(result, "sk-ant-api03") || strings.Contains(result, "api03") {
+			t.Errorf("sanitizeErrorResponse(%q) = %q, key not redacted", in, result)
+		}
+	}
+	// Case-insensitive match still works after ASCII-only folding.
+	if !strings.Contains(sanitizeErrorResponse([]byte("SK-ANT-API03-SECRET"), 200), "[REDACTED]") {
+		t.Error("uppercase key pattern should still be redacted")
+	}
+}
+
 func TestAITypeMapper_BuildPromptExcludesSampleValues(t *testing.T) {
 	// Sample values are no longer included in prompts (privacy improvement).
 	// This test verifies that even when SampleValues are provided,
