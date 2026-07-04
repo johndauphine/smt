@@ -35,6 +35,10 @@ func TestUpdate_EscQuitsWhenIdle(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("Esc while idle should return a quit command")
 	}
+	// Confirm it is specifically tea.Quit: invoking it yields a tea.QuitMsg.
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("Esc while idle returned %T, want tea.QuitMsg (tea.Quit)", cmd())
+	}
 }
 
 func TestHandleCommand_SchemaOperationMarksRunningSynchronously(t *testing.T) {
