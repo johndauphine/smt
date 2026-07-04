@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -921,17 +922,17 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 			}
 			defer orch.Close()
 
-			var output string
+			var buf bytes.Buffer
 			if runID != "" {
-				output, err = CaptureToString(func() error { return orch.ShowRunDetails(runID) })
+				err = orch.ShowRunDetails(&buf, runID)
 			} else {
-				output, err = CaptureToString(orch.ShowHistory)
+				err = orch.ShowHistory(&buf)
 			}
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error showing history: %v\n", err)))
 				return
 			}
-			p.Send(BoxedOutputMsg(output))
+			p.Send(BoxedOutputMsg(buf.String()))
 		}()
 
 		return nil

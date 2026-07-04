@@ -5,52 +5,53 @@ package orchestrator
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"smt/internal/checkpoint"
 )
 
-// ShowHistory prints all known runs (most recent first) in a small
+// ShowHistory writes all known runs (most recent first) to w in a small
 // fixed-width table.
-func (o *Orchestrator) ShowHistory() error {
+func (o *Orchestrator) ShowHistory(w io.Writer) error {
 	runs, err := o.state.GetAllRuns()
 	if err != nil {
 		return err
 	}
 	if len(runs) == 0 {
-		fmt.Println("No runs recorded yet.")
+		fmt.Fprintln(w, "No runs recorded yet.")
 		return nil
 	}
 
-	fmt.Printf("%-36s %-10s %-19s %-19s %s\n", "RUN ID", "STATUS", "STARTED", "ENDED", "PHASE")
-	fmt.Println(strings.Repeat("-", 105))
+	fmt.Fprintf(w, "%-36s %-10s %-19s %-19s %s\n", "RUN ID", "STATUS", "STARTED", "ENDED", "PHASE")
+	fmt.Fprintln(w, strings.Repeat("-", 105))
 	for _, r := range runs {
-		fmt.Printf("%-36s %-10s %-19s %-19s %s\n",
+		fmt.Fprintf(w, "%-36s %-10s %-19s %-19s %s\n",
 			r.ID, r.Status, fmtTime(&r.StartedAt), fmtTime(r.CompletedAt), r.Phase)
 	}
 	return nil
 }
 
-// ShowRunDetails prints one run's record plus its task list.
-func (o *Orchestrator) ShowRunDetails(runID string) error {
+// ShowRunDetails writes one run's record plus its task list to w.
+func (o *Orchestrator) ShowRunDetails(w io.Writer, runID string) error {
 	r, err := o.state.GetRunByID(runID)
 	if err != nil {
 		return err
 	}
 	if r == nil {
-		fmt.Printf("No run with id %s\n", runID)
+		fmt.Fprintf(w, "No run with id %s\n", runID)
 		return nil
 	}
-	fmt.Printf("Run:        %s\n", r.ID)
-	fmt.Printf("Status:     %s\n", r.Status)
-	fmt.Printf("Phase:      %s\n", r.Phase)
-	fmt.Printf("Source:     %s\n", r.SourceSchema)
-	fmt.Printf("Target:     %s\n", r.TargetSchema)
-	fmt.Printf("Started:    %s\n", fmtTime(&r.StartedAt))
-	fmt.Printf("Ended:      %s\n", fmtTime(r.CompletedAt))
+	fmt.Fprintf(w, "Run:        %s\n", r.ID)
+	fmt.Fprintf(w, "Status:     %s\n", r.Status)
+	fmt.Fprintf(w, "Phase:      %s\n", r.Phase)
+	fmt.Fprintf(w, "Source:     %s\n", r.SourceSchema)
+	fmt.Fprintf(w, "Target:     %s\n", r.TargetSchema)
+	fmt.Fprintf(w, "Started:    %s\n", fmtTime(&r.StartedAt))
+	fmt.Fprintf(w, "Ended:      %s\n", fmtTime(r.CompletedAt))
 	if r.Error != "" {
-		fmt.Printf("Error:      %s\n", r.Error)
+		fmt.Fprintf(w, "Error:      %s\n", r.Error)
 	}
 
 	tasks, err := o.state.GetTasksWithProgress(r.ID)
@@ -60,9 +61,9 @@ func (o *Orchestrator) ShowRunDetails(runID string) error {
 	if len(tasks) == 0 {
 		return nil
 	}
-	fmt.Println("\nTasks:")
+	fmt.Fprintln(w, "\nTasks:")
 	for _, t := range tasks {
-		fmt.Printf("  %-30s %s\n", t.TaskKey, t.Status)
+		fmt.Fprintf(w, "  %-30s %s\n", t.TaskKey, t.Status)
 	}
 	return nil
 }

@@ -82,38 +82,3 @@ func SetProgramRef(p *tea.Program) {
 func GetProgramRef() *tea.Program {
 	return programRef
 }
-
-// CaptureToString captures stdout from a function and returns it as a string.
-// Used for commands like /history that print to stdout.
-func CaptureToString(fn func() error) (string, error) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		return "", fmt.Errorf("creating pipe: %w", err)
-	}
-
-	origStdout := os.Stdout
-	os.Stdout = w
-
-	// Run the function
-	fnErr := fn()
-
-	// Restore stdout and close writer
-	w.Close()
-	os.Stdout = origStdout
-
-	// Read captured output
-	var buf []byte
-	readBuf := make([]byte, 1024)
-	for {
-		n, readErr := r.Read(readBuf)
-		if n > 0 {
-			buf = append(buf, readBuf[:n]...)
-		}
-		if readErr != nil {
-			break
-		}
-	}
-	r.Close()
-
-	return string(buf), fnErr
-}
