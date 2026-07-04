@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestHandleCommand_SchemaOperationMarksRunningSynchronously(t *testing.T) {
@@ -35,5 +37,35 @@ func TestHandleCommand_BlocksSecondSchemaOperationWhileStarting(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "already running") {
 		t.Fatalf("output = %q, want already running message", output)
+	}
+}
+
+// Esc during a running schema operation must cancel it (like Ctrl+C), not
+// quit the process out from under the orchestrator. Regression for the
+// DMT #558 pattern (Esc quit mid-run without cancel/cleanup).
+func TestUpdate_EscCancelsRunningOperationInsteadOfQuitting(t *testing.T) {
+	m := InitialModel()
+	cancelled := false
+	m.migrationStatus = "running"
+	m.migrationCancel = func() { cancelled = true }
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if !cancelled {
+		t.Fatal("Esc during a running operation did not invoke migrationCancel")
+	}
+	if cmd != nil {
+		t.Fatal("Esc during a running operation returned a command (expected nil, not tea.Quit)")
+	}
+}
+
+// Esc while idle should still quit the TUI.
+func TestUpdate_EscQuitsWhenIdle(t *testing.T) {
+	m := InitialModel()
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if cmd == nil {
+		t.Fatal("Esc while idle should return a quit command")
 	}
 }
