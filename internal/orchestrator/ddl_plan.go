@@ -73,6 +73,14 @@ func (o *Orchestrator) renderDDLPlan(ctx context.Context, runID string) (schemad
 		return schemadiff.Plan{}, err
 	}
 
+	// Fail closed on identifier collisions before emitting any DDL: on a
+	// PostgreSQL target, two source names that fold to the same identifier
+	// would otherwise fail late (duplicate column) or silently land two
+	// source objects on one target object (#189).
+	if err := driver.CheckIdentifierCollisions(renderer.targetType, o.tables); err != nil {
+		return schemadiff.Plan{}, err
+	}
+
 	plan := schemadiff.Plan{}
 	if ddl, err := renderer.ddlRenderer.CreateSchemaDDL(); err != nil {
 		return schemadiff.Plan{}, err

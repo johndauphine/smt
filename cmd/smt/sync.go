@@ -265,6 +265,12 @@ func runSyncAgainstTarget(c *cli.Context) error {
 		allSourceNorm[strings.ToLower(norm(t.Name))] = true
 	}
 	desired := filterDesiredScope(currTables, cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables)
+	// Fail closed on identifier collisions before rendering any ALTER (#189):
+	// on a PostgreSQL target two source names that fold to the same identifier
+	// would drift the target silently.
+	if err := driver.CheckIdentifierCollisions(targetDialect, desired); err != nil {
+		return err
+	}
 	desired = schemadiff.NormalizeIdentifiers(desired, norm)
 	desired = schemadiff.RetargetSchema(desired, cfg.Target.Schema)
 
@@ -420,6 +426,10 @@ func buildSnapshotSyncPlan(prev, curr schemadiff.Snapshot, cfg *config.Config) (
 	sourceDialect := driver.Canonicalize(cfg.Source.Type)
 	targetDialect := driver.Canonicalize(cfg.Target.Type)
 	norm := func(name string) string { return driver.NormalizeIdentifier(targetDialect, name) }
+	// Fail closed on identifier collisions before rendering any DDL (#189).
+	if err := driver.CheckIdentifierCollisions(targetDialect, curr.Tables); err != nil {
+		return diff, schemadiff.Plan{}, err
+	}
 	rendered := diff.Normalize(norm).WithTargetSchema(cfg.Target.Schema)
 
 	plan, err := schemadiff.RenderDeterministicWithOptions(rendered, schemadiff.RenderOptions{
