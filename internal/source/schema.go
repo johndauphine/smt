@@ -14,9 +14,6 @@ type Table = driver.Table
 // Column is an alias for driver.Column.
 type Column = driver.Column
 
-// Partition is an alias for driver.Partition.
-type Partition = driver.Partition
-
 // Index is an alias for driver.Index.
 type Index = driver.Index
 

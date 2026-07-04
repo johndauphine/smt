@@ -157,8 +157,6 @@ func TestDialect(t *testing.T) {
 		{"QuoteIdentifier", func() string { return dialect.QuoteIdentifier("test") }, `[test]`},
 		{"QualifyTable", func() string { return dialect.QualifyTable("dbo", "users") }, `[dbo].[users]`},
 		{"ParameterPlaceholder", func() string { return dialect.ParameterPlaceholder(1) }, "@p1"},
-		{"TableHint", func() string { return dialect.TableHint(false) }, "WITH (NOLOCK)"},
-		{"TableHintStrict", func() string { return dialect.TableHint(true) }, ""},
 	}
 
 	for _, tt := range tests {
@@ -256,34 +254,5 @@ func TestBuildDSNCredentialsRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(u.User.String(), "+space") {
 		t.Fatalf("userinfo encodes a space as '+': %s", u.User.String())
-	}
-}
-
-func TestIsASCIINumeric(t *testing.T) {
-	tests := []struct {
-		input    []byte
-		expected bool
-	}{
-		{[]byte("123"), true},
-		{[]byte("-45.67"), true},
-		{[]byte("+0.5"), true},
-		{[]byte("1.5E+10"), true},
-		{[]byte("1e-5"), true},
-		{[]byte(".5"), true},
-		{[]byte(""), false},
-		{[]byte("."), false},
-		{[]byte("+-1"), false},
-		{[]byte("1.2.3"), false},
-		{[]byte("abc"), false},
-		{[]byte{0x01, 0x02, 0x03}, false}, // binary data
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.input), func(t *testing.T) {
-			result := isASCIINumeric(tt.input)
-			if result != tt.expected {
-				t.Errorf("isASCIINumeric(%v) = %v, want %v", tt.input, result, tt.expected)
-			}
-		})
 	}
 }
