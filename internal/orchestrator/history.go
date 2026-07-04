@@ -34,7 +34,8 @@ func (o *Orchestrator) ShowHistory(w io.Writer) error {
 	return nil
 }
 
-// ShowRunDetails renders one run's record plus its task list into w.
+// ShowRunDetails renders one run's record (status, phase, schemas, timing,
+// and any error) into w.
 func (o *Orchestrator) ShowRunDetails(w io.Writer, runID string) error {
 	r, err := o.state.GetRunByID(runID)
 	if err != nil {
