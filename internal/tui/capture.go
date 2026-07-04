@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -80,26 +81,33 @@ func CaptureToString(fn func() error) (string, error) {
 	origStdout := os.Stdout
 	os.Stdout = w
 
-	// Run the function
-	fnErr := fn()
-
-	// Restore stdout and close writer
-	w.Close()
-	os.Stdout = origStdout
-
-	// Read captured output
-	var buf []byte
-	readBuf := make([]byte, 1024)
-	for {
-		n, readErr := r.Read(readBuf)
-		if n > 0 {
-			buf = append(buf, readBuf[:n]...)
-		}
-		if readErr != nil {
-			break
-		}
+	// Drain the pipe concurrently so fn's writes never block on a full pipe
+	// buffer (~64KB on Linux). The old code ran fn to completion with nobody
+	// reading, so any output larger than the buffer wedged fn forever (#187).
+	type readResult struct {
+		data []byte
+		err  error
 	}
-	r.Close()
+	done := make(chan readResult, 1)
+	go func() {
+		data, readErr := io.ReadAll(r)
+		done <- readResult{data: data, err: readErr}
+	}()
 
-	return string(buf), fnErr
+	// Restore stdout and close the writer however fn returns — including a
+	// panic — so the reader always sees EOF and the os.Stdout swap can't leak.
+	fnErr := func() (err error) {
+		defer func() {
+			w.Close()
+			os.Stdout = origStdout
+		}()
+		return fn()
+	}()
+
+	res := <-done
+	r.Close()
+	if res.err != nil && fnErr == nil {
+		fnErr = fmt.Errorf("reading captured output: %w", res.err)
+	}
+	return string(res.data), fnErr
 }
