@@ -59,13 +59,6 @@ type Writer interface {
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)      // Tries fast first, falls back to exact
 	GetRowCountFast(ctx context.Context, schema, table string) (int64, error)  // Fast approximate count from system statistics
 	GetRowCountExact(ctx context.Context, schema, table string) (int64, error) // Exact COUNT(*) - may be slow on large tables
-	ResetSequence(ctx context.Context, schema string, t *Table) error
-
-	// Bulk write - for drop_recreate mode
-	WriteBatch(ctx context.Context, opts WriteBatchOptions) error
-
-	// Upsert - for upsert mode with per-writer isolation
-	UpsertBatch(ctx context.Context, opts UpsertBatchOptions) error
 
 	// Raw SQL execution for cleanup and special operations
 	// Returns the number of rows affected and any error.
@@ -173,62 +166,4 @@ type FinalizeOptions struct {
 
 	// ArtifactName overrides the default artifact filename for this DDL.
 	ArtifactName string
-}
-
-// WriteBatchOptions configures a bulk write operation.
-type WriteBatchOptions struct {
-	// Schema is the target schema.
-	Schema string
-
-	// Table is the target table name.
-	Table string
-
-	// Columns is the list of columns to write.
-	Columns []string
-
-	// Rows is the data to write.
-	Rows [][]any
-
-	// BatchSize overrides the writer's default batch size for this call.
-	// If 0, the writer uses its configured default.
-	BatchSize int
-
-	// OrderColumns hints that rows arrive sorted by these columns (ascending).
-	// Drivers that support ordered bulk inserts (e.g., MSSQL BCP ORDER hint)
-	// can use this to skip sorting, improving insert performance.
-	OrderColumns []string
-}
-
-// UpsertBatchOptions configures an upsert operation.
-type UpsertBatchOptions struct {
-	// Schema is the target schema.
-	Schema string
-
-	// Table is the target table name.
-	Table string
-
-	// Columns is the list of columns to upsert.
-	Columns []string
-
-	// ColumnTypes contains the data types for each column.
-	ColumnTypes []string
-
-	// ColumnSRIDs contains the SRID for spatial columns (0 for non-spatial).
-	ColumnSRIDs []int
-
-	// PKColumns is the list of primary key columns for conflict detection.
-	PKColumns []string
-
-	// Rows is the data to upsert.
-	Rows [][]any
-
-	// BatchSize overrides the writer's default batch size for this call.
-	// If 0, the writer uses its configured default.
-	BatchSize int
-
-	// WriterID identifies this writer for per-writer staging table isolation.
-	WriterID int
-
-	// PartitionID identifies the partition being written (for cleanup).
-	PartitionID *int
 }

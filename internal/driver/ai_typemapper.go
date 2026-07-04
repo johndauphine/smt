@@ -1795,9 +1795,9 @@ func (m *AITypeMapper) findReservedWords(t *Table, targetDBType string) []string
 	return found
 }
 
-// targetIdentifier returns the exact column/table name the transfer phase will
-// use for the target database. Uses the shared ident.SanitizePG implementation
-// so prompt-generated names always match what WriteBatch/CopyFrom expects.
+// targetIdentifier returns the exact column/table name that will be used on the
+// target database. Uses the shared ident.SanitizePG implementation so
+// prompt-generated names match the identifiers the DDL phase emits.
 func targetIdentifier(name, targetDBType string) string {
 	if targetDBType != "postgres" {
 		return name

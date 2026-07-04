@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -23,7 +22,6 @@ type Writer struct {
 	db                 *sql.DB
 	config             *dbconfig.TargetConfig
 	maxConns           int
-	defaultBatchSize   int
 	sourceType         string
 	dialect            *Dialect
 	typeMapper         driver.TypeMapper
@@ -117,7 +115,6 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		db:                         db,
 		config:                     cfg,
 		maxConns:                   maxConns,
-		defaultBatchSize:           opts.BatchSize,
 		sourceType:                 opts.SourceType,
 		dialect:                    dialect,
 		typeMapper:                 opts.TypeMapper,
@@ -654,39 +651,6 @@ func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string) (in
 	return count, err
 }
 
-// ResetSequence resets AUTO_INCREMENT to max value.
-func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Table) error {
-	var identityCol string
-	for _, c := range t.Columns {
-		if c.IsIdentity {
-			identityCol = c.Name
-			break
-		}
-	}
-
-	if identityCol == "" {
-		return nil
-	}
-
-	var maxVal int64
-	err := w.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s",
-			w.dialect.QuoteIdentifier(identityCol),
-			w.dialect.QualifyTable(schema, t.Name))).Scan(&maxVal)
-	if err != nil {
-		return fmt.Errorf("getting max value for %s.%s: %w", t.Name, identityCol, err)
-	}
-
-	if maxVal == 0 {
-		return nil
-	}
-
-	_, err = w.db.ExecContext(ctx,
-		fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d",
-			w.dialect.QualifyTable(schema, t.Name), maxVal+1))
-	return err
-}
-
 // CreateIndex creates an index on the target table using AI-generated DDL.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
 	return w.CreateIndexWithOptions(ctx, t, idx, targetSchema, driver.FinalizeOptions{})
@@ -788,211 +752,6 @@ func (w *Writer) CreateCheckConstraintWithOptions(ctx context.Context, t *driver
 		TargetContext:   w.dbContext,
 	}
 	return w.retryFinalize(ctx, req, opts, fmt.Sprintf("CHECK %s.%s", t.Name, chk.Name))
-}
-
-// WriteBatch writes a batch of rows using multi-row INSERT.
-func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
-	if len(opts.Rows) == 0 {
-		return nil
-	}
-
-	// Build column list
-	quotedCols := make([]string, len(opts.Columns))
-	for i, col := range opts.Columns {
-		quotedCols[i] = w.dialect.QuoteIdentifier(col)
-	}
-	colList := strings.Join(quotedCols, ", ")
-
-	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
-
-	// Process in batches to avoid max_allowed_packet limits and placeholder limits.
-	// Per-call BatchSize (from AI tuner) takes priority over the writer's default.
-	batchSize := opts.BatchSize
-	if batchSize <= 0 {
-		batchSize = w.defaultBatchSize
-	}
-	if batchSize <= 0 {
-		batchSize = 1000 // Fallback default
-	}
-
-	for start := 0; start < len(opts.Rows); start += batchSize {
-		end := start + batchSize
-		if end > len(opts.Rows) {
-			end = len(opts.Rows)
-		}
-		batch := opts.Rows[start:end]
-
-		if err := w.insertBatch(ctx, fullTableName, colList, opts.Columns, batch); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, columns []string, rows [][]any) error {
-	if len(rows) == 0 {
-		return nil
-	}
-
-	// Build placeholder row: (?, ?, ?, ...)
-	placeholders := make([]string, len(columns))
-	for i := range columns {
-		placeholders[i] = "?"
-	}
-	rowPlaceholder := "(" + strings.Join(placeholders, ", ") + ")"
-
-	// Build all row placeholders
-	rowPlaceholders := make([]string, len(rows))
-	for i := range rows {
-		rowPlaceholders[i] = rowPlaceholder
-	}
-
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s",
-		tableName, colList, strings.Join(rowPlaceholders, ", "))
-
-	// Flatten all values
-	args := make([]any, 0, len(rows)*len(columns))
-	for _, row := range rows {
-		args = append(args, convertRowValues(row)...)
-	}
-
-	_, err := w.db.ExecContext(ctx, query, args...)
-	return err
-}
-
-// UpsertBatch performs upsert using INSERT ... ON DUPLICATE KEY UPDATE.
-func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
-	if len(opts.Rows) == 0 {
-		return nil
-	}
-
-	if len(opts.PKColumns) == 0 {
-		return fmt.Errorf("upsert requires primary key columns")
-	}
-
-	// Build column list
-	quotedCols := make([]string, len(opts.Columns))
-	for i, col := range opts.Columns {
-		quotedCols[i] = w.dialect.QuoteIdentifier(col)
-	}
-	colList := strings.Join(quotedCols, ", ")
-
-	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
-
-	// Build UPDATE clause for non-PK columns
-	pkSet := make(map[string]bool)
-	for _, pk := range opts.PKColumns {
-		pkSet[strings.ToLower(pk)] = true
-	}
-
-	var updateClauses []string
-	for _, col := range opts.Columns {
-		if !pkSet[strings.ToLower(col)] {
-			qCol := w.dialect.QuoteIdentifier(col)
-			// Use new.col syntax (MySQL 8.0.19+) instead of deprecated VALUES(col)
-			updateClauses = append(updateClauses, fmt.Sprintf("%s = new.%s", qCol, qCol))
-		}
-	}
-
-	updateClause := ""
-	if len(updateClauses) > 0 {
-		updateClause = " ON DUPLICATE KEY UPDATE " + strings.Join(updateClauses, ", ")
-	}
-
-	// Process in batches.
-	// Per-call BatchSize (from AI tuner) takes priority over the writer's default.
-	batchSize := opts.BatchSize
-	if batchSize <= 0 {
-		batchSize = w.defaultBatchSize
-	}
-	if batchSize <= 0 {
-		batchSize = 1000
-	}
-
-	for start := 0; start < len(opts.Rows); start += batchSize {
-		end := start + batchSize
-		if end > len(opts.Rows) {
-			end = len(opts.Rows)
-		}
-		batch := opts.Rows[start:end]
-
-		if err := w.upsertBatch(ctx, fullTableName, colList, opts.Columns, batch, updateClause); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (w *Writer) upsertBatch(ctx context.Context, tableName, colList string, columns []string, rows [][]any, updateClause string) error {
-	if len(rows) == 0 {
-		return nil
-	}
-
-	// Build placeholder row
-	placeholders := make([]string, len(columns))
-	for i := range columns {
-		placeholders[i] = "?"
-	}
-	rowPlaceholder := "(" + strings.Join(placeholders, ", ") + ")"
-
-	// Build all row placeholders
-	rowPlaceholders := make([]string, len(rows))
-	for i := range rows {
-		rowPlaceholders[i] = rowPlaceholder
-	}
-
-	// Use AS new alias (MySQL 8.0.19+) for the new row reference in ON DUPLICATE KEY UPDATE
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new%s",
-		tableName, colList, strings.Join(rowPlaceholders, ", "), updateClause)
-
-	// Flatten all values
-	args := make([]any, 0, len(rows)*len(columns))
-	for _, row := range rows {
-		args = append(args, convertRowValues(row)...)
-	}
-
-	_, err := w.db.ExecContext(ctx, query, args...)
-	return err
-}
-
-// safeStagingName generates a safe staging table name.
-func (w *Writer) safeStagingName(table string, writerID int, partitionID *int) string {
-	suffix := fmt.Sprintf("_w%d", writerID)
-	if partitionID != nil {
-		suffix = fmt.Sprintf("_p%d%s", *partitionID, suffix)
-	}
-	base := fmt.Sprintf("_stg_%s", table)
-	maxLen := 60 // MySQL max identifier is 64, leave room for suffix
-
-	if len(base)+len(suffix) > maxLen {
-		hash := sha256.Sum256([]byte(table))
-		base = fmt.Sprintf("_stg_%x", hash[:8])
-	}
-	return base + suffix
-}
-
-// convertRowValues converts row values to MySQL-compatible types.
-func convertRowValues(row []any) []any {
-	result := make([]any, len(row))
-	for i, v := range row {
-		switch val := v.(type) {
-		case []byte:
-			// Keep binary data as-is for MySQL
-			result[i] = val
-		case bool:
-			// MySQL uses 1/0 for boolean
-			if val {
-				result[i] = 1
-			} else {
-				result[i] = 0
-			}
-		default:
-			result[i] = v
-		}
-	}
-	return result
 }
 
 // ExecRaw executes a raw SQL query and returns the number of rows affected.

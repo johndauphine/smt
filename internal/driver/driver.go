@@ -79,14 +79,6 @@ const (
 
 // WriterOptions contains options for creating a Writer.
 type WriterOptions struct {
-	// BatchSize is the default number of rows per bulk insert batch.
-	// Each driver uses this value for its native bulk operations:
-	// - MSSQL: bulk.Options.RowsPerBatch
-	// - MySQL: multi-value INSERT batch size
-	// - PostgreSQL: not used (COPY protocol determines batch size dynamically)
-	// This default can be overridden per-call via WriteBatchOptions.BatchSize.
-	BatchSize int
-
 	// SourceType is the source database type (for cross-engine type handling).
 	SourceType string
 

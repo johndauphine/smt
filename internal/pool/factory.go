@@ -63,7 +63,6 @@ func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, sc
 	// Create the writer using the driver's factory method
 	// This is truly pluggable - no switch statement needed
 	opts := driver.WriterOptions{
-		BatchSize:            cfg.ChunkSize,
 		SourceType:           sourceType,
 		SchemaGenerationMode: schemaGenerationMode,
 		UnknownTypePolicy:    unknownTypePolicy,
