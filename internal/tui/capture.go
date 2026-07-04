@@ -77,6 +77,9 @@ func CaptureToString(fn func() error) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("creating pipe: %w", err)
 	}
+	// Close the read end on every exit path, including an fn panic that
+	// unwinds before the explicit drain below — otherwise r's fd leaks.
+	defer r.Close()
 
 	origStdout := os.Stdout
 	os.Stdout = w
@@ -105,7 +108,6 @@ func CaptureToString(fn func() error) (string, error) {
 	}()
 
 	res := <-done
-	r.Close()
 	if res.err != nil && fnErr == nil {
 		fnErr = fmt.Errorf("reading captured output: %w", res.err)
 	}
