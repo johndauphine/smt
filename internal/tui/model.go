@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -874,17 +875,21 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 			}
 			defer orch.Close()
 
-			var output string
+			// Render into a buffer we own rather than swapping the global
+			// os.Stdout — the TUI already redirects os.Stdout program-wide, so
+			// a second concurrent swap here raced and could capture unrelated
+			// output (#228).
+			var buf bytes.Buffer
 			if runID != "" {
-				output, err = CaptureToString(func() error { return orch.ShowRunDetails(runID) })
+				err = orch.ShowRunDetails(&buf, runID)
 			} else {
-				output, err = CaptureToString(orch.ShowHistory)
+				err = orch.ShowHistory(&buf)
 			}
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error showing history: %v\n", err)))
 				return
 			}
-			p.Send(BoxedOutputMsg(output))
+			p.Send(BoxedOutputMsg(buf.String()))
 		}()
 
 		return nil

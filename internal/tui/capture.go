@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"fmt"
-	"io"
 	"os"
 	"sync"
 	"time"
@@ -68,48 +66,4 @@ func SetProgramRef(p *tea.Program) {
 // GetProgramRef returns the stored program reference
 func GetProgramRef() *tea.Program {
 	return programRef
-}
-
-// CaptureToString captures stdout from a function and returns it as a string.
-// Used for commands like /history that print to stdout.
-func CaptureToString(fn func() error) (string, error) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		return "", fmt.Errorf("creating pipe: %w", err)
-	}
-	// Close the read end on every exit path, including an fn panic that
-	// unwinds before the explicit drain below — otherwise r's fd leaks.
-	defer r.Close()
-
-	origStdout := os.Stdout
-	os.Stdout = w
-
-	// Drain the pipe concurrently so fn's writes never block on a full pipe
-	// buffer (~64KB on Linux). The old code ran fn to completion with nobody
-	// reading, so any output larger than the buffer wedged fn forever (#187).
-	type readResult struct {
-		data []byte
-		err  error
-	}
-	done := make(chan readResult, 1)
-	go func() {
-		data, readErr := io.ReadAll(r)
-		done <- readResult{data: data, err: readErr}
-	}()
-
-	// Restore stdout and close the writer however fn returns — including a
-	// panic — so the reader always sees EOF and the os.Stdout swap can't leak.
-	fnErr := func() (err error) {
-		defer func() {
-			w.Close()
-			os.Stdout = origStdout
-		}()
-		return fn()
-	}()
-
-	res := <-done
-	if res.err != nil && fnErr == nil {
-		fnErr = fmt.Errorf("reading captured output: %w", res.err)
-	}
-	return string(res.data), fnErr
 }
