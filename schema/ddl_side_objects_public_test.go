@@ -258,6 +258,27 @@ func TestPublicDDLFilteredIndexRejectsUnsupportedCrossDialectFunction(t *testing
 	}
 }
 
+func TestPublicDDLFilteredIndexPreservesSameDialectFunction(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "postgres", Schema: "public", SourceDialect: "postgres"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	result, err := renderer.CreateIndex(schema.TableRef{
+		Name:    "orders",
+		Columns: []schema.Column{{Name: "email", DataType: "varchar", MaxLength: 255}, {Name: "created_at", DataType: "timestamp"}},
+	}, schema.Index{
+		Name:    "ix_orders_active_email",
+		Columns: []string{"email"},
+		Filter:  "date_trunc('day', created_at) IS NOT NULL",
+	})
+	if err != nil {
+		t.Fatalf("CreateIndex: %v", err)
+	}
+	if !strings.Contains(result.SQL, "date_trunc('day', created_at)") {
+		t.Fatalf("CreateIndex SQL = %q, want same-dialect date_trunc predicate", result.SQL)
+	}
+}
+
 func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 	cases := []struct {
 		dialect                  string
