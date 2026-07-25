@@ -171,6 +171,54 @@ func TestPublicDDLCapabilitiesAreEnforced(t *testing.T) {
 	}
 }
 
+func TestPublicDDLClickHouseNullableValidation(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "clickhouse", SourceDialect: "clickhouse"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		column  schema.Column
+		feature string
+	}{
+		{name: "array", column: schema.Column{Name: "tags", DataType: "Array(String)", IsNullable: true}, feature: `nullable Array column "tags"`},
+		{name: "map", column: schema.Column{Name: "labels", DataType: "Map(String, String)", IsNullable: true}, feature: `nullable Map column "labels"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := renderer.CreateColumn(tc.column)
+			var unsupported *schema.UnsupportedFeatureError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("CreateColumn error = %v, want UnsupportedFeatureError", err)
+			}
+			if unsupported.Dialect != "clickhouse" || unsupported.Feature != tc.feature {
+				t.Fatalf("unsupported error = %#v, want dialect clickhouse and feature %q", unsupported, tc.feature)
+			}
+		})
+	}
+
+	_, err = renderer.CreateTable(schema.Table{
+		Name:       "events",
+		Columns:    []schema.Column{{Name: "event_id", DataType: "Int64", IsNullable: true}},
+		PrimaryKey: []string{"event_id"},
+	})
+	var nullableKey *schema.UnsupportedFeatureError
+	if !errors.As(err, &nullableKey) {
+		t.Fatalf("CreateTable error = %v, want UnsupportedFeatureError", err)
+	}
+	if nullableKey.Dialect != "clickhouse" || nullableKey.Feature != `primary-key/order-by reference to nullable column "event_id"` {
+		t.Fatalf("nullable key error = %#v", nullableKey)
+	}
+
+	result, err := renderer.CreateColumn(schema.Column{Name: "event_id", DataType: "Int64", IsNullable: true})
+	if err != nil {
+		t.Fatalf("CreateColumn nullable primitive: %v", err)
+	}
+	if result.SQL != "`event_id` Nullable(Int64)" {
+		t.Fatalf("nullable primitive SQL = %q, want `event_id` Nullable(Int64)", result.SQL)
+	}
+}
+
 func TestRegistryRegistersAndSelectsCustomDialect(t *testing.T) {
 	registry := schema.NewRegistry()
 	if err := registry.Register(testDialect{}); err != nil {

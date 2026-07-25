@@ -407,7 +407,7 @@ func (d builtinDialect) RenderTable(request Request, table Table) (Result, error
 	}
 	sql, _, err := renderer.CreateTableDDL(toDriverTable(table))
 	if err != nil {
-		return Result{}, err
+		return Result{}, d.publicRenderError(err)
 	}
 	result := Result{SQL: sql, Warnings: mappingWarnings(d.name, request, table.Name, table.Columns)}
 	if d.name == "clickhouse" && len(table.PrimaryKey) > 0 {
@@ -429,9 +429,27 @@ func (d builtinDialect) RenderColumn(request Request, column Column) (Result, er
 	}
 	sql, _, err := renderer.ColumnDefinition(toDriverColumn(column))
 	if err != nil {
-		return Result{}, err
+		return Result{}, d.publicRenderError(err)
 	}
 	return Result{SQL: sql, Warnings: mappingWarnings(d.name, request, "", []Column{column})}, nil
+}
+
+func (d builtinDialect) publicRenderError(err error) error {
+	var composite *ddl.ClickHouseNullableCompositeError
+	if errors.As(err, &composite) {
+		return &UnsupportedFeatureError{
+			Dialect: d.name,
+			Feature: fmt.Sprintf("nullable %s column %q", composite.Type, composite.Column),
+		}
+	}
+	var key *ddl.ClickHouseNullableKeyError
+	if errors.As(err, &key) {
+		return &UnsupportedFeatureError{
+			Dialect: d.name,
+			Feature: fmt.Sprintf("primary-key/order-by reference to nullable column %q", key.Column),
+		}
+	}
+	return err
 }
 
 func (d builtinDialect) renderer(request Request) (ddl.Renderer, error) {

@@ -65,6 +65,11 @@ ClickHouse `PRIMARY KEY` is a sparse sorting index, not a uniqueness constraint,
 so `CreateTable` reports a `primary-key-not-unique` warning whenever a primary
 key is supplied.
 
+ClickHouse does not allow `Nullable(Array(...))`, `Nullable(Map(...))`, or a
+nullable column in its `PRIMARY KEY` / `ORDER BY` expression. The public API
+rejects each of those inputs with `*schema.UnsupportedFeatureError`; it never
+rewrites an array to `Array(Nullable(...))`, because that changes semantics.
+
 ## Warnings and unknown types
 
 `Result.Warnings` returns canonical mapping warnings with table/column context,
