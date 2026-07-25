@@ -1,14 +1,12 @@
-// Package canonical is SMT's dialect-neutral type intermediate representation
-// (#62), modeled on UVG's src/ddl_typemap. A source column's dialect-specific
-// type string is normalized into a CanonicalType via ToCanonical, and a
-// CanonicalType is rendered into a target dialect's DDL type via FromCanonical.
-// The composition FromCanonical(ToCanonical(...)) is the source→canonical→
-// target mapping that both the deterministic renderer and the drift/AI-review
-// comparator route through, so the two can never disagree about types.
+// Package canonical provides SMT's dialect-neutral type intermediate
+// representation. A source column's dialect-specific type string is normalized
+// into a CanonicalType via ToCanonical, and a CanonicalType is rendered into a
+// target dialect's DDL type via FromCanonical.
 //
-// The package takes primitives (TypeMeta), not driver.Column, so it remains a
-// leaf with no internal dependencies — the comparator lives in package driver,
-// which therefore cannot import a package that imports driver.
+// The package intentionally takes primitive TypeMeta values rather than SMT
+// driver types. It depends only on the Go standard library, making
+// FromCanonical(ToCanonical(...)) available to downstream tools without
+// importing SMT's drivers or creating an import cycle.
 package canonical
 
 // Kind is the canonical type category. Each category carries only the

@@ -20,8 +20,8 @@ import (
 	"regexp"
 	"strings"
 
-	"smt/internal/canonical"
 	exprir "smt/internal/expr"
+	"smt/schema/canonical"
 )
 
 var renderedTypeArgsRE = regexp.MustCompile(`\([^)]*\)`)

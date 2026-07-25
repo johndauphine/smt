@@ -8,11 +8,11 @@ import (
 	"strings"
 	"sync"
 
-	"smt/internal/canonical"
 	"smt/internal/driver"
 	pgddl "smt/internal/driver/postgres"
 	exprir "smt/internal/expr"
 	"smt/internal/logging"
+	"smt/schema/canonical"
 )
 
 // RendererVersion identifies the deterministic renderer's output contract.

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"smt/internal/canonical"
 	"smt/internal/ddl"
 	"smt/internal/driver"
+	"smt/schema/canonical"
 )
 
 // RenderDeterministic converts a structural diff into a local, deterministic
