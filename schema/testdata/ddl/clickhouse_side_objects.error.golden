@@ -1,0 +1,11 @@
+create_index
+DDL dialect "clickhouse" does not support secondary indexes
+
+create_primary_key
+DDL dialect "clickhouse" does not support standalone primary keys
+
+create_unique_constraint
+DDL dialect "clickhouse" does not support named unique constraints
+
+create_check_constraint
+DDL dialect "clickhouse" does not support check constraints

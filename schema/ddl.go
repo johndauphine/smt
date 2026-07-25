@@ -32,13 +32,21 @@ const (
 // Callers can inspect it before constructing schemas, and Renderer returns an
 // UnsupportedFeatureError instead of silently omitting an unsupported fact.
 type Capabilities struct {
-	CreateSchema    bool
-	CreateTable     bool
-	CreateColumn    bool
-	PrimaryKeys     bool
-	IdentityColumns bool
-	Defaults        bool
-	ComputedColumns bool
+	CreateSchema           bool
+	CreateTable            bool
+	CreateColumn           bool
+	PrimaryKeys            bool
+	IdentityColumns        bool
+	Defaults               bool
+	ComputedColumns        bool
+	SecondaryIndexes       bool
+	StandalonePrimaryKeys  bool
+	NamedUniqueConstraints bool
+	CheckConstraints       bool
+	IndexExpressionKeys    bool
+	IndexPrefixLengths     bool
+	IndexIncludeColumns    bool
+	FilteredIndexes        bool
 }
 
 // Request is the rendering context supplied to a Dialect implementation.
@@ -68,8 +76,10 @@ type Result struct {
 }
 
 // StatementKind identifies the create artifact emitted by a Statement. The
-// public create plan intentionally has no index, foreign-key, check, alter, or
-// drop kinds: those artifacts are outside the first public DDL milestone.
+// public create plan contains schema and table statements only. Independent
+// side objects are rendered through Renderer.CreateIndex,
+// Renderer.CreatePrimaryKey, Renderer.CreateUniqueConstraint, and
+// Renderer.CreateCheckConstraint so callers retain their own schedule.
 type StatementKind string
 
 const (
@@ -158,13 +168,62 @@ func (c Column) TypeMeta() canonical.TypeMeta {
 }
 
 // Table is the practical create-table subset shared by all built-in dialects.
-// Secondary indexes and relationships remain SMT application-level planning
-// concerns; callers can render their tables first and emit those objects in an
-// explicit dependency order.
 type Table struct {
 	Name       string
 	Columns    []Column
 	PrimaryKey []string
+}
+
+// TableRef identifies a target table for a standalone side object. Columns are
+// optional context for source-expression translation in filtered indexes and
+// check constraints; they are not used to infer or emit table DDL.
+//
+// Schema qualification deliberately comes from Renderer Options, just as it
+// does for CreateTable. This keeps all artifact names on one deterministic
+// target-schema policy and mirrors SMT's existing DMT rendering behavior.
+type TableRef struct {
+	Name    string
+	Columns []Column
+}
+
+// Index is a named secondary index. IsUnique selects a unique index, which is
+// intentionally distinct from UniqueConstraint: an index is an independent
+// physical artifact while a named UNIQUE constraint is part of the table's
+// relational contract.
+//
+// Columns, ColumnExpressions, and ColumnPrefixLengths are positionally
+// aligned. Their input order is preserved in the rendered SQL.
+type Index struct {
+	Name                string
+	Columns             []string
+	ColumnExpressions   []bool
+	ColumnPrefixLengths []int
+	IsUnique            bool
+	IncludeColumns      []string
+	Filter              string
+}
+
+// PrimaryKey is a standalone primary-key constraint. Name is optional: when
+// omitted, CreatePrimaryKey deterministically uses "pk_" plus the
+// target-normalized TableRef name, matching SMT's existing CREATE TABLE
+// convention.
+type PrimaryKey struct {
+	Name    string
+	Columns []string
+}
+
+// UniqueConstraint is a named UNIQUE constraint. It is deliberately separate
+// from Index with IsUnique so callers choose the database object they intend.
+type UniqueConstraint struct {
+	Name    string
+	Columns []string
+}
+
+// CheckConstraint is a named CHECK constraint. Expression is source-dialect
+// SQL and is translated by SMT's existing deterministic expression renderer.
+type CheckConstraint struct {
+	Name       string
+	Expression string
 }
 
 // Dialect lets applications register a custom public renderer without
@@ -177,6 +236,21 @@ type Dialect interface {
 	RenderSchema(Request) (Result, error)
 	RenderTable(Request, Table) (Result, error)
 	RenderColumn(Request, Column) (Result, error)
+}
+
+// SideObjectDialect is the optional extension implemented by a Dialect that
+// renders standalone indexes and constraints. Keeping it separate preserves
+// source compatibility for existing custom Dialect implementations that only
+// render schemas, tables, and columns.
+//
+// A SideObjectDialect should set the matching Capabilities fields to true.
+// Built-in dialects implement this interface.
+type SideObjectDialect interface {
+	Dialect
+	RenderIndex(Request, TableRef, Index) (Result, error)
+	RenderPrimaryKey(Request, TableRef, PrimaryKey) (Result, error)
+	RenderUniqueConstraint(Request, TableRef, UniqueConstraint) (Result, error)
+	RenderCheckConstraint(Request, TableRef, CheckConstraint) (Result, error)
 }
 
 var (
@@ -358,6 +432,95 @@ func (r Renderer) CreateColumn(column Column) (Result, error) {
 	return r.dialect.RenderColumn(r.request, column)
 }
 
+// CreateIndex renders a standalone secondary index. The table must already
+// exist when the returned statement is executed. Index column order is
+// preserved, and unsupported index features return UnsupportedFeatureError
+// before SMT attempts to render SQL.
+func (r Renderer) CreateIndex(table TableRef, index Index) (Result, error) {
+	caps := r.Capabilities()
+	if !caps.SecondaryIndexes {
+		return Result{}, r.unsupported("secondary indexes")
+	}
+	if hasTrue(index.ColumnExpressions) && !caps.IndexExpressionKeys {
+		return Result{}, r.unsupported("expression index key parts")
+	}
+	if hasPositive(index.ColumnPrefixLengths) && !caps.IndexPrefixLengths {
+		return Result{}, r.unsupported("index column prefix lengths")
+	}
+	if len(index.IncludeColumns) > 0 && !caps.IndexIncludeColumns {
+		return Result{}, r.unsupported("index include columns")
+	}
+	if strings.TrimSpace(index.Filter) != "" && !caps.FilteredIndexes {
+		return Result{}, r.unsupported("filtered indexes")
+	}
+	if err := validateIndex(table, index); err != nil {
+		return Result{}, err
+	}
+	dialect, err := r.sideObjectDialect("secondary indexes")
+	if err != nil {
+		return Result{}, err
+	}
+	return dialect.RenderIndex(r.request, table, index)
+}
+
+// CreatePrimaryKey renders a standalone primary-key constraint. Its optional
+// name defaults deterministically to pk_<table>, matching CreateTable.
+func (r Renderer) CreatePrimaryKey(table TableRef, primaryKey PrimaryKey) (Result, error) {
+	if !r.Capabilities().StandalonePrimaryKeys {
+		return Result{}, r.unsupported("standalone primary keys")
+	}
+	if err := validateKeyConstraint("primary key", table, primaryKey.Name, primaryKey.Columns, true); err != nil {
+		return Result{}, err
+	}
+	if strings.TrimSpace(primaryKey.Name) == "" {
+		primaryKey.Name = "pk_" + driver.NormalizeIdentifier(r.Dialect(), table.Name)
+	}
+	dialect, err := r.sideObjectDialect("standalone primary keys")
+	if err != nil {
+		return Result{}, err
+	}
+	return dialect.RenderPrimaryKey(r.request, table, primaryKey)
+}
+
+// CreateUniqueConstraint renders a standalone, named UNIQUE constraint. Use
+// CreateIndex with Index.IsUnique for a unique index instead.
+func (r Renderer) CreateUniqueConstraint(table TableRef, unique UniqueConstraint) (Result, error) {
+	if !r.Capabilities().NamedUniqueConstraints {
+		return Result{}, r.unsupported("named unique constraints")
+	}
+	if err := validateKeyConstraint("unique", table, unique.Name, unique.Columns, false); err != nil {
+		return Result{}, err
+	}
+	dialect, err := r.sideObjectDialect("named unique constraints")
+	if err != nil {
+		return Result{}, err
+	}
+	return dialect.RenderUniqueConstraint(r.request, table, unique)
+}
+
+// CreateCheckConstraint renders a standalone, named CHECK constraint. The
+// table's optional Columns context is used for deterministic expression
+// translation, including boolean-convention rewrites.
+func (r Renderer) CreateCheckConstraint(table TableRef, check CheckConstraint) (Result, error) {
+	if !r.Capabilities().CheckConstraints {
+		return Result{}, r.unsupported("check constraints")
+	}
+	if err := validateTableRef("check constraint", table); err != nil {
+		return Result{}, err
+	}
+	if strings.TrimSpace(check.Name) == "" {
+		return Result{}, fmt.Errorf("render check constraint on table %q: empty constraint name", table.Name)
+	}
+	if strings.TrimSpace(check.Expression) == "" {
+		return Result{}, fmt.Errorf("render check constraint %q: empty expression", check.Name)
+	}
+	dialect, err := r.sideObjectDialect("check constraints")
+	if err != nil {
+		return Result{}, err
+	}
+	return dialect.RenderCheckConstraint(r.request, table, check)
+}
+
 // PlanCreate renders the supported create path in execution order: an
 // optional schema/database statement followed by the supplied tables in input
 // order. It deliberately does not infer dependency ordering or include
@@ -454,6 +617,94 @@ func (r Renderer) unsupported(feature string) error {
 	return &UnsupportedFeatureError{Dialect: r.Dialect(), Feature: feature}
 }
 
+func (r Renderer) sideObjectDialect(feature string) (SideObjectDialect, error) {
+	dialect, ok := r.dialect.(SideObjectDialect)
+	if !ok {
+		return nil, r.unsupported(feature)
+	}
+	return dialect, nil
+}
+
+func validateTableRef(artifact string, table TableRef) error {
+	if strings.TrimSpace(table.Name) == "" {
+		return fmt.Errorf("render %s: empty table name", artifact)
+	}
+	return nil
+}
+
+func validateIndex(table TableRef, index Index) error {
+	if err := validateTableRef("index", table); err != nil {
+		return err
+	}
+	if strings.TrimSpace(index.Name) == "" {
+		return fmt.Errorf("render index on table %q: empty index name", table.Name)
+	}
+	if len(index.Columns) == 0 {
+		return fmt.Errorf("render index %q: no columns", index.Name)
+	}
+	if len(index.ColumnExpressions) > len(index.Columns) {
+		return fmt.Errorf("render index %q: column expression flags exceed columns", index.Name)
+	}
+	if len(index.ColumnPrefixLengths) > len(index.Columns) {
+		return fmt.Errorf("render index %q: column prefix lengths exceed columns", index.Name)
+	}
+	for i, column := range index.Columns {
+		if strings.TrimSpace(column) == "" {
+			return fmt.Errorf("render index %q: column %d is empty", index.Name, i)
+		}
+	}
+	for i, length := range index.ColumnPrefixLengths {
+		if length < 0 {
+			return fmt.Errorf("render index %q: column prefix length %d is negative", index.Name, length)
+		}
+		if length > 0 && i < len(index.ColumnExpressions) && index.ColumnExpressions[i] {
+			return fmt.Errorf("render index %q: expression column %d cannot have a prefix length", index.Name, i)
+		}
+	}
+	for i, column := range index.IncludeColumns {
+		if strings.TrimSpace(column) == "" {
+			return fmt.Errorf("render index %q: included column %d is empty", index.Name, i)
+		}
+	}
+	return nil
+}
+
+func validateKeyConstraint(kind string, table TableRef, name string, columns []string, nameOptional bool) error {
+	if err := validateTableRef(kind+" constraint", table); err != nil {
+		return err
+	}
+	if !nameOptional && strings.TrimSpace(name) == "" {
+		return fmt.Errorf("render %s constraint on table %q: empty constraint name", kind, table.Name)
+	}
+	if len(columns) == 0 {
+		return fmt.Errorf("render %s constraint %q: no columns", kind, name)
+	}
+	for i, column := range columns {
+		if strings.TrimSpace(column) == "" {
+			return fmt.Errorf("render %s constraint %q: column %d is empty", kind, name, i)
+		}
+	}
+	return nil
+}
+
+func hasTrue(values []bool) bool {
+	for _, value := range values {
+		if value {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPositive(values []int) bool {
+	for _, value := range values {
+		if value > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 type builtinDialect struct {
 	name         string
 	aliases      []string
@@ -464,14 +715,35 @@ func builtinDialects() []Dialect {
 	full := Capabilities{
 		CreateSchema: true, CreateTable: true, CreateColumn: true,
 		PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
+		SecondaryIndexes: true, StandalonePrimaryKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
+		IndexExpressionKeys: true, IndexIncludeColumns: true, FilteredIndexes: true,
 	}
 	return []Dialect{
 		builtinDialect{name: "postgres", aliases: []string{"postgresql", "pg"}, capabilities: full},
-		builtinDialect{name: "mssql", aliases: []string{"sqlserver", "sql-server", "sql_server"}, capabilities: full},
-		builtinDialect{name: "mysql", aliases: []string{"mariadb", "maria"}, capabilities: full},
+		builtinDialect{
+			name: "mssql", aliases: []string{"sqlserver", "sql-server", "sql_server"},
+			capabilities: Capabilities{
+				CreateSchema: true, CreateTable: true, CreateColumn: true,
+				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
+				SecondaryIndexes: true, StandalonePrimaryKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
+				IndexIncludeColumns: true, FilteredIndexes: true,
+			},
+		},
+		builtinDialect{
+			name: "mysql", aliases: []string{"mariadb", "maria"},
+			capabilities: Capabilities{
+				CreateSchema: true, CreateTable: true, CreateColumn: true,
+				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
+				SecondaryIndexes: true, StandalonePrimaryKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
+				IndexExpressionKeys: true, IndexPrefixLengths: true,
+			},
+		},
 		builtinDialect{
 			name: "sqlite", aliases: []string{"sqlite3"},
-			capabilities: Capabilities{CreateTable: true, CreateColumn: true, PrimaryKeys: true, IdentityColumns: true, Defaults: true},
+			capabilities: Capabilities{
+				CreateTable: true, CreateColumn: true, PrimaryKeys: true, IdentityColumns: true, Defaults: true,
+				SecondaryIndexes: true, FilteredIndexes: true,
+			},
 		},
 		builtinDialect{
 			name: "clickhouse", aliases: []string{"click-house"},
@@ -545,6 +817,57 @@ func (d builtinDialect) RenderColumn(request Request, column Column) (Result, er
 	return Result{SQL: sql, Warnings: mappingWarnings(d.name, request, "", []Column{column})}, nil
 }
 
+func (d builtinDialect) RenderIndex(request Request, table TableRef, index Index) (Result, error) {
+	renderer, err := d.renderer(request)
+	if err != nil {
+		return Result{}, err
+	}
+	sql, err := renderer.CreateIndexDDL(toDriverTableRef(table), toDriverIndex(index))
+	if err != nil {
+		return Result{}, d.publicRenderError(err)
+	}
+	return Result{SQL: sql}, nil
+}
+
+func (d builtinDialect) RenderPrimaryKey(request Request, table TableRef, primaryKey PrimaryKey) (Result, error) {
+	renderer, err := d.renderer(request)
+	if err != nil {
+		return Result{}, err
+	}
+	sql, err := renderer.CreatePrimaryKeyDDL(toDriverTableRef(table), primaryKey.Name, primaryKey.Columns)
+	if err != nil {
+		return Result{}, d.publicRenderError(err)
+	}
+	return Result{SQL: sql}, nil
+}
+
+func (d builtinDialect) RenderUniqueConstraint(request Request, table TableRef, unique UniqueConstraint) (Result, error) {
+	renderer, err := d.renderer(request)
+	if err != nil {
+		return Result{}, err
+	}
+	sql, err := renderer.CreateUniqueConstraintDDL(toDriverTableRef(table), unique.Name, unique.Columns)
+	if err != nil {
+		return Result{}, d.publicRenderError(err)
+	}
+	return Result{SQL: sql}, nil
+}
+
+func (d builtinDialect) RenderCheckConstraint(request Request, table TableRef, check CheckConstraint) (Result, error) {
+	renderer, err := d.renderer(request)
+	if err != nil {
+		return Result{}, err
+	}
+	sql, err := renderer.CreateCheckConstraintDDL(toDriverTableRef(table), &driver.CheckConstraint{
+		Name:       check.Name,
+		Definition: check.Expression,
+	})
+	if err != nil {
+		return Result{}, d.publicRenderError(err)
+	}
+	return Result{SQL: sql}, nil
+}
+
 func (d builtinDialect) publicRenderError(err error) error {
 	var composite *ddl.ClickHouseNullableCompositeError
 	if errors.As(err, &composite) {
@@ -579,14 +902,35 @@ func (d builtinDialect) renderer(request Request) (ddl.Renderer, error) {
 }
 
 func toDriverTable(table Table) *driver.Table {
-	columns := make([]driver.Column, len(table.Columns))
-	for i, column := range table.Columns {
-		columns[i] = toDriverColumn(column)
-	}
+	columns := toDriverColumns(table.Columns)
 	return &driver.Table{
 		Name:       table.Name,
 		Columns:    columns,
 		PrimaryKey: append([]string(nil), table.PrimaryKey...),
+	}
+}
+
+func toDriverTableRef(table TableRef) *driver.Table {
+	return &driver.Table{Name: table.Name, Columns: toDriverColumns(table.Columns)}
+}
+
+func toDriverColumns(columns []Column) []driver.Column {
+	driverColumns := make([]driver.Column, len(columns))
+	for i, column := range columns {
+		driverColumns[i] = toDriverColumn(column)
+	}
+	return driverColumns
+}
+
+func toDriverIndex(index Index) *driver.Index {
+	return &driver.Index{
+		Name:                index.Name,
+		Columns:             append([]string(nil), index.Columns...),
+		ColumnExpressions:   append([]bool(nil), index.ColumnExpressions...),
+		ColumnPrefixLengths: append([]int(nil), index.ColumnPrefixLengths...),
+		IsUnique:            index.IsUnique,
+		IncludeCols:         append([]string(nil), index.IncludeColumns...),
+		Filter:              index.Filter,
 	}
 }
 

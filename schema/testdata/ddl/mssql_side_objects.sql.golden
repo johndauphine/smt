@@ -1,0 +1,11 @@
+create_index
+CREATE UNIQUE INDEX [IX_Orders_Email] ON [dbo].[Orders] ([Email]) INCLUDE ([ID]) WHERE Email IS NOT NULL
+
+create_primary_key
+ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [pk_Orders] PRIMARY KEY ([ID])
+
+create_unique_constraint
+ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [UQ_Orders_Email] UNIQUE ([Email])
+
+create_check_constraint
+ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [CK_Orders_Total] CHECK ([Total] >= 0)

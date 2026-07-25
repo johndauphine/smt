@@ -91,6 +91,69 @@ func TestRenderer_FinalizationMSSQL(t *testing.T) {
 	assertEqualSQL(t, checkSQL, `ALTER TABLE [dbo].[Companies] ADD CONSTRAINT [CK_Companies_Active] CHECK ([IsActive] = 1)`)
 }
 
+func TestRenderer_StandaloneKeyConstraints(t *testing.T) {
+	cases := []struct {
+		target string
+		schema string
+		pk     string
+		unique string
+	}{
+		{
+			target: "postgres", schema: "public",
+			pk:     `ALTER TABLE "public"."companies" ADD CONSTRAINT "pk_companies" PRIMARY KEY ("companyid")`,
+			unique: `ALTER TABLE "public"."companies" ADD CONSTRAINT "uq_companies_name" UNIQUE ("name")`,
+		},
+		{
+			target: "mssql", schema: "dbo",
+			pk:     `ALTER TABLE [dbo].[Companies] ADD CONSTRAINT [PK_Companies] PRIMARY KEY ([CompanyId])`,
+			unique: `ALTER TABLE [dbo].[Companies] ADD CONSTRAINT [UQ_Companies_Name] UNIQUE ([Name])`,
+		},
+		{
+			target: "mysql", schema: "crm",
+			pk:     "ALTER TABLE `crm`.`Companies` ADD CONSTRAINT `PK_Companies` PRIMARY KEY (`CompanyId`)",
+			unique: "ALTER TABLE `crm`.`Companies` ADD CONSTRAINT `UQ_Companies_Name` UNIQUE (`Name`)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.target, func(t *testing.T) {
+			renderer, err := NewRenderer(tc.target, tc.schema, "fail")
+			if err != nil {
+				t.Fatalf("NewRenderer: %v", err)
+			}
+			table := &driver.Table{Name: "Companies"}
+			gotPK, err := renderer.CreatePrimaryKeyDDL(table, "PK_Companies", []string{"CompanyId"})
+			if err != nil {
+				t.Fatalf("CreatePrimaryKeyDDL: %v", err)
+			}
+			assertEqualSQL(t, gotPK, tc.pk)
+
+			gotUnique, err := renderer.CreateUniqueConstraintDDL(table, "UQ_Companies_Name", []string{"Name"})
+			if err != nil {
+				t.Fatalf("CreateUniqueConstraintDDL: %v", err)
+			}
+			assertEqualSQL(t, gotUnique, tc.unique)
+		})
+	}
+}
+
+func TestRenderer_StandaloneKeyConstraintsRejectUnsupportedTargets(t *testing.T) {
+	for _, target := range []string{"sqlite", "clickhouse"} {
+		t.Run(target, func(t *testing.T) {
+			renderer, err := NewRenderer(target, "analytics", "fail")
+			if err != nil {
+				t.Fatalf("NewRenderer: %v", err)
+			}
+			if _, err := renderer.CreatePrimaryKeyDDL(&driver.Table{Name: "events"}, "pk_events", []string{"id"}); err == nil {
+				t.Fatal("CreatePrimaryKeyDDL error = nil, want unsupported target error")
+			}
+			if _, err := renderer.CreateUniqueConstraintDDL(&driver.Table{Name: "events"}, "uq_events_name", []string{"name"}); err == nil {
+				t.Fatal("CreateUniqueConstraintDDL error = nil, want unsupported target error")
+			}
+		})
+	}
+}
+
 func TestRenderer_FinalizationMySQL(t *testing.T) {
 	renderer, err := NewRenderer("mysql", "crm", "fail")
 	if err != nil {

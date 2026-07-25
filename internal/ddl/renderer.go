@@ -67,7 +67,9 @@ import (
 // never sacrificed for unicode (#224).
 // "17": ClickHouse rejects Nullable(Array(...)) / Nullable(Map(...)) and
 // nullable PRIMARY KEY / ORDER BY columns instead of emitting invalid DDL.
-const RendererVersion = "17"
+// "18": standalone schema side-object DDL adds deterministic index and
+// constraint rendering, including fail-closed cross-dialect index predicates.
+const RendererVersion = "18"
 
 // ClickHouseNullableCompositeError reports a nullable composite that ClickHouse
 // cannot represent as Nullable(T). Rewriting it to Array(Nullable(T)) would
@@ -541,6 +543,9 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 			return "", fmt.Errorf("filtered indexes are not supported on mysql target: %s", idx.Name)
 		}
 		expr, err := r.Expression(filter, t.Columns)
+		if err == nil && r.crossDialect() {
+			err = exprir.RejectUnknownFunctions(expr, r.target)
+		}
 		if err != nil {
 			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
 		}
@@ -548,6 +553,48 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 		b.WriteString(expr)
 	}
 	return b.String(), nil
+}
+
+// CreatePrimaryKeyDDL renders a standalone, named primary-key constraint.
+// CreateTableDDL continues to render a table's initial primary key inline;
+// this method exists for callers that schedule a primary key separately.
+func (r Renderer) CreatePrimaryKeyDDL(t *driver.Table, name string, columns []string) (string, error) {
+	return r.createNamedKeyConstraint(t, name, columns, "PRIMARY KEY")
+}
+
+// CreateUniqueConstraintDDL renders a standalone, named UNIQUE constraint.
+// It is deliberately distinct from CreateIndexDDL with IsUnique: a database
+// constraint is part of a table's relational contract, while a unique index
+// is an independently managed index artifact.
+func (r Renderer) CreateUniqueConstraintDDL(t *driver.Table, name string, columns []string) (string, error) {
+	return r.createNamedKeyConstraint(t, name, columns, "UNIQUE")
+}
+
+func (r Renderer) createNamedKeyConstraint(t *driver.Table, name string, columns []string, kind string) (string, error) {
+	if r.target == "sqlite" || r.target == "clickhouse" {
+		return "", fmt.Errorf("standalone %s constraints are not supported on %s target", strings.ToLower(kind), r.target)
+	}
+	if strings.TrimSpace(t.Name) == "" {
+		return "", fmt.Errorf("%s constraint has no table name", strings.ToLower(kind))
+	}
+	if strings.TrimSpace(name) == "" {
+		return "", fmt.Errorf("%s constraint has no name", strings.ToLower(kind))
+	}
+	if len(columns) == 0 {
+		return "", fmt.Errorf("%s constraint %s has no columns", strings.ToLower(kind), name)
+	}
+	cols := make([]string, len(columns))
+	for i, column := range columns {
+		if strings.TrimSpace(column) == "" {
+			return "", fmt.Errorf("%s constraint %s has an empty column name", strings.ToLower(kind), name)
+		}
+		cols[i] = r.quote(r.normalize(column))
+	}
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s (%s)",
+		r.qualify(r.normalize(t.Name)),
+		r.quote(r.normalize(name)),
+		kind,
+		strings.Join(cols, ", ")), nil
 }
 
 func (r Renderer) indexKeyPartDDL(idx *driver.Index, i int, column string) (string, error) {

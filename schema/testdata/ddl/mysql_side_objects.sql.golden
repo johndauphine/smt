@@ -1,0 +1,11 @@
+create_index
+CREATE UNIQUE INDEX `IX_Orders_Email` ON `crm`.`Orders` (`Email`(16))
+
+create_primary_key
+ALTER TABLE `crm`.`Orders` ADD CONSTRAINT `pk_Orders` PRIMARY KEY (`ID`)
+
+create_unique_constraint
+ALTER TABLE `crm`.`Orders` ADD CONSTRAINT `UQ_Orders_Email` UNIQUE (`Email`)
+
+create_check_constraint
+ALTER TABLE `crm`.`Orders` ADD CONSTRAINT `CK_Orders_Total` CHECK (`Total` >= 0)

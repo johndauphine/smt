@@ -62,6 +62,10 @@ func (r deterministicDDL) withSource(sourceDialect string) deterministicDDL {
 	return r
 }
 
+func (r deterministicDDL) crossDialect() bool {
+	return r.sourceDialect != "" && r.sourceDialect != "postgres"
+}
+
 // RenderCreateTableDDLWithSource is RenderCreateTableDDLWithPolicy that also
 // knows the source dialect, so the canonical type mapping can resolve
 // dialect-dependent source types. sourceDialect "" reproduces the source-blind
@@ -137,7 +141,7 @@ func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlo
 		for i, c := range t.PrimaryKey {
 			cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
 		}
-		pkName := "pk_" + tableName
+		pkName := sanitizePGIdentifier("pk_" + tableName)
 		lines = append(lines, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)",
 			r.dialect.QuoteIdentifier(pkName), strings.Join(cols, ", ")))
 	}
@@ -254,7 +258,7 @@ func (r deterministicDDL) createIndex(t *driver.Table, idx *driver.Index, target
 	}
 
 	if filter := strings.TrimSpace(idx.Filter); filter != "" {
-		expr, err := r.sqlServerExpression(filter)
+		expr, err := r.filteredIndexExpression(filter)
 		if err != nil {
 			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
 		}
@@ -466,6 +470,14 @@ func (r deterministicDDL) exprColInfo(col driver.Column) exprir.ColInfo {
 }
 
 func (r deterministicDDL) sqlServerExpression(expr string) (string, error) {
+	return r.rewriteSQLServerExpression(expr, true)
+}
+
+func (r deterministicDDL) filteredIndexExpression(expr string) (string, error) {
+	return r.rewriteSQLServerExpression(expr, r.crossDialect())
+}
+
+func (r deterministicDDL) rewriteSQLServerExpression(expr string, rejectUnknownFunctions bool) (string, error) {
 	out := strings.TrimSpace(expr)
 	out = replaceBracketIdentifiers(out, func(name string) string {
 		return r.dialect.QuoteIdentifier(sanitizePGIdentifier(name))
@@ -492,16 +504,18 @@ func (r deterministicDDL) sqlServerExpression(expr string) (string, error) {
 	out = strings.ReplaceAll(out, "newid()", "gen_random_uuid()")
 	out = strings.ReplaceAll(out, "ISNULL(", "COALESCE(")
 	out = strings.ReplaceAll(out, "isnull(", "COALESCE(")
-	if err := rejectUnsupportedSQLServerExpression(out); err != nil {
-		return "", err
+	if rejectUnknownFunctions {
+		if err := rejectUnsupportedSQLServerExpression(out); err != nil {
+			return "", err
+		}
 	}
 	return out, nil
 }
 
-// rejectUnsupportedSQLServerExpression is the fail-closed tail of the legacy
-// string-rewrite pipeline. It delegates to the shared per-target gate in
-// internal/expr (#175) so all three targets reject unknown functions
-// identically. (CONVERT(date, <now>) handling moved into the expression IR.)
+// rejectUnsupportedSQLServerExpression is the fail-closed tail of the
+// cross-dialect legacy string-rewrite pipeline. It delegates to the shared
+// per-target gate in internal/expr (#175). (CONVERT(date, <now>) handling
+// moved into the expression IR.)
 func rejectUnsupportedSQLServerExpression(expr string) error {
 	return exprir.RejectUnknownFunctions(expr, exprir.Postgres)
 }

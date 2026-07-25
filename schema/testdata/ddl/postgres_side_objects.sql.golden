@@ -1,0 +1,11 @@
+create_index
+CREATE UNIQUE INDEX "ix_orders_email" ON "public"."orders" ("email") INCLUDE ("id") WHERE Email IS NOT NULL
+
+create_primary_key
+ALTER TABLE "public"."orders" ADD CONSTRAINT "pk_orders" PRIMARY KEY ("id")
+
+create_unique_constraint
+ALTER TABLE "public"."orders" ADD CONSTRAINT "uq_orders_email" UNIQUE ("email")
+
+create_check_constraint
+ALTER TABLE "public"."orders" ADD CONSTRAINT "ck_orders_total" CHECK ("total" >= 0)
