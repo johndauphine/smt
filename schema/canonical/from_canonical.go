@@ -58,6 +58,8 @@ func FromCanonicalWithWarnings(ct CanonicalType, dialect string, opts RenderOpts
 		typ, err = fromCanonicalMSSQL(ct, opts)
 	case "mysql":
 		typ, err = fromCanonicalMySQL(ct, opts)
+	case "sqlite":
+		typ, err = fromCanonicalSQLite(ct, opts)
 	default:
 		return "", nil, fmt.Errorf("FromCanonical: unsupported target dialect %q", dialect)
 	}
@@ -75,6 +77,8 @@ func canonDialect(d string) string {
 		return "mysql"
 	case "mssql", "sqlserver", "sql-server", "sql_server":
 		return "mssql"
+	case "sqlite", "sqlite3":
+		return "sqlite"
 	default:
 		return strings.ToLower(strings.TrimSpace(d))
 	}
@@ -679,6 +683,9 @@ func pgSpatialSubType(subtype string) string {
 
 func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts) []MappingWarning {
 	var out []MappingWarning
+	if target == "sqlite" {
+		out = append(out, sqliteMappingWarnings(ct, rendered)...)
+	}
 	add := func(reason string) {
 		out = append(out, MappingWarning{
 			Kind:          kindName(ct.Kind),
@@ -693,15 +700,15 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 			add("target has no 8-bit integer; rendered as " + rendered)
 		}
 	case MediumInt:
-		if target != "mysql" {
+		if target != "mysql" && target != "sqlite" {
 			add("target has no 24-bit integer; rendered as " + rendered)
 		}
 	case SmallInt, Integer:
-		if ct.Unsigned && target != "mysql" {
+		if ct.Unsigned && target != "mysql" && target != "sqlite" {
 			add("target has no unsigned integer flag; widened to " + rendered)
 		}
 	case BigInt:
-		if ct.Unsigned && target != "mysql" && !opts.IsIdentity {
+		if ct.Unsigned && target != "mysql" && target != "sqlite" && !opts.IsIdentity {
 			add("target has no unsigned 64-bit integer; rendered as " + rendered)
 		}
 	case Decimal:
