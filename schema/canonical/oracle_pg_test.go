@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/canonical"
 	"smt/internal/driver"
 	pgddl "smt/internal/driver/postgres"
+	"smt/schema/canonical"
 )
 
 type tcase struct {

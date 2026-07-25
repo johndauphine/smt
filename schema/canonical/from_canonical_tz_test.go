@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/canonical"
+	"smt/schema/canonical"
 )
 
 func TestFromCanonical_TZAwareTimestampMapping(t *testing.T) {

@@ -6,10 +6,10 @@ import (
 	"regexp"
 	"strings"
 
-	"smt/internal/canonical"
 	"smt/internal/driver"
 	exprir "smt/internal/expr"
 	"smt/internal/logging"
+	"smt/schema/canonical"
 )
 
 type deterministicDDL struct {

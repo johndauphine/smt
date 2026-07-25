@@ -3,8 +3,8 @@ package orchestrator
 import (
 	"strings"
 
-	"smt/internal/canonical"
 	"smt/internal/driver"
+	"smt/schema/canonical"
 )
 
 type mappingWarning struct {
