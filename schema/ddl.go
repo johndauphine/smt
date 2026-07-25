@@ -82,17 +82,20 @@ type Warning struct {
 // DataType is the source dialect's catalog type name. The metadata fields are
 // the small, stable subset required for SMT's canonical type mapping.
 type Column struct {
-	Name               string
-	DataType           string
-	MaxLength          int
-	Precision          int
-	Scale              int
-	DatetimePrecision  *int
-	IsNullable         bool
-	IsIdentity         bool
-	IsUnsigned         bool
-	DisplayWidth       int
-	DefaultExpression  string
+	Name              string
+	DataType          string
+	MaxLength         int
+	Precision         int
+	Scale             int
+	DatetimePrecision *int
+	IsNullable        bool
+	IsIdentity        bool
+	IsUnsigned        bool
+	DisplayWidth      int
+	DefaultExpression string
+	// HasDefault preserves a DEFAULT clause whose expression is intentionally
+	// empty. It is otherwise inferred from DefaultExpression for compatibility.
+	HasDefault         bool
 	OnUpdateExpression string
 	IsComputed         bool
 	ComputedExpression string
@@ -330,7 +333,7 @@ func (r Renderer) validateColumn(column Column) error {
 	if column.IsIdentity && !caps.IdentityColumns {
 		return r.unsupported("identity columns")
 	}
-	if (strings.TrimSpace(column.DefaultExpression) != "" || strings.TrimSpace(column.OnUpdateExpression) != "") && !caps.Defaults {
+	if (column.HasDefault || strings.TrimSpace(column.DefaultExpression) != "" || strings.TrimSpace(column.OnUpdateExpression) != "") && !caps.Defaults {
 		return r.unsupported("default expressions")
 	}
 	if column.IsComputed && !caps.ComputedColumns {
@@ -449,6 +452,7 @@ func toDriverColumn(column Column) driver.Column {
 		IsUnsigned:         column.IsUnsigned,
 		DisplayWidth:       column.DisplayWidth,
 		DefaultExpression:  column.DefaultExpression,
+		HasDefault:         column.HasDefault,
 		OnUpdateExpression: column.OnUpdateExpression,
 		IsComputed:         column.IsComputed,
 		ComputedExpression: column.ComputedExpression,

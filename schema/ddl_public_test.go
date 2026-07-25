@@ -123,6 +123,23 @@ func TestPublicDDLColumnAndFallbackWarnings(t *testing.T) {
 	}
 }
 
+func TestPublicDDLPreservesEmptyDefault(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "postgres", SourceDialect: "postgres"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+
+	result, err := renderer.CreateColumn(schema.Column{
+		Name: "label", DataType: "varchar", MaxLength: 30, HasDefault: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateColumn: %v", err)
+	}
+	if result.SQL != `"label" character varying(30) NOT NULL DEFAULT ''` {
+		t.Fatalf("column SQL = %q", result.SQL)
+	}
+}
+
 func TestPublicDDLCapabilitiesAreEnforced(t *testing.T) {
 	sqlite, err := schema.NewRenderer(schema.Options{TargetDialect: "sqlite", Schema: "named"})
 	if err != nil {

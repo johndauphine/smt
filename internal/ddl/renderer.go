@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	pgddl "smt/internal/ddl/postgres"
 	"smt/internal/driver"
-	pgddl "smt/internal/driver/postgres"
 	exprir "smt/internal/expr"
 	"smt/internal/logging"
 	"smt/schema/canonical"

@@ -3,6 +3,7 @@
 `smt/schema` is the supported library surface for deterministic schema, table,
 and column DDL. It uses SMT's existing renderer and canonical type mapper; its
 input and result types do not expose `internal/*` packages or database handles.
+It does not load a database driver or require a PostgreSQL client dependency.
 
 ```go
 renderer, err := schema.NewRenderer(schema.Options{
@@ -35,7 +36,8 @@ for _, warning := range result.Warnings {
 some names have source-specific meanings, such as MySQL `TINYINT(1)` and
 `TIMESTAMP`. `Column` includes the source type metadata needed by the public
 canonical mapper: length, precision/scale, fractional-seconds precision,
-unsignedness, enum values, and spatial metadata.
+unsignedness, enum values, and spatial metadata. Set `HasDefault` when an
+empty `DefaultExpression` still represents a source `DEFAULT` clause.
 
 ## Dialects and capability checks
 
