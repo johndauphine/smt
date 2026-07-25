@@ -15,12 +15,15 @@ const (
 
 // ToCanonical normalizes a source column's dialect-specific type into the
 // dialect-neutral CanonicalType. dialect is the canonical source driver name
-// ("postgres", "mysql", "mariadb", "mssql", "sqlite"); unknown dialects are
+// ("postgres", "mysql", "mariadb", "mssql", "sqlite", "clickhouse"); unknown dialects are
 // treated permissively. An unrecognized type name becomes Kind: Raw carrying
 // the original name, so the caller's unknown-type policy decides what to do.
 func ToCanonical(typeName string, m TypeMeta, dialect string) CanonicalType {
 	if isSQLite(dialect) {
 		return sqliteToCanonical(typeName, m)
+	}
+	if isClickHouse(dialect) {
+		return clickhouseToCanonical(typeName, m)
 	}
 
 	dt := strings.ToLower(strings.TrimSpace(typeName))
