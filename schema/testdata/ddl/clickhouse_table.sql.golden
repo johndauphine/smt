@@ -1,0 +1,6 @@
+CREATE TABLE `analytics`.`events` (
+    `event_id` Int64,
+    `attributes` Nullable(String),
+    `occurred_at` Nullable(DateTime64(3, 'UTC')),
+    PRIMARY KEY (`event_id`)
+) ENGINE = MergeTree ORDER BY (`event_id`)

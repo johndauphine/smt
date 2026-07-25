@@ -47,12 +47,14 @@ func TestStripOuterCheckParens(t *testing.T) {
 // #85 — registry aliases accepted by config validation must construct a renderer.
 func TestNewRenderer_RegistryAliases(t *testing.T) {
 	for alias, want := range map[string]string{
-		"sql-server": "mssql",
-		"sql_server": "mssql",
-		"sqlserver":  "mssql",
-		"maria":      "mysql",
-		"mariadb":    "mysql",
-		"pg":         "postgres",
+		"sql-server":  "mssql",
+		"sql_server":  "mssql",
+		"sqlserver":   "mssql",
+		"maria":       "mysql",
+		"mariadb":     "mysql",
+		"pg":          "postgres",
+		"sqlite3":     "sqlite",
+		"click-house": "clickhouse",
 	} {
 		r, err := NewRenderer(alias, "s", "fail")
 		if err != nil {
