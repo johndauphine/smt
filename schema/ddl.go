@@ -79,8 +79,9 @@ type Result struct {
 // StatementKind identifies the create artifact emitted by a Statement. The
 // public create plan contains schema and table statements only. Independent
 // side objects are rendered through Renderer.CreateIndex,
-// Renderer.CreatePrimaryKey, Renderer.CreateUniqueConstraint, and
-// Renderer.CreateCheckConstraint so callers retain their own schedule.
+// Renderer.CreatePrimaryKey, Renderer.CreateForeignKey,
+// Renderer.CreateUniqueConstraint, and Renderer.CreateCheckConstraint so
+// callers retain their own schedule.
 type StatementKind string
 
 const (
