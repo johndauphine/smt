@@ -1,7 +1,7 @@
 # Public schema DDL API
 
 `github.com/johndauphine/smt/schema` is the supported library surface for
-deterministic schema, table, column, index, and constraint DDL. It uses SMT's
+deterministic schema, table, column, index, constraint, and foreign-key DDL. It uses SMT's
 existing renderer and canonical type mapper; its input and result types do not
 expose `internal/*` packages or database handles. It does not load a database
 driver or require a PostgreSQL client dependency.
@@ -93,7 +93,20 @@ check, err := renderer.CreateCheckConstraint(orders, schema.CheckConstraint{
 if err != nil {
     return err
 }
-for _, result := range []schema.Result{index, unique, check} {
+
+foreignKey, err := renderer.CreateForeignKey(orders, schema.ForeignKey{
+    Name:       "fk_orders_accounts",
+    Columns:    []string{"account_id"},
+    RefSchema:  "identity",
+    RefTable:   "accounts",
+    RefColumns: []string{"id"},
+    OnDelete:   schema.ReferentialActionCascade,
+    OnUpdate:   schema.ReferentialActionNoAction,
+})
+if err != nil {
+    return err
+}
+for _, result := range []schema.Result{index, unique, check, foreignKey} {
     if err := target.ExecRaw(ctx, result.SQL); err != nil {
         return err
     }
@@ -106,7 +119,17 @@ needed for deterministic translation (for example boolean conventions).
 `CreatePrimaryKey` uses an explicit name when supplied, otherwise it derives
 `pk_<table>` using the same deterministic naming convention as `CreateTable`.
 
-Foreign keys, alter, drop, and scheduling remain outside this public milestone.
+`CreateForeignKey` adds one named standalone foreign key. `Columns` and
+`RefColumns` are positional and must have the same non-zero length, so composite
+keys are supported directly. The local table uses the renderer's configured
+schema; set `RefSchema` to qualify the referenced table, or leave it empty to
+use that same schema. `OnDelete` and `OnUpdate` use `ReferentialAction` values.
+The empty value omits the clause, while `ReferentialActionNoAction` emits an
+explicit `NO ACTION` clause. SQL Server rejects `RESTRICT`, and MySQL rejects
+`SET DEFAULT`, with `*schema.UnsupportedFeatureError` rather than emitting
+invalid target SQL.
+
+Alter, drop, and scheduling remain outside this public milestone.
 
 `SourceDialect` is optional, but callers should set it whenever it is known:
 some names have source-specific meanings, such as MySQL `TINYINT(1)` and
@@ -119,7 +142,7 @@ empty `DefaultExpression` still represents a source `DEFAULT` clause.
 
 A new `schema.Registry` starts with these dialects and aliases:
 
-| Dialect | Aliases | Schema/table/column | Secondary indexes | Standalone PK / named UNIQUE / CHECK |
+| Dialect | Aliases | Schema/table/column | Secondary indexes | Standalone PK / named UNIQUE / CHECK / FK |
 | --- | --- | --- | --- | --- |
 | `postgres` | `postgresql`, `pg` | yes | yes | yes |
 | `mssql` | `sqlserver`, `sql-server`, `sql_server` | yes | yes | yes |
@@ -130,10 +153,10 @@ A new `schema.Registry` starts with these dialects and aliases:
 Inspect `renderer.Capabilities()` before using identities, defaults, computed
 columns, a named schema, or a side-object feature. The side-object fields are
 `SecondaryIndexes`, `StandalonePrimaryKeys`, `NamedUniqueConstraints`,
-`CheckConstraints`, `IndexExpressionKeys`, `IndexPrefixLengths`,
-`IndexIncludeColumns`, and `FilteredIndexes`. If input requests an unsupported
-feature, rendering returns `*schema.UnsupportedFeatureError`; SMT never
-silently drops it.
+`CheckConstraints`, `StandaloneForeignKeys`, `IndexExpressionKeys`,
+`IndexPrefixLengths`, `IndexIncludeColumns`, and `FilteredIndexes`. If input
+requests an unsupported feature, rendering returns
+`*schema.UnsupportedFeatureError`; SMT never silently drops it.
 
 PostgreSQL supports expression-key, included-column, and filtered indexes.
 SQL Server supports included-column and filtered indexes. MySQL supports
@@ -149,6 +172,8 @@ it treats a configured schema as connection selection and emits unqualified
 table DDL. SQLite identities are supported through `CreateTable` only when the
 identity is the sole primary-key column, using `INTEGER PRIMARY KEY
 AUTOINCREMENT`; a standalone identity `CreateColumn` returns an explicit
+unsupported-feature error. SQLite cannot add a standalone foreign-key
+constraint through `ALTER TABLE`, so `CreateForeignKey` returns an explicit
 unsupported-feature error. ClickHouse supports
 the practical create-table subset: it emits `MergeTree` with `ORDER BY` set to
 the primary-key columns (or `tuple()` when there is no primary key). ClickHouse
@@ -191,5 +216,5 @@ renderer, err := registry.NewRenderer(schema.Options{TargetDialect: "my-db"})
 The dialect interface receives only public `schema.Request`, `schema.Table`,
 and `schema.Column` values and returns `schema.Result`; it is safe to implement
 without importing SMT internals. A custom dialect can additionally implement
-`schema.SideObjectDialect` to render the four standalone side-object methods.
+`schema.SideObjectDialect` to render the five standalone side-object methods.
 Registries do not share mutable global state.
