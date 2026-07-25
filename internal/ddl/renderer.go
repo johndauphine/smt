@@ -550,6 +550,48 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 	return b.String(), nil
 }
 
+// CreatePrimaryKeyDDL renders a standalone, named primary-key constraint.
+// CreateTableDDL continues to render a table's initial primary key inline;
+// this method exists for callers that schedule a primary key separately.
+func (r Renderer) CreatePrimaryKeyDDL(t *driver.Table, name string, columns []string) (string, error) {
+	return r.createNamedKeyConstraint(t, name, columns, "PRIMARY KEY")
+}
+
+// CreateUniqueConstraintDDL renders a standalone, named UNIQUE constraint.
+// It is deliberately distinct from CreateIndexDDL with IsUnique: a database
+// constraint is part of a table's relational contract, while a unique index
+// is an independently managed index artifact.
+func (r Renderer) CreateUniqueConstraintDDL(t *driver.Table, name string, columns []string) (string, error) {
+	return r.createNamedKeyConstraint(t, name, columns, "UNIQUE")
+}
+
+func (r Renderer) createNamedKeyConstraint(t *driver.Table, name string, columns []string, kind string) (string, error) {
+	if r.target == "sqlite" || r.target == "clickhouse" {
+		return "", fmt.Errorf("standalone %s constraints are not supported on %s target", strings.ToLower(kind), r.target)
+	}
+	if strings.TrimSpace(t.Name) == "" {
+		return "", fmt.Errorf("%s constraint has no table name", strings.ToLower(kind))
+	}
+	if strings.TrimSpace(name) == "" {
+		return "", fmt.Errorf("%s constraint has no name", strings.ToLower(kind))
+	}
+	if len(columns) == 0 {
+		return "", fmt.Errorf("%s constraint %s has no columns", strings.ToLower(kind), name)
+	}
+	cols := make([]string, len(columns))
+	for i, column := range columns {
+		if strings.TrimSpace(column) == "" {
+			return "", fmt.Errorf("%s constraint %s has an empty column name", strings.ToLower(kind), name)
+		}
+		cols[i] = r.quote(r.normalize(column))
+	}
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s (%s)",
+		r.qualify(r.normalize(t.Name)),
+		r.quote(r.normalize(name)),
+		kind,
+		strings.Join(cols, ", ")), nil
+}
+
 func (r Renderer) indexKeyPartDDL(idx *driver.Index, i int, column string) (string, error) {
 	isExpression := i < len(idx.ColumnExpressions) && idx.ColumnExpressions[i]
 	if isExpression {
