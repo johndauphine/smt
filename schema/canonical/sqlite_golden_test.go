@@ -120,6 +120,14 @@ func TestFromCanonicalSQLite_Golden(t *testing.T) {
 			want: "TINYINT", warningSubstrs: []string{"no unsigned integer", "does not enforce integer width"},
 		},
 		{
+			name: "small integer width", ct: CanonicalType{Kind: SmallInt},
+			want: "SMALLINT", warningSubstrs: []string{"does not enforce integer width"},
+		},
+		{
+			name: "integer width", ct: CanonicalType{Kind: Integer},
+			want: "INTEGER", warningSubstrs: []string{"does not enforce integer width"},
+		},
+		{
 			name: "decimal precision", ct: CanonicalType{Kind: Decimal, Precision: 12, Scale: 2},
 			want: "NUMERIC(12,2)", warningSubstrs: []string{"does not enforce declared precision"},
 		},
@@ -190,6 +198,24 @@ func TestSQLiteRoundTripPreservesRowIDCapableBigInt(t *testing.T) {
 	}
 	if got != "INTEGER" {
 		t.Fatalf("INTEGER round-trip rendered type = %q, want INTEGER", got)
+	}
+}
+
+func TestSQLiteIntegerRoundTripWarnsAndWidens(t *testing.T) {
+	rendered, warnings, err := FromCanonicalWithWarnings(CanonicalType{Kind: Integer}, "sqlite", RenderOpts{})
+	if err != nil {
+		t.Fatalf("FromCanonicalWithWarnings: %v", err)
+	}
+	if rendered != "INTEGER" {
+		t.Fatalf("Integer rendered type = %q, want INTEGER", rendered)
+	}
+	if !hasSQLiteWarning(warnings, "does not enforce integer width") {
+		t.Fatalf("warnings = %+v, missing narrow-integer affinity warning", warnings)
+	}
+
+	got := ToCanonical(rendered, TypeMeta{}, "sqlite")
+	if got.Kind != BigInt {
+		t.Fatalf("ToCanonical(%q) kind = %v, want BigInt", rendered, got.Kind)
 	}
 }
 

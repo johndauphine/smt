@@ -231,7 +231,7 @@ func sqliteMappingWarnings(ct CanonicalType, rendered string) []MappingWarning {
 		if ct.Unsigned {
 			add("SQLite has no unsigned integer type; rendered as " + rendered)
 		}
-		if ct.Kind == TinyInt || ct.Kind == MediumInt {
+		if ct.Kind == TinyInt || ct.Kind == SmallInt || ct.Kind == MediumInt || ct.Kind == Integer {
 			add("SQLite type affinity does not enforce integer width; rendered as " + rendered)
 		}
 	case Varchar, Char:
