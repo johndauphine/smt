@@ -290,12 +290,16 @@ func (r deterministicDDL) createForeignKey(t *driver.Table, fk *driver.ForeignKe
 	}
 
 	refTable := sanitizePGTableName(fk.RefTable)
+	refSchema := targetSchema
+	if strings.TrimSpace(fk.RefSchema) != "" {
+		refSchema = sanitizePGIdentifier(fk.RefSchema)
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
 		r.dialect.QualifyTable(targetSchema, tableName),
 		r.dialect.QuoteIdentifier(fkName),
 		strings.Join(cols, ", "),
-		r.dialect.QualifyTable(targetSchema, refTable),
+		r.dialect.QualifyTable(refSchema, refTable),
 		strings.Join(refCols, ", "))
 
 	if rule := pgReferentialAction(fk.OnDelete); rule != "" {
@@ -522,9 +526,9 @@ func rejectUnsupportedSQLServerExpression(expr string) error {
 
 func pgReferentialAction(rule string) string {
 	switch strings.ToUpper(strings.TrimSpace(rule)) {
-	case "", "NO ACTION":
+	case "":
 		return ""
-	case "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT":
+	case "NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT":
 		return strings.ToUpper(strings.TrimSpace(rule))
 	default:
 		return ""

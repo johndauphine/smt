@@ -69,7 +69,9 @@ import (
 // nullable PRIMARY KEY / ORDER BY columns instead of emitting invalid DDL.
 // "18": standalone schema side-object DDL adds deterministic index and
 // constraint rendering, including fail-closed cross-dialect index predicates.
-const RendererVersion = "18"
+// "19": foreign-key references honor an explicit referenced schema and emit
+// explicit NO ACTION clauses when callers request them.
+const RendererVersion = "19"
 
 // ClickHouseNullableCompositeError reports a nullable composite that ClickHouse
 // cannot represent as Nullable(T). Rewriting it to Array(Nullable(T)) would
@@ -639,7 +641,7 @@ func (r Renderer) CreateForeignKeyDDL(t *driver.Table, fk *driver.ForeignKey) (s
 		r.qualify(r.normalize(t.Name)),
 		r.quote(r.normalize(fk.Name)),
 		strings.Join(cols, ", "),
-		r.qualify(r.normalize(fk.RefTable)),
+		r.qualifyForeignKeyReference(fk.RefSchema, fk.RefTable),
 		strings.Join(refCols, ", "))
 	if action := referentialAction(fk.OnDelete); action != "" {
 		b.WriteString(" ON DELETE ")
@@ -1039,6 +1041,13 @@ func (r Renderer) qualify(table string) string {
 	return r.quote(r.schema) + "." + r.quote(table)
 }
 
+func (r Renderer) qualifyForeignKeyReference(schema, table string) string {
+	if strings.TrimSpace(schema) == "" {
+		return r.qualify(r.normalize(table))
+	}
+	return r.quote(r.normalize(schema)) + "." + r.quote(r.normalize(table))
+}
+
 func firstColumns(columns [][]driver.Column) []driver.Column {
 	if len(columns) == 0 {
 		return nil
@@ -1100,9 +1109,9 @@ func boolLiteral(target string, value bool) string {
 
 func referentialAction(rule string) string {
 	switch strings.ToUpper(strings.TrimSpace(rule)) {
-	case "", "NO ACTION":
+	case "":
 		return ""
-	case "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT":
+	case "NO ACTION", "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT":
 		return strings.ToUpper(strings.TrimSpace(rule))
 	default:
 		return ""

@@ -73,14 +73,16 @@ func TestDeterministicFinalizationDDL(t *testing.T) {
 	fkDDL, err := renderer.createForeignKey(table, &driver.ForeignKey{
 		Name:       "FK_Votes_Posts",
 		Columns:    []string{"PostId"},
+		RefSchema:  "identity",
 		RefTable:   "Posts",
 		RefColumns: []string{"Id"},
 		OnDelete:   "NO ACTION",
+		OnUpdate:   "CASCADE",
 	}, "public")
 	if err != nil {
 		t.Fatalf("createForeignKey: %v", err)
 	}
-	assertContains(t, fkDDL, `ALTER TABLE "public"."votes" ADD CONSTRAINT "fk_votes_posts" FOREIGN KEY ("postid") REFERENCES "public"."posts" ("id")`)
+	assertContains(t, fkDDL, `ALTER TABLE "public"."votes" ADD CONSTRAINT "fk_votes_posts" FOREIGN KEY ("postid") REFERENCES "identity"."posts" ("id") ON DELETE NO ACTION ON UPDATE CASCADE`)
 
 	checkDDL, err := renderer.createCheckConstraint(table, &driver.CheckConstraint{
 		Name:       "CK_Votes_BountyAmount",
