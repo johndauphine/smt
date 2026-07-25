@@ -6,7 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"smt/internal/logging"
+	"github.com/johndauphine/smt/internal/logging"
 )
 
 // CaptureOutput pipes stdout and stderr to a channel that feeds the TUI

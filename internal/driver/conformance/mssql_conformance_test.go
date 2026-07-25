@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"smt/internal/driver"
-	"smt/internal/driver/mssql"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver/mssql"
 )
 
 // TestMSSQLConformance pins the SQL Server driver contract.

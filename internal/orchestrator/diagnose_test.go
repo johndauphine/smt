@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/config"
-	ddlpkg "smt/internal/ddl"
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/config"
+	ddlpkg "github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 type fakeExpressionFixSuggester struct {

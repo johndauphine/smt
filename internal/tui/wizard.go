@@ -13,7 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"smt/internal/wizard"
+	"github.com/johndauphine/smt/internal/wizard"
 )
 
 // wizardState holds the in-progress wizard for ModeWizard.

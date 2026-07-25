@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"smt/internal/ddl"
-	"smt/internal/driver"
-	"smt/schema/canonical"
+	"github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/schema/canonical"
 )
 
 // UnknownTypePolicy controls what built-in dialects do with a source type

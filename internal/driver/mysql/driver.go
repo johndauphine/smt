@@ -3,8 +3,8 @@
 package mysql
 
 import (
-	"smt/internal/dbconfig"
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/dbconfig"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func init() {

@@ -8,16 +8,16 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/johndauphine/smt/internal/dbconfig"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/secrets"
 	"gopkg.in/yaml.v3"
-	"smt/internal/dbconfig"
-	"smt/internal/driver"
-	"smt/internal/logging"
-	"smt/internal/secrets"
 
 	// Import driver packages to trigger init() registration before validation
-	_ "smt/internal/driver/mssql"
-	_ "smt/internal/driver/mysql"
-	_ "smt/internal/driver/postgres"
+	_ "github.com/johndauphine/smt/internal/driver/mssql"
+	_ "github.com/johndauphine/smt/internal/driver/mysql"
+	_ "github.com/johndauphine/smt/internal/driver/postgres"
 )
 
 // Type aliases for database configuration types.

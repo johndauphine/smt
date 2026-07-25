@@ -12,7 +12,7 @@ package schemadiff
 import (
 	"time"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // CurrentSnapshotVersion is stamped into every new snapshot. Bump it whenever

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func col(name, dtype string, nullable bool) driver.Column {

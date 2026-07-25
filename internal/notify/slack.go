@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"smt/internal/secrets"
+	"github.com/johndauphine/smt/internal/secrets"
 )
 
 // SlackConfig holds Slack notification settings (loaded from global secrets)

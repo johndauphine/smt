@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func TestDeterministicCreateTableMSSQLToPostgres(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/checkpoint"
 )
 
 // ShowHistory renders all known runs (most recent first) into w as a small

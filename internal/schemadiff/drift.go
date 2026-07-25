@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"strings"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // Drift is the classified difference between the desired and existing target

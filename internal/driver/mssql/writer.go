@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"smt/internal/dbconfig"
-	"smt/internal/driver"
-	"smt/internal/logging"
-	"smt/internal/stats"
+	"github.com/johndauphine/smt/internal/dbconfig"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/stats"
 )
 
 // Writer implements driver.Writer for SQL Server.

@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"strings"
 
-	"smt/internal/config"
+	"github.com/johndauphine/smt/internal/config"
 )
 
 // Engines are the supported database engines, used for both source and target.

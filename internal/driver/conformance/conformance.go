@@ -32,7 +32,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // DriverCase describes one engine's driver-contract expectations. Every field

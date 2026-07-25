@@ -11,12 +11,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"smt/internal/checkpoint"
-	"smt/internal/ddl"
-	"smt/internal/driver"
-	"smt/internal/logging"
-	"smt/internal/schemadiff"
-	"smt/internal/source"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/schemadiff"
+	"github.com/johndauphine/smt/internal/source"
 )
 
 // GenerateDDL renders the full create-schema plan without opening or applying

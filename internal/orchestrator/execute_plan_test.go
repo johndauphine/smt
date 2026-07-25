@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/checkpoint"
-	"smt/internal/config"
-	"smt/internal/driver"
-	"smt/internal/logging"
-	"smt/internal/schemadiff"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/schemadiff"
 )
 
 type fakeWriter struct {

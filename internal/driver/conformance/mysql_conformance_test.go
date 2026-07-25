@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"smt/internal/driver"
-	"smt/internal/driver/mysql"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver/mysql"
 )
 
 // TestMySQLConformance pins the MySQL/MariaDB driver contract.

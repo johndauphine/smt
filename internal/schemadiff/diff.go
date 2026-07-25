@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // Diff is the delta between a previous snapshot and the current source state.

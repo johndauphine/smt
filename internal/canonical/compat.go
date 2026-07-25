@@ -1,10 +1,10 @@
 // Package canonical preserves SMT's former internal import path.
 //
-// Deprecated: new code should import smt/schema/canonical. The implementation
+// Deprecated: new code should import github.com/johndauphine/smt/schema/canonical. The implementation
 // lives there so it can be consumed as a public, dependency-free leaf package.
 package canonical
 
-import public "smt/schema/canonical"
+import public "github.com/johndauphine/smt/schema/canonical"
 
 type (
 	Kind           = public.Kind

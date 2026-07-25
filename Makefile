@@ -4,7 +4,7 @@
 BINARY_NAME=smt
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-LDFLAGS=-ldflags "-s -w -X smt/internal/version.Version=$(VERSION)"
+LDFLAGS=-ldflags "-s -w -X github.com/johndauphine/smt/internal/version.Version=$(VERSION)"
 
 # Go parameters
 GOCMD=go

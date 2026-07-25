@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"smt/internal/config"
-	"smt/internal/driver"
-	"smt/internal/pool"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/pool"
 )
 
 type crmAcceptanceCase struct {

@@ -14,8 +14,8 @@ import (
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v3"
 
-	"smt/internal/checkpoint"
-	"smt/internal/config"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/config"
 )
 
 func profileCommand() *cli.Command {

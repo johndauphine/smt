@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	purepostgres "smt/internal/ddl/postgres"
-	"smt/internal/driver"
+	purepostgres "github.com/johndauphine/smt/internal/ddl/postgres"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func TestDeterministicDDLAdapterMatchesPureRenderer(t *testing.T) {

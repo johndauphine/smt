@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // TestParseGeneratedColumnExtra is the regression test for issue #18.

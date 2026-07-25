@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"smt/internal/secrets"
+	"github.com/johndauphine/smt/internal/secrets"
 )
 
 // TestParseTargetDDLToColumns_HappyPath asserts the parser threads a clean

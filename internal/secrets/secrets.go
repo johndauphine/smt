@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"smt/internal/logging"
+	"github.com/johndauphine/smt/internal/logging"
 )
 
 const (

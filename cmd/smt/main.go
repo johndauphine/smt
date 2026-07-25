@@ -15,10 +15,10 @@ import (
 
 	"github.com/urfave/cli/v2"
 
-	"smt/internal/exitcodes"
-	"smt/internal/logging"
-	"smt/internal/tui"
-	"smt/internal/version"
+	"github.com/johndauphine/smt/internal/exitcodes"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/tui"
+	"github.com/johndauphine/smt/internal/version"
 )
 
 func main() {

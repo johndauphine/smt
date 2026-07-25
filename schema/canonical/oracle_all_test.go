@@ -6,8 +6,8 @@ package canonical_test
 import (
 	"testing"
 
-	"smt/internal/ddl"
-	"smt/schema/canonical"
+	"github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/schema/canonical"
 )
 
 func runOracle(t *testing.T, target string) {

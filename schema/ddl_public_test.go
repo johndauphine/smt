@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/schema"
+	"github.com/johndauphine/smt/schema"
 )
 
 func TestPublicDDLRepresentativeGoldens(t *testing.T) {

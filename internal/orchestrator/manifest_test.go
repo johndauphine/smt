@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // Fingerprints must be stable for identical input and change when the input

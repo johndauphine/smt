@@ -1,9 +1,18 @@
 # Public schema DDL API
 
-`smt/schema` is the supported library surface for deterministic schema, table,
-and column DDL. It uses SMT's existing renderer and canonical type mapper; its
-input and result types do not expose `internal/*` packages or database handles.
-It does not load a database driver or require a PostgreSQL client dependency.
+`github.com/johndauphine/smt/schema` is the supported library surface for
+deterministic schema, table, and column DDL. It uses SMT's existing renderer
+and canonical type mapper; its input and result types do not expose `internal/*`
+packages or database handles. It does not load a database driver or require a
+PostgreSQL client dependency.
+
+## Module consumption
+
+Require the module as `github.com/johndauphine/smt`; the public canonical type
+API is `github.com/johndauphine/smt/schema/canonical`. SMT declares Go 1.25.7.
+Downstream DMT currently declares Go 1.25.0, so its module directive must be
+raised to Go 1.25.7 when it adds this dependency. No `replace` directive is
+needed after an SMT release is available.
 
 ```go
 renderer, err := schema.NewRenderer(schema.Options{

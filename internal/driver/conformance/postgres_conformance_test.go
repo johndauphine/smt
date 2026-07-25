@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"smt/internal/driver"
-	"smt/internal/driver/postgres"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver/postgres"
 )
 
 // TestPostgresConformance pins the PostgreSQL driver contract.

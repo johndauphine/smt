@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"smt/internal/logging"
+	"github.com/johndauphine/smt/internal/logging"
 )
 
 // VerifyTableDDL audits a generated CREATE TABLE statement against the

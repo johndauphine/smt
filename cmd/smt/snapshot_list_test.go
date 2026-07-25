@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"smt/internal/checkpoint"
-	"smt/internal/driver"
-	"smt/internal/schemadiff"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/schemadiff"
 )
 
 // saveSnap stores a schemadiff.Snapshot with tableCount empty tables.

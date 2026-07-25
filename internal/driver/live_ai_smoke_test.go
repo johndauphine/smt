@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"smt/internal/secrets"
+	"github.com/johndauphine/smt/internal/secrets"
 )
 
 type liveAISmokeReport struct {

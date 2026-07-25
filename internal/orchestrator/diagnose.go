@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"smt/internal/driver"
-	"smt/internal/logging"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/logging"
 )
 
 // diagnoseSchemaFailure is the opt-in AI advisory hook (ai_review.

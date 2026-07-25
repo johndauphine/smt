@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"smt/internal/stats"
+	"github.com/johndauphine/smt/internal/stats"
 )
 
 // Reader represents a database reader that extracts schema metadata from a

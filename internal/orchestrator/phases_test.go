@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/config"
-	"smt/internal/ddl"
-	"smt/internal/source"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/internal/source"
 )
 
 func tbl(name string) source.Table { return source.Table{Name: name} }

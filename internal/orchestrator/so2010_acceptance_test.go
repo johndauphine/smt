@@ -29,10 +29,10 @@ import (
 	"testing"
 	"time"
 
-	"smt/internal/config"
-	"smt/internal/ddl"
-	"smt/internal/driver"
-	"smt/internal/pool"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/pool"
 )
 
 func env(key, def string) string {

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"smt/internal/logging"
+	"github.com/johndauphine/smt/internal/logging"
 )
 
 // ErrorDiagnosis contains AI-generated analysis of a migration error.

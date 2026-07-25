@@ -16,8 +16,8 @@ import (
 	xterm "github.com/charmbracelet/x/term"
 	"github.com/urfave/cli/v2"
 
-	"smt/internal/orchestrator"
-	"smt/internal/wizard"
+	"github.com/johndauphine/smt/internal/orchestrator"
+	"github.com/johndauphine/smt/internal/wizard"
 )
 
 func initCommand() *cli.Command {

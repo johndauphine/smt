@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // TestReaderDatabaseContext_Populated is the mssql side of the issue #13

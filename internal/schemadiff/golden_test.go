@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // goldenDiff builds a diff that exercises every statement family the sync

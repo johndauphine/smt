@@ -3,7 +3,7 @@ package canonical_test
 import (
 	"testing"
 
-	"smt/schema/canonical"
+	"github.com/johndauphine/smt/schema/canonical"
 )
 
 func TestPublicPackageSupportsTypeMapping(t *testing.T) {

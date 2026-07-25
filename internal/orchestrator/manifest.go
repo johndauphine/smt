@@ -20,9 +20,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"smt/internal/ddl"
-	"smt/internal/driver"
-	"smt/internal/version"
+	"github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/version"
 )
 
 // manifestArtifactName is the filename of the run manifest. It lives in the

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"smt/internal/checkpoint"
-	"smt/internal/config"
-	"smt/internal/driver"
-	"smt/internal/schemadiff"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/schemadiff"
 )
 
 // stubExecutor records every SQL it's asked to run and optionally fails

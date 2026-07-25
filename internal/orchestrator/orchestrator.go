@@ -16,12 +16,12 @@ import (
 	"fmt"
 	"sync"
 
-	"smt/internal/checkpoint"
-	"smt/internal/config"
-	"smt/internal/driver"
-	"smt/internal/notify"
-	"smt/internal/pool"
-	"smt/internal/source"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/notify"
+	"github.com/johndauphine/smt/internal/pool"
+	"github.com/johndauphine/smt/internal/source"
 )
 
 // Options configures the orchestrator.

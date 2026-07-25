@@ -19,7 +19,7 @@ for the current release status, validation gates, and asset list.
 PostgreSQL, SQL Server, MySQL — both as source and target. New engines are added by dropping a package under `internal/driver/foo/` that implements `driver.Driver`/`Reader`/`Writer` and registers itself in `init()`.
 
 For applications that need deterministic schema DDL without using the SMT CLI,
-the public [`smt/schema`](docs/public-ddl-api.md) package exposes a registry,
+the public [`github.com/johndauphine/smt/schema`](docs/public-ddl-api.md) package exposes a registry,
 public schema values, explicit capability checks, and structured mapping
 warnings. It currently renders PostgreSQL, SQL Server, MySQL, SQLite, and
 ClickHouse DDL at schema/table/column scope.

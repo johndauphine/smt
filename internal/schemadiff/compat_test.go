@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func TestSnapshotV1FixtureDeserializes(t *testing.T) {

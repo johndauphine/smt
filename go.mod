@@ -1,4 +1,4 @@
-module smt
+module github.com/johndauphine/smt
 
 go 1.25.7
 
