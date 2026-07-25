@@ -137,7 +137,7 @@ func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlo
 		for i, c := range t.PrimaryKey {
 			cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
 		}
-		pkName := "pk_" + tableName
+		pkName := sanitizePGIdentifier("pk_" + tableName)
 		lines = append(lines, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)",
 			r.dialect.QuoteIdentifier(pkName), strings.Join(cols, ", ")))
 	}

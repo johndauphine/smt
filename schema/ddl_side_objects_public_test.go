@@ -177,6 +177,54 @@ func TestPublicDDLSideObjectsPreserveOrderAndIdentifierConvention(t *testing.T) 
 	}
 }
 
+func TestPublicDDLStandalonePrimaryKeyDefaultMatchesCreateTableNaming(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "postgres", Schema: "public"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+
+	for _, tableName := range []string{"1Orders", strings.Repeat("order_", 12)} {
+		t.Run(tableName, func(t *testing.T) {
+			wantName := driver.NormalizeIdentifier("postgres", "pk_"+driver.NormalizeIdentifier("postgres", tableName))
+			createTable, err := renderer.CreateTable(schema.Table{
+				Name:       tableName,
+				Columns:    []schema.Column{{Name: "ID", DataType: "int4"}},
+				PrimaryKey: []string{"ID"},
+			})
+			if err != nil {
+				t.Fatalf("CreateTable: %v", err)
+			}
+			primaryKey, err := renderer.CreatePrimaryKey(schema.TableRef{Name: tableName}, schema.PrimaryKey{Columns: []string{"ID"}})
+			if err != nil {
+				t.Fatalf("CreatePrimaryKey: %v", err)
+			}
+			wantConstraint := `CONSTRAINT "` + wantName + `" PRIMARY KEY`
+			if !strings.Contains(createTable.SQL, wantConstraint) {
+				t.Fatalf("CreateTable SQL = %q, want %q", createTable.SQL, wantConstraint)
+			}
+			if !strings.Contains(primaryKey.SQL, wantConstraint) {
+				t.Fatalf("CreatePrimaryKey SQL = %q, want %q", primaryKey.SQL, wantConstraint)
+			}
+		})
+	}
+}
+
+func TestPublicDDLRejectsExpressionIndexPrefixCombination(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "mysql", Schema: "app"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	_, err = renderer.CreateIndex(schema.TableRef{Name: "orders"}, schema.Index{
+		Name:                "ix_orders_email_expression",
+		Columns:             []string{"LOWER(email)"},
+		ColumnExpressions:   []bool{true},
+		ColumnPrefixLengths: []int{16},
+	})
+	if err == nil || !strings.Contains(err.Error(), "expression column 0 cannot have a prefix length") {
+		t.Fatalf("CreateIndex error = %v, want expression-prefix validation error", err)
+	}
+}
+
 func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 	cases := []struct {
 		dialect                  string

@@ -204,8 +204,9 @@ type Index struct {
 }
 
 // PrimaryKey is a standalone primary-key constraint. Name is optional: when
-// omitted, CreatePrimaryKey deterministically uses "pk_" plus the supplied
-// TableRef name, matching SMT's existing CREATE TABLE convention.
+// omitted, CreatePrimaryKey deterministically uses "pk_" plus the
+// target-normalized TableRef name, matching SMT's existing CREATE TABLE
+// convention.
 type PrimaryKey struct {
 	Name    string
 	Columns []string
@@ -472,7 +473,7 @@ func (r Renderer) CreatePrimaryKey(table TableRef, primaryKey PrimaryKey) (Resul
 		return Result{}, err
 	}
 	if strings.TrimSpace(primaryKey.Name) == "" {
-		primaryKey.Name = "pk_" + table.Name
+		primaryKey.Name = "pk_" + driver.NormalizeIdentifier(r.Dialect(), table.Name)
 	}
 	dialect, err := r.sideObjectDialect("standalone primary keys")
 	if err != nil {
@@ -655,6 +656,9 @@ func validateIndex(table TableRef, index Index) error {
 	for i, length := range index.ColumnPrefixLengths {
 		if length < 0 {
 			return fmt.Errorf("render index %q: column prefix length %d is negative", index.Name, i)
+		}
+		if length > 0 && i < len(index.ColumnExpressions) && index.ColumnExpressions[i] {
+			return fmt.Errorf("render index %q: expression column %d cannot have a prefix length", index.Name, i)
 		}
 	}
 	for i, column := range index.IncludeColumns {
