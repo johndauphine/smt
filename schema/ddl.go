@@ -655,7 +655,7 @@ func validateIndex(table TableRef, index Index) error {
 	}
 	for i, length := range index.ColumnPrefixLengths {
 		if length < 0 {
-			return fmt.Errorf("render index %q: column prefix length %d is negative", index.Name, i)
+			return fmt.Errorf("render index %q: column prefix length %d is negative", index.Name, length)
 		}
 		if length > 0 && i < len(index.ColumnExpressions) && index.ColumnExpressions[i] {
 			return fmt.Errorf("render index %q: expression column %d cannot have a prefix length", index.Name, i)

@@ -225,6 +225,21 @@ func TestPublicDDLRejectsExpressionIndexPrefixCombination(t *testing.T) {
 	}
 }
 
+func TestPublicDDLRejectsNegativeIndexPrefixLength(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "mysql", Schema: "app"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	_, err = renderer.CreateIndex(schema.TableRef{Name: "orders"}, schema.Index{
+		Name:                "ix_orders_email",
+		Columns:             []string{"email"},
+		ColumnPrefixLengths: []int{-7},
+	})
+	if err == nil || !strings.Contains(err.Error(), "column prefix length -7 is negative") {
+		t.Fatalf("CreateIndex error = %v, want negative prefix-length validation error", err)
+	}
+}
+
 func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 	cases := []struct {
 		dialect                  string
