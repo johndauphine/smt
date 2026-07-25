@@ -157,7 +157,10 @@ func fromCanonicalSQLite(ct CanonicalType, opts RenderOpts) (string, error) {
 	case Integer:
 		return "INTEGER", nil
 	case BigInt:
-		return "BIGINT", nil
+		// SQLite stores all INTEGER-affinity values as signed 64-bit integers.
+		// Use its native spelling so a BigInt primary key can retain SQLite's
+		// special INTEGER PRIMARY KEY rowid-alias semantics.
+		return "INTEGER", nil
 	case Decimal:
 		return decimalDDL("NUMERIC", ct), nil
 	case Real, Double:
@@ -176,9 +179,9 @@ func fromCanonicalSQLite(ct CanonicalType, opts RenderOpts) (string, error) {
 	case Date:
 		return "DATE", nil
 	case Time:
-		return "TIME", nil
+		return sqliteTemporalDDL("TIME", ct), nil
 	case Timestamp:
-		return "DATETIME", nil
+		return sqliteTemporalDDL("DATETIME", ct), nil
 	case Uuid, Json, Xml, Enum, Set, Array:
 		return "TEXT", nil
 	case Spatial:
@@ -188,6 +191,16 @@ func fromCanonicalSQLite(ct CanonicalType, opts RenderOpts) (string, error) {
 	default:
 		return "", fmt.Errorf("%w", ErrUnknownType)
 	}
+}
+
+// sqliteTemporalDDL keeps a declared fractional-seconds precision when the
+// canonical value carries one. SQLite does not enforce it, but it accepts the
+// declaration and preserving it keeps the public mapper's round-trips stable.
+func sqliteTemporalDDL(name string, ct CanonicalType) string {
+	if fsp, ok := ct.Fspv(); ok && fsp >= 0 {
+		return fmt.Sprintf("%s(%d)", name, fsp)
+	}
+	return name
 }
 
 func sqliteMappingWarnings(ct CanonicalType, rendered string) []MappingWarning {

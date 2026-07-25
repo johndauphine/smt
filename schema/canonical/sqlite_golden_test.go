@@ -121,7 +121,7 @@ func TestFromCanonicalSQLite_Golden(t *testing.T) {
 		},
 		{
 			name: "tz timestamp fractional seconds", ct: CanonicalType{Kind: Timestamp, WithTZ: true, Fsp: intp(6)},
-			want: "DATETIME", warningSubstrs: []string{"no time-zone-aware", "does not enforce fractional-seconds"},
+			want: "DATETIME(6)", warningSubstrs: []string{"no time-zone-aware", "does not enforce fractional-seconds"},
 		},
 		{
 			name: "uuid", ct: CanonicalType{Kind: Uuid},
@@ -157,6 +157,43 @@ func TestFromCanonicalSQLite_Golden(t *testing.T) {
 			}
 			if len(tc.warningSubstrs) == 0 && len(warnings) != 0 {
 				t.Errorf("warnings = %+v, want none", warnings)
+			}
+		})
+	}
+}
+
+func TestSQLiteRoundTripPreservesRowIDCapableBigInt(t *testing.T) {
+	ct := ToCanonical("INTEGER", TypeMeta{}, "sqlite")
+	if ct.Kind != BigInt {
+		t.Fatalf("ToCanonical(INTEGER) kind = %v, want BigInt", ct.Kind)
+	}
+
+	got, err := FromCanonical(ct, "sqlite", RenderOpts{})
+	if err != nil {
+		t.Fatalf("FromCanonical: %v", err)
+	}
+	if got != "INTEGER" {
+		t.Fatalf("INTEGER round-trip rendered type = %q, want INTEGER", got)
+	}
+}
+
+func TestSQLiteRoundTripPreservesTemporalFsp(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		typeName string
+		want     string
+	}{
+		{name: "datetime", typeName: "DATETIME(6)", want: "DATETIME(6)"},
+		{name: "time", typeName: "TIME(6)", want: "TIME(6)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ct := ToCanonical(tc.typeName, TypeMeta{}, "sqlite")
+			got, err := FromCanonical(ct, "sqlite", RenderOpts{})
+			if err != nil {
+				t.Fatalf("FromCanonical: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("%s round-trip rendered type = %q, want %q", tc.typeName, got, tc.want)
 			}
 		})
 	}
