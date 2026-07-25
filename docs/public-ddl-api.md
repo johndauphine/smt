@@ -1,10 +1,10 @@
 # Public schema DDL API
 
 `github.com/johndauphine/smt/schema` is the supported library surface for
-deterministic schema, table, and column DDL. It uses SMT's existing renderer
-and canonical type mapper; its input and result types do not expose `internal/*`
-packages or database handles. It does not load a database driver or require a
-PostgreSQL client dependency.
+deterministic schema, table, column, index, and constraint DDL. It uses SMT's
+existing renderer and canonical type mapper; its input and result types do not
+expose `internal/*` packages or database handles. It does not load a database
+driver or require a PostgreSQL client dependency.
 
 ## Module consumption
 
@@ -59,8 +59,54 @@ for _, statement := range plan.Statements {
 ```
 
 The create plan deliberately contains only schema/database and table artifacts
-(including columns and primary keys). Indexes, foreign keys, checks, alters,
-and drops are not represented yet.
+(including inline primary keys). Use the standalone side-object methods after
+the table statements in the execution order your application chooses:
+
+```go
+orders := schema.TableRef{
+    Name: "orders",
+    Columns: []schema.Column{
+        {Name: "id", DataType: "bigint"},
+        {Name: "email", DataType: "varchar", MaxLength: 255},
+    },
+}
+
+// This is a unique index, not a UNIQUE constraint.
+index, err := renderer.CreateIndex(orders, schema.Index{
+    Name: "ix_orders_email", Columns: []string{"email"}, IsUnique: true,
+})
+if err != nil {
+    return err
+}
+
+// A named UNIQUE constraint is a distinct database object.
+unique, err := renderer.CreateUniqueConstraint(orders, schema.UniqueConstraint{
+    Name: "uq_orders_email", Columns: []string{"email"},
+})
+if err != nil {
+    return err
+}
+
+check, err := renderer.CreateCheckConstraint(orders, schema.CheckConstraint{
+    Name: "ck_orders_id", Expression: "id > 0",
+})
+if err != nil {
+    return err
+}
+for _, result := range []schema.Result{index, unique, check} {
+    if err := target.ExecRaw(ctx, result.SQL); err != nil {
+        return err
+    }
+}
+```
+
+`TableRef.Columns` is optional for named primary/unique constraints. Provide it
+for a filtered-index predicate or check expression when source column types are
+needed for deterministic translation (for example boolean conventions).
+`CreatePrimaryKey` uses an explicit name when supplied, otherwise it derives
+`pk_<table>` using the same deterministic naming convention as `CreateTable`.
+
+Foreign keys, alter, drop, and scheduling remain outside this public milestone.
 
 `SourceDialect` is optional, but callers should set it whenever it is known:
 some names have source-specific meanings, such as MySQL `TINYINT(1)` and
@@ -73,17 +119,29 @@ empty `DefaultExpression` still represents a source `DEFAULT` clause.
 
 A new `schema.Registry` starts with these dialects and aliases:
 
-| Dialect | Aliases | Schema DDL | Table/column DDL |
-| --- | --- | --- | --- |
-| `postgres` | `postgresql`, `pg` | yes | yes |
-| `mssql` | `sqlserver`, `sql-server`, `sql_server` | yes | yes |
-| `mysql` | `mariadb`, `maria` | yes | yes |
-| `sqlite` | `sqlite3` | no | yes |
-| `clickhouse` | `click-house` | database | yes |
+| Dialect | Aliases | Schema/table/column | Secondary indexes | Standalone PK / named UNIQUE / CHECK |
+| --- | --- | --- | --- | --- |
+| `postgres` | `postgresql`, `pg` | yes | yes | yes |
+| `mssql` | `sqlserver`, `sql-server`, `sql_server` | yes | yes | yes |
+| `mysql` | `mariadb`, `maria` | yes | yes | yes |
+| `sqlite` | `sqlite3` | no schema / yes table-column | yes | no |
+| `clickhouse` | `click-house` | database / yes table-column | no | no |
 
 Inspect `renderer.Capabilities()` before using identities, defaults, computed
-columns, or a named schema. If input requests an unsupported feature, rendering
-returns `*schema.UnsupportedFeatureError`; SMT never silently drops it.
+columns, a named schema, or a side-object feature. The side-object fields are
+`SecondaryIndexes`, `StandalonePrimaryKeys`, `NamedUniqueConstraints`,
+`CheckConstraints`, `IndexExpressionKeys`, `IndexPrefixLengths`,
+`IndexIncludeColumns`, and `FilteredIndexes`. If input requests an unsupported
+feature, rendering returns `*schema.UnsupportedFeatureError`; SMT never
+silently drops it.
+
+PostgreSQL supports expression-key, included-column, and filtered indexes.
+SQL Server supports included-column and filtered indexes. MySQL supports
+expression-key and prefix-length index parts. SQLite supports ordinary/unique
+and filtered indexes only. ClickHouse side objects are explicitly unsupported:
+its table primary key is a MergeTree sorting key rather than a standalone
+relational constraint, and its secondary-index model needs parameters that are
+outside this API.
 
 SQLite's named-schema creation is deliberately unsupported when called through
 `CreateSchema`. `PlanCreate` follows DMT's established SQLite create behavior:
@@ -99,7 +157,8 @@ type mapper. The canonical package never represents nullability itself.
 
 ClickHouse `PRIMARY KEY` is a sparse sorting index, not a uniqueness constraint,
 so `CreateTable` reports a `primary-key-not-unique` warning whenever a primary
-key is supplied.
+key is supplied. `CreatePrimaryKey` is unsupported for ClickHouse rather than
+pretending that table behavior can be added as a relational constraint.
 
 ClickHouse does not allow `Nullable(Array(...))`, `Nullable(Map(...))`, or a
 nullable column in its `PRIMARY KEY` / `ORDER BY` expression. The public API
@@ -131,4 +190,6 @@ renderer, err := registry.NewRenderer(schema.Options{TargetDialect: "my-db"})
 
 The dialect interface receives only public `schema.Request`, `schema.Table`,
 and `schema.Column` values and returns `schema.Result`; it is safe to implement
-without importing SMT internals. Registries do not share mutable global state.
+without importing SMT internals. A custom dialect can additionally implement
+`schema.SideObjectDialect` to render the four standalone side-object methods.
+Registries do not share mutable global state.
