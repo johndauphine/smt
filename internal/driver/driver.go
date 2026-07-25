@@ -4,7 +4,7 @@
 package driver
 
 import (
-	"smt/internal/dbconfig"
+	"github.com/johndauphine/smt/internal/dbconfig"
 )
 
 // DriverDefaults contains default values for a database driver.

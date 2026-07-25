@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"smt/internal/secrets"
+	"github.com/johndauphine/smt/internal/secrets"
 )
 
 func testProvider(apiKey string) *secrets.Provider {

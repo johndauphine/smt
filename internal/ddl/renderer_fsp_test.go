@@ -3,7 +3,7 @@ package ddl
 import (
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func intp(v int) *int { return &v }

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/config"
+	"github.com/johndauphine/smt/internal/config"
 )
 
 // fullAnswers returns a maximal set of answers exercising every optional block.

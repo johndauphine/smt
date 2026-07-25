@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	exprir "smt/internal/expr"
+	exprir "github.com/johndauphine/smt/internal/expr"
 )
 
 // VerifyFinalizationDDLDeterministic parses SMT-rendered side-object DDL and

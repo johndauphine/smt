@@ -3,14 +3,14 @@ package pool
 import (
 	"fmt"
 
-	"smt/internal/config"
-	"smt/internal/dbconfig"
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/dbconfig"
+	"github.com/johndauphine/smt/internal/driver"
 
 	// Import driver packages to trigger init() registration
-	_ "smt/internal/driver/mssql"
-	_ "smt/internal/driver/mysql"
-	_ "smt/internal/driver/postgres"
+	_ "github.com/johndauphine/smt/internal/driver/mssql"
+	_ "github.com/johndauphine/smt/internal/driver/mysql"
+	_ "github.com/johndauphine/smt/internal/driver/postgres"
 )
 
 // NewSourcePool creates a source pool based on the configuration type.

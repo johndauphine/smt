@@ -19,13 +19,13 @@ import (
 
 	"github.com/urfave/cli/v2"
 
-	"smt/internal/config"
-	"smt/internal/driver"
-	"smt/internal/exitcodes"
-	"smt/internal/logging"
-	"smt/internal/orchestrator"
-	"smt/internal/pool"
-	"smt/internal/schemadiff"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/exitcodes"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/orchestrator"
+	"github.com/johndauphine/smt/internal/pool"
+	"github.com/johndauphine/smt/internal/schemadiff"
 )
 
 func driftCommand() *cli.Command {

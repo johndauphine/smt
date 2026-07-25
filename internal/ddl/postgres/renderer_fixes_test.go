@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // #79 — DEFAULT (NULL) on a textual column must stay SQL NULL, not become the

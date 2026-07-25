@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/logging"
+	"github.com/johndauphine/smt/internal/logging"
 )
 
 // TestMigrationDefaultsV1Shape pins the v1 migration_defaults contract: exactly

@@ -9,8 +9,8 @@ import (
 
 	"github.com/urfave/cli/v2"
 
-	"smt/internal/checkpoint"
-	"smt/internal/config"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/config"
 )
 
 // loadConfig returns the resolved Config along with the profile name and

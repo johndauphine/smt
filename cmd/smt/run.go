@@ -10,10 +10,10 @@ import (
 
 	"github.com/urfave/cli/v2"
 
-	"smt/internal/config"
-	"smt/internal/ddl"
-	"smt/internal/exitcodes"
-	"smt/internal/orchestrator"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/internal/exitcodes"
+	"github.com/johndauphine/smt/internal/orchestrator"
 )
 
 // createCommand defines `smt create`: extract the source schema and apply

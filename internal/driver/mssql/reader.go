@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johndauphine/smt/internal/dbconfig"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/stats"
+	"github.com/johndauphine/smt/internal/util"
 	_ "github.com/microsoft/go-mssqldb"
-	"smt/internal/dbconfig"
-	"smt/internal/driver"
-	"smt/internal/logging"
-	"smt/internal/stats"
-	"smt/internal/util"
 )
 
 // Reader implements driver.Reader for SQL Server.

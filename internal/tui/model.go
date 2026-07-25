@@ -15,13 +15,13 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/orchestrator"
+	"github.com/johndauphine/smt/internal/version"
 	"gopkg.in/yaml.v3"
-	"smt/internal/checkpoint"
-	"smt/internal/config"
-	"smt/internal/driver"
-	"smt/internal/logging"
-	"smt/internal/orchestrator"
-	"smt/internal/version"
 )
 
 // maxContentLines limits output retained in memory to prevent unbounded growth

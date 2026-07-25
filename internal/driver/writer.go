@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"smt/internal/stats"
+	"github.com/johndauphine/smt/internal/stats"
 )
 
 // Writer represents a database writer that executes DDL against a target

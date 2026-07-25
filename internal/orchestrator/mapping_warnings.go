@@ -3,8 +3,8 @@ package orchestrator
 import (
 	"strings"
 
-	"smt/internal/driver"
-	"smt/schema/canonical"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/schema/canonical"
 )
 
 type mappingWarning struct {

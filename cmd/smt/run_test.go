@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/config"
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func TestValidateCreateSupport(t *testing.T) {

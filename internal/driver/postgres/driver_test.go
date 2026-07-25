@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // TestLoadColumnsSQL_DetectsModernIdentity is a regression guard for the

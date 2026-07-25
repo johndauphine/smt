@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"smt/internal/config"
+	"github.com/johndauphine/smt/internal/config"
 )
 
 // ready returns an initialized model with a sized viewport so appendOutput is

@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"smt/internal/logging"
-	"smt/internal/secrets"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/secrets"
 )
 
 // Retry configuration constants

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"smt/internal/config"
+	"github.com/johndauphine/smt/internal/config"
 )
 
 // makeConfig builds the minimal config needed by tests that exercise

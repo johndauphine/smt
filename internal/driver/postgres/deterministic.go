@@ -1,8 +1,8 @@
 package postgres
 
 import (
-	pgddl "smt/internal/ddl/postgres"
-	"smt/internal/driver"
+	pgddl "github.com/johndauphine/smt/internal/ddl/postgres"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // The deterministic DDL implementation lives in internal/ddl/postgres so it

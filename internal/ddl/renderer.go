@@ -8,11 +8,11 @@ import (
 	"strings"
 	"sync"
 
-	pgddl "smt/internal/ddl/postgres"
-	"smt/internal/driver"
-	exprir "smt/internal/expr"
-	"smt/internal/logging"
-	"smt/schema/canonical"
+	pgddl "github.com/johndauphine/smt/internal/ddl/postgres"
+	"github.com/johndauphine/smt/internal/driver"
+	exprir "github.com/johndauphine/smt/internal/expr"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/schema/canonical"
 )
 
 // RendererVersion identifies the deterministic renderer's output contract.

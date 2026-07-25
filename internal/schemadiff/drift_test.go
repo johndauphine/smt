@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func dcol(name, dt string, opts ...func(*driver.Column)) driver.Column {

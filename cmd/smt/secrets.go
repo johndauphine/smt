@@ -10,7 +10,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 
-	"smt/internal/secrets"
+	"github.com/johndauphine/smt/internal/secrets"
 )
 
 func initSecretsCommand() *cli.Command {

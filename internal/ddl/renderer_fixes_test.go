@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
-	"smt/internal/logging"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/logging"
 )
 
 // #86 — the CHECK keyword must only be stripped at a word boundary, not off

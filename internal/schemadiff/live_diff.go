@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // ComputeLiveDiff compares the desired target schema derived from the current

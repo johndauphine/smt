@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"smt/internal/config"
-	"smt/internal/secrets"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/secrets"
 )
 
 func TestNewNotifierHonorsDisabledSlackConfig(t *testing.T) {

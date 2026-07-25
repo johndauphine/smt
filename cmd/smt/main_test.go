@@ -9,7 +9,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 
-	"smt/internal/exitcodes"
+	"github.com/johndauphine/smt/internal/exitcodes"
 )
 
 func TestTopLevelAction_UnknownCommandReturnsError(t *testing.T) {

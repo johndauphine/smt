@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // The deterministic renderer must surface an unsupported DEFAULT as a structured

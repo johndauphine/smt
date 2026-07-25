@@ -16,10 +16,10 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
-	"smt/internal/checkpoint"
-	"smt/internal/logging"
-	"smt/internal/schemadiff"
-	"smt/internal/source"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/schemadiff"
+	"github.com/johndauphine/smt/internal/source"
 )
 
 // defaultAIConcurrency is the number of concurrent AI calls used when

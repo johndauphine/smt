@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"smt/internal/config"
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // targetAsSource must carry the connection details the target reader needs,

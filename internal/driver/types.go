@@ -6,7 +6,7 @@ import (
 	"time"
 	"unsafe"
 
-	"smt/schema/canonical"
+	"github.com/johndauphine/smt/schema/canonical"
 )
 
 // Table represents a database table with its metadata.

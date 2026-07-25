@@ -3,7 +3,7 @@
 package pool
 
 import (
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // SourcePool is an alias for driver.Reader for backward compatibility.

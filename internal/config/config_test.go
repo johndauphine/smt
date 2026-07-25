@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/secrets"
+	"github.com/johndauphine/smt/internal/secrets"
 )
 
 func disableSecretsForTest(t *testing.T) {

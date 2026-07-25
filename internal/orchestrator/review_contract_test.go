@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/config"
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 // fakeReviewer implements both reviewer interfaces with scripted behavior and

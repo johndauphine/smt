@@ -30,16 +30,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/urfave/cli/v2"
 
-	"smt/internal/checkpoint"
-	"smt/internal/config"
-	"smt/internal/ddl"
-	"smt/internal/driver"
-	"smt/internal/exitcodes"
-	"smt/internal/logging"
-	"smt/internal/orchestrator"
-	"smt/internal/pool"
-	"smt/internal/schemadiff"
-	"smt/internal/version"
+	"github.com/johndauphine/smt/internal/checkpoint"
+	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/ddl"
+	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/exitcodes"
+	"github.com/johndauphine/smt/internal/logging"
+	"github.com/johndauphine/smt/internal/orchestrator"
+	"github.com/johndauphine/smt/internal/pool"
+	"github.com/johndauphine/smt/internal/schemadiff"
+	"github.com/johndauphine/smt/internal/version"
 )
 
 func snapshotCommand() *cli.Command {

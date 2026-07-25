@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"smt/internal/driver"
+	"github.com/johndauphine/smt/internal/driver"
 )
 
 func TestRenderer_CreateTableMSSQL(t *testing.T) {
