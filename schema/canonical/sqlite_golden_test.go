@@ -28,6 +28,14 @@ func TestSQLiteToCanonical_Golden(t *testing.T) {
 			want: CanonicalType{Kind: Boolean},
 		},
 		{
+			name: "fixed bit width", typeName: "BIT(8)",
+			want: CanonicalType{Kind: BitString, Length: 8},
+		},
+		{
+			name: "variable bit width", typeName: "BIT VARYING(12)",
+			want: CanonicalType{Kind: VarBitString, Length: 12},
+		},
+		{
 			name: "varchar inline length", typeName: "VARCHAR(255)",
 			want: CanonicalType{Kind: Varchar, Length: 255},
 		},
@@ -98,6 +106,14 @@ func TestFromCanonicalSQLite_Golden(t *testing.T) {
 		{
 			name: "boolean", ct: CanonicalType{Kind: Boolean},
 			want: "BOOLEAN",
+		},
+		{
+			name: "fixed bit string", ct: CanonicalType{Kind: BitString, Length: 8},
+			want: "BIT(8)", warningSubstrs: []string{"no native bit-string"},
+		},
+		{
+			name: "variable bit string", ct: CanonicalType{Kind: VarBitString, Length: 12},
+			want: "BIT VARYING(12)", warningSubstrs: []string{"no native bit-string"},
 		},
 		{
 			name: "narrow unsigned integer", ct: CanonicalType{Kind: TinyInt, Unsigned: true},

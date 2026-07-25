@@ -88,7 +88,7 @@ func TestToCanonical_SourceGolden(t *testing.T) {
 		{
 			name: "postgres character varying length", source: "postgres", typeName: "character varying",
 			meta: TypeMeta{MaxLength: 120},
-			want: CanonicalType{Kind: Varchar, Length: 120},
+			want: CanonicalType{Kind: Varchar, Length: 120, National: true},
 		},
 		{
 			name: "postgres bytea", source: "postgres", typeName: "bytea",

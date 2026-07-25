@@ -22,6 +22,13 @@ func sqliteToCanonical(typeName string, m TypeMeta) CanonicalType {
 	length := sqliteLength(m, params)
 	precision, scale := sqlitePrecisionScale(m, params)
 	fsp := sqliteFsp(m, params)
+	bitMeta := m
+	if bitMeta.MaxLength == 0 && len(params) == 1 {
+		bitMeta.MaxLength = params[0]
+	}
+	if ct, ok := toBit(base, bitMeta, "sqlite"); ok {
+		return ct
+	}
 
 	switch base {
 	case "bool", "boolean":
@@ -148,6 +155,10 @@ func fromCanonicalSQLite(ct CanonicalType, opts RenderOpts) (string, error) {
 	switch ct.Kind {
 	case Boolean:
 		return "BOOLEAN", nil
+	case BitString:
+		return bitStringDDL("BIT", ct.Length), nil
+	case VarBitString:
+		return bitStringDDL("BIT VARYING", ct.Length), nil
 	case TinyInt:
 		return "TINYINT", nil
 	case SmallInt:
@@ -162,7 +173,7 @@ func fromCanonicalSQLite(ct CanonicalType, opts RenderOpts) (string, error) {
 		// special INTEGER PRIMARY KEY rowid-alias semantics.
 		return "INTEGER", nil
 	case Decimal:
-		return decimalDDL("NUMERIC", ct), nil
+		return decimalDDL("NUMERIC", ct, "sqlite"), nil
 	case Real, Double:
 		return "REAL", nil
 	case Varchar:
@@ -214,6 +225,8 @@ func sqliteMappingWarnings(ct CanonicalType, rendered string) []MappingWarning {
 	}
 
 	switch ct.Kind {
+	case BitString, VarBitString:
+		add("SQLite has no native bit-string type; rendered as " + rendered)
 	case TinyInt, SmallInt, MediumInt, Integer, BigInt:
 		if ct.Unsigned {
 			add("SQLite has no unsigned integer type; rendered as " + rendered)
