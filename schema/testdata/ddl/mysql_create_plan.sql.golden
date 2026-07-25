@@ -1,0 +1,9 @@
+create_schema
+CREATE DATABASE IF NOT EXISTS `crm`
+
+create_table
+CREATE TABLE `crm`.`Accounts` (
+    `ID` INT AUTO_INCREMENT NOT NULL,
+    `Name` VARCHAR(80) NOT NULL,
+    CONSTRAINT `pk_Accounts` PRIMARY KEY (`ID`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4

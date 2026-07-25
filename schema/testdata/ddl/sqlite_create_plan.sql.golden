@@ -1,0 +1,5 @@
+create_table
+CREATE TABLE "accounts" (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+    "name" VARCHAR(80) NOT NULL
+)
