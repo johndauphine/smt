@@ -67,7 +67,9 @@ import (
 // never sacrificed for unicode (#224).
 // "17": ClickHouse rejects Nullable(Array(...)) / Nullable(Map(...)) and
 // nullable PRIMARY KEY / ORDER BY columns instead of emitting invalid DDL.
-const RendererVersion = "17"
+// "18": standalone schema side-object DDL adds deterministic index and
+// constraint rendering, including fail-closed cross-dialect index predicates.
+const RendererVersion = "18"
 
 // ClickHouseNullableCompositeError reports a nullable composite that ClickHouse
 // cannot represent as Nullable(T). Rewriting it to Array(Nullable(T)) would
