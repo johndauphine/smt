@@ -195,6 +195,59 @@ func TestRegistryRegistersAndSelectsCustomDialect(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsDuplicateAliasesWithinDialect(t *testing.T) {
+	tests := []struct {
+		name    string
+		dialect duplicateAliasesDialect
+	}{
+		{
+			name:    "repeated alias",
+			dialect: duplicateAliasesDialect{name: "duplicate-aliases", aliases: []string{"alias-one", "ALIAS-ONE"}},
+		},
+		{
+			name:    "alias matches name",
+			dialect: duplicateAliasesDialect{name: "same-name-alias", aliases: []string{"SAME-NAME-ALIAS"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := schema.NewRegistry().Register(tc.dialect)
+			if !errors.Is(err, schema.ErrDialectRegistered) {
+				t.Fatalf("Register error = %v, want ErrDialectRegistered", err)
+			}
+		})
+	}
+}
+
+func TestPublicDDLRejectsInvalidPrimaryKeyColumns(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "postgres"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		primaryKey []string
+		want       string
+	}{
+		{name: "empty", primaryKey: []string{""}, want: "primary key contains an empty column name"},
+		{name: "missing", primaryKey: []string{"missing"}, want: `primary key column "missing" does not exist`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := renderer.CreateTable(schema.Table{
+				Name:       "accounts",
+				Columns:    []schema.Column{{Name: "id", DataType: "bigint"}},
+				PrimaryKey: tc.primaryKey,
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CreateTable error = %v, want text %q", err, tc.want)
+			}
+		})
+	}
+}
+
 type testDialect struct{}
 
 func (testDialect) Name() string      { return "test" }
@@ -211,6 +264,15 @@ func (testDialect) RenderTable(_ schema.Request, table schema.Table) (schema.Res
 func (testDialect) RenderColumn(_ schema.Request, column schema.Column) (schema.Result, error) {
 	return schema.Result{SQL: "TEST COLUMN " + column.Name}, nil
 }
+
+type duplicateAliasesDialect struct {
+	testDialect
+	name    string
+	aliases []string
+}
+
+func (d duplicateAliasesDialect) Name() string      { return d.name }
+func (d duplicateAliasesDialect) Aliases() []string { return d.aliases }
 
 func assertGolden(t *testing.T, got, name string) {
 	t.Helper()

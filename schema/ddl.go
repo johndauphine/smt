@@ -182,11 +182,16 @@ func (r *Registry) Register(d Dialect) error {
 	}
 	keys := make([]string, 0, len(d.Aliases())+1)
 	keys = append(keys, name)
+	seen := map[string]struct{}{name: {}}
 	for _, alias := range d.Aliases() {
 		alias = normalizedDialectName(alias)
 		if alias == "" {
 			return fmt.Errorf("register DDL dialect %q: empty alias", name)
 		}
+		if _, exists := seen[alias]; exists {
+			return fmt.Errorf("%w: %q", ErrDialectRegistered, alias)
+		}
+		seen[alias] = struct{}{}
 		keys = append(keys, alias)
 	}
 
@@ -314,9 +319,19 @@ func (r Renderer) validateTable(table Table) error {
 	if len(table.PrimaryKey) > 0 && !r.Capabilities().PrimaryKeys {
 		return r.unsupported("primary keys")
 	}
+	columnNames := make(map[string]struct{}, len(table.Columns))
 	for _, column := range table.Columns {
 		if err := r.validateColumn(column); err != nil {
 			return fmt.Errorf("render table %q: %w", table.Name, err)
+		}
+		columnNames[column.Name] = struct{}{}
+	}
+	for _, name := range table.PrimaryKey {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("render table %q: primary key contains an empty column name", table.Name)
+		}
+		if _, exists := columnNames[name]; !exists {
+			return fmt.Errorf("render table %q: primary key column %q does not exist", table.Name, name)
 		}
 	}
 	return nil
