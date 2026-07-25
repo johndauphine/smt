@@ -1,0 +1,5 @@
+CREATE TABLE "audit_log" (
+    "id" INTEGER NOT NULL,
+    "payload" TEXT,
+    CONSTRAINT "pk_audit_log" PRIMARY KEY ("id")
+)

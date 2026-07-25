@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	pgddl "smt/internal/ddl/postgres"
 	"smt/internal/driver"
-	pgddl "smt/internal/driver/postgres"
 	exprir "smt/internal/expr"
 	"smt/internal/logging"
 	"smt/schema/canonical"
@@ -65,7 +65,31 @@ import (
 // (unicode + exact length); above 4000 they fall back to length-preserving
 // codepage VARCHAR/CHAR rather than NVARCHAR(MAX), so exact max_length is
 // never sacrificed for unicode (#224).
-const RendererVersion = "16"
+// "17": ClickHouse rejects Nullable(Array(...)) / Nullable(Map(...)) and
+// nullable PRIMARY KEY / ORDER BY columns instead of emitting invalid DDL.
+const RendererVersion = "17"
+
+// ClickHouseNullableCompositeError reports a nullable composite that ClickHouse
+// cannot represent as Nullable(T). Rewriting it to Array(Nullable(T)) would
+// change the column's semantics, so callers must choose an explicit model.
+type ClickHouseNullableCompositeError struct {
+	Type   string
+	Column string
+}
+
+func (e *ClickHouseNullableCompositeError) Error() string {
+	return fmt.Sprintf("ClickHouse does not support Nullable(%s(...)) for column %q", e.Type, e.Column)
+}
+
+// ClickHouseNullableKeyError reports a nullable column used by ClickHouse's
+// PRIMARY KEY / ORDER BY expression.
+type ClickHouseNullableKeyError struct {
+	Column string
+}
+
+func (e *ClickHouseNullableKeyError) Error() string {
+	return fmt.Sprintf("ClickHouse PRIMARY KEY / ORDER BY cannot reference nullable column %q", e.Column)
+}
 
 type Renderer struct {
 	target            string
@@ -80,7 +104,7 @@ func NewRenderer(target, schema, unknownTypePolicy string) (Renderer, error) {
 		target = "postgres"
 	}
 	switch target {
-	case "postgres", "mssql", "mysql":
+	case "postgres", "mssql", "mysql", "sqlite", "clickhouse":
 	default:
 		return Renderer{}, fmt.Errorf("unsupported deterministic DDL target %q", target)
 	}
@@ -116,6 +140,10 @@ func (r Renderer) CreateSchemaDDL() (string, error) {
 		return fmt.Sprintf("IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'%s') EXEC(N'%s')", escapedName, escapedDDL), nil
 	case "mysql":
 		return fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", r.quote(schema)), nil
+	case "clickhouse":
+		return fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", r.quote(schema)), nil
+	case "sqlite":
+		return "", fmt.Errorf("SQLite does not support creating named schemas")
 	default:
 		return "", fmt.Errorf("unsupported deterministic DDL target %q", r.target)
 	}
@@ -124,6 +152,11 @@ func (r Renderer) CreateSchemaDDL() (string, error) {
 func (r Renderer) CreateTableDDL(t *driver.Table) (string, map[string]string, error) {
 	if r.target == "postgres" {
 		return pgddl.RenderCreateTableDDLWithSource(t, r.schema, false, r.unknownTypePolicy, r.source)
+	}
+	if r.target == "clickhouse" {
+		if err := r.validateClickHousePrimaryKey(t); err != nil {
+			return "", nil, err
+		}
 	}
 
 	tableName := r.normalize(t.Name)
@@ -144,8 +177,15 @@ func (r Renderer) CreateTableDDL(t *driver.Table) (string, map[string]string, er
 		for i, c := range t.PrimaryKey {
 			cols[i] = r.quote(r.normalize(c))
 		}
-		lines = append(lines, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)",
-			r.quote(r.normalize("pk_"+t.Name)), strings.Join(cols, ", ")))
+		if r.target == "clickhouse" {
+			// In ClickHouse PRIMARY KEY is a sparse index, not a uniqueness
+			// constraint. The public schema API exposes that semantic caveat as a
+			// warning while this core renderer keeps the valid type/table syntax.
+			lines = append(lines, fmt.Sprintf("    PRIMARY KEY (%s)", strings.Join(cols, ", ")))
+		} else {
+			lines = append(lines, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)",
+				r.quote(r.normalize("pk_"+t.Name)), strings.Join(cols, ", ")))
+		}
 	}
 
 	var b strings.Builder
@@ -154,6 +194,20 @@ func (r Renderer) CreateTableDDL(t *driver.Table) (string, map[string]string, er
 	b.WriteString("\n)")
 	if r.target == "mysql" {
 		b.WriteString(" ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+	}
+	if r.target == "clickhouse" {
+		b.WriteString(" ENGINE = MergeTree ORDER BY ")
+		if len(t.PrimaryKey) == 0 {
+			b.WriteString("tuple()")
+		} else {
+			cols := make([]string, len(t.PrimaryKey))
+			for i, c := range t.PrimaryKey {
+				cols[i] = r.quote(r.normalize(c))
+			}
+			b.WriteString("(")
+			b.WriteString(strings.Join(cols, ", "))
+			b.WriteString(")")
+		}
 	}
 	return b.String(), columnTypes, nil
 }
@@ -218,7 +272,10 @@ func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.C
 			b.WriteString(" AUTO_INCREMENT")
 		}
 	}
-	if !col.IsNullable {
+	// ClickHouse expresses nullability in the type (`Nullable(T)`), not as a
+	// column constraint. Keep that composition in the DDL layer rather than
+	// polluting the dialect-neutral canonical type representation.
+	if !col.IsNullable && r.target != "clickhouse" {
 		b.WriteString(" NOT NULL")
 	}
 	if driver.ColumnHasDefault(col) && !col.IsIdentity {
@@ -257,6 +314,10 @@ func (r Renderer) ColumnType(col driver.Column) (string, error) {
 		return r.mssqlColumnType(col, dt)
 	case "mysql":
 		return r.mysqlColumnType(col, dt)
+	case "sqlite":
+		return r.sqliteColumnType(col, dt)
+	case "clickhouse":
+		return r.clickhouseColumnType(col, dt)
 	default:
 		return "", fmt.Errorf("unsupported deterministic DDL target %q", r.target)
 	}
@@ -682,6 +743,71 @@ func (r Renderer) mysqlColumnType(col driver.Column, dt string) (string, error) 
 	return r.canonicalColumnType(col, dt, "mysql")
 }
 
+func (r Renderer) sqliteColumnType(col driver.Column, dt string) (string, error) {
+	return r.canonicalColumnType(col, dt, "sqlite")
+}
+
+func (r Renderer) clickhouseColumnType(col driver.Column, dt string) (string, error) {
+	if col.IsNullable {
+		if composite, ok := clickhouseCompositeType(col.DataType); ok {
+			return "", &ClickHouseNullableCompositeError{Type: composite, Column: col.Name}
+		}
+	}
+	typ, err := r.canonicalColumnType(col, dt, "clickhouse")
+	if err != nil || !col.IsNullable {
+		return typ, err
+	}
+	if composite, ok := clickhouseCompositeType(typ); ok {
+		return "", &ClickHouseNullableCompositeError{Type: composite, Column: col.Name}
+	}
+	return "Nullable(" + typ + ")", nil
+}
+
+// clickhouseCompositeType recognizes top-level composite DDL types that
+// ClickHouse forbids inside Nullable(...). Checking both source text and the
+// rendered type keeps the guard effective for current Array mappings and any
+// future native Map mapping.
+func clickhouseCompositeType(typ string) (string, bool) {
+	typ = strings.TrimSpace(typ)
+	for {
+		lower := strings.ToLower(typ)
+		for _, wrapper := range []string{"nullable(", "lowcardinality("} {
+			if strings.HasPrefix(lower, wrapper) && strings.HasSuffix(typ, ")") {
+				typ = strings.TrimSpace(typ[len(wrapper) : len(typ)-1])
+				break
+			}
+		}
+		if lower == strings.ToLower(typ) {
+			break
+		}
+	}
+	lower := strings.ToLower(typ)
+	for _, candidate := range []struct {
+		prefix string
+		name   string
+	}{
+		{prefix: "array(", name: "Array"},
+		{prefix: "map(", name: "Map"},
+	} {
+		if strings.HasPrefix(lower, candidate.prefix) {
+			return candidate.name, true
+		}
+	}
+	return "", false
+}
+
+func (r Renderer) validateClickHousePrimaryKey(t *driver.Table) error {
+	for _, key := range t.PrimaryKey {
+		keyName := r.normalize(key)
+		for _, col := range t.Columns {
+			if r.normalize(col.Name) == keyName && col.IsNullable {
+				return &ClickHouseNullableKeyError{Column: col.Name}
+			}
+		}
+	}
+	return nil
+}
+
 // canonicalColumnType maps a source type to the target dialect's DDL type
 // through the canonical type IR (#62): the source column is normalized to a
 // CanonicalType for the source dialect, then rendered for the target dialect.
@@ -797,6 +923,10 @@ func (r Renderer) unknownTypeFallback() string {
 		return "NVARCHAR(MAX)"
 	case "mysql":
 		return "TEXT"
+	case "sqlite":
+		return "TEXT"
+	case "clickhouse":
+		return "String"
 	default:
 		return "text"
 	}
@@ -814,6 +944,10 @@ func (r Renderer) quote(name string) string {
 		return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
 	case "mysql":
 		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+	case "clickhouse":
+		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+	case "sqlite":
+		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 	default:
 		return name
 	}
@@ -841,6 +975,10 @@ func canonicalTarget(target string) string {
 		return "mssql"
 	case "mysql", "mariadb", "maria":
 		return "mysql"
+	case "sqlite", "sqlite3":
+		return "sqlite"
+	case "clickhouse", "click-house":
+		return "clickhouse"
 	default:
 		// Defer to the driver registry so any alias a driver registers
 		// (including future engines) resolves without editing this list.

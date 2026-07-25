@@ -2,6 +2,7 @@ package ddl
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -47,12 +48,14 @@ func TestStripOuterCheckParens(t *testing.T) {
 // #85 — registry aliases accepted by config validation must construct a renderer.
 func TestNewRenderer_RegistryAliases(t *testing.T) {
 	for alias, want := range map[string]string{
-		"sql-server": "mssql",
-		"sql_server": "mssql",
-		"sqlserver":  "mssql",
-		"maria":      "mysql",
-		"mariadb":    "mysql",
-		"pg":         "postgres",
+		"sql-server":  "mssql",
+		"sql_server":  "mssql",
+		"sqlserver":   "mssql",
+		"maria":       "mysql",
+		"mariadb":     "mysql",
+		"pg":          "postgres",
+		"sqlite3":     "sqlite",
+		"click-house": "clickhouse",
 	} {
 		r, err := NewRenderer(alias, "s", "fail")
 		if err != nil {
@@ -61,6 +64,64 @@ func TestNewRenderer_RegistryAliases(t *testing.T) {
 		if r.Target() != want {
 			t.Errorf("NewRenderer(%q).Target() = %q, want %q", alias, r.Target(), want)
 		}
+	}
+}
+
+func TestClickHouseRejectsNullableCompositesAndKeys(t *testing.T) {
+	r, err := NewRenderer("clickhouse", "analytics", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	r = r.WithSource("clickhouse")
+
+	for _, tc := range []struct {
+		name string
+		col  driver.Column
+		kind string
+	}{
+		{name: "array", col: driver.Column{Name: "tags", DataType: "Array(String)", IsNullable: true}, kind: "Array"},
+		{name: "map", col: driver.Column{Name: "labels", DataType: "Map(String, String)", IsNullable: true}, kind: "Map"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := r.ColumnDefinition(tc.col)
+			var unsupported *ClickHouseNullableCompositeError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("ColumnDefinition error = %v, want ClickHouseNullableCompositeError", err)
+			}
+			if unsupported.Type != tc.kind || unsupported.Column != tc.col.Name {
+				t.Fatalf("error = %#v, want %s for %q", unsupported, tc.kind, tc.col.Name)
+			}
+		})
+	}
+
+	table := &driver.Table{
+		Name:       "events",
+		Columns:    []driver.Column{{Name: "event_id", DataType: "Int64", IsNullable: true}},
+		PrimaryKey: []string{"event_id"},
+	}
+	_, _, err = r.CreateTableDDL(table)
+	var nullableKey *ClickHouseNullableKeyError
+	if !errors.As(err, &nullableKey) {
+		t.Fatalf("CreateTableDDL error = %v, want ClickHouseNullableKeyError", err)
+	}
+	if nullableKey.Column != "event_id" {
+		t.Fatalf("nullable key column = %q, want event_id", nullableKey.Column)
+	}
+}
+
+func TestClickHouseAllowsNullablePrimitive(t *testing.T) {
+	r, err := NewRenderer("clickhouse", "analytics", "fail")
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	r = r.WithSource("clickhouse")
+
+	def, typ, err := r.ColumnDefinition(driver.Column{Name: "event_id", DataType: "Int64", IsNullable: true})
+	if err != nil {
+		t.Fatalf("ColumnDefinition: %v", err)
+	}
+	if typ != "Nullable(Int64)" || def != "`event_id` Nullable(Int64)" {
+		t.Fatalf("nullable primitive = (%q, %q), want (`event_id` Nullable(Int64), Nullable(Int64))", def, typ)
 	}
 }
 

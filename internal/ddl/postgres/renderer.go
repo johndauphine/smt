@@ -1,0 +1,947 @@
+package postgres
+
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+
+	"smt/internal/driver"
+	exprir "smt/internal/expr"
+	"smt/internal/logging"
+	"smt/schema/canonical"
+)
+
+type deterministicDDL struct {
+	dialect           deterministicDialect
+	unknownTypePolicy string
+	// sourceDialect is the canonical source driver name ("mysql", "mssql",
+	// "postgres"). Empty means unknown — the canonical type mapping then falls
+	// back to dialect-blind defaults (the historical source-agnostic behavior).
+	sourceDialect string
+}
+
+func newDeterministicDDL(policy ...string) deterministicDDL {
+	unknownTypePolicy := "fail"
+	if len(policy) > 0 && strings.TrimSpace(policy[0]) != "" {
+		unknownTypePolicy = strings.TrimSpace(policy[0])
+	}
+	return deterministicDDL{dialect: deterministicDialect{}, unknownTypePolicy: unknownTypePolicy}
+}
+
+// deterministicDialect contains only the PostgreSQL quoting rules used by the
+// pure DDL renderer. It deliberately does not depend on the PostgreSQL driver
+// implementation, whose connection and registration code belongs in
+// internal/driver/postgres.
+type deterministicDialect struct{}
+
+func (deterministicDialect) QuoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+func (d deterministicDialect) QualifyTable(schema, table string) string {
+	return d.QuoteIdentifier(schema) + "." + d.QuoteIdentifier(table)
+}
+
+func sanitizePGIdentifier(ident string) string {
+	return driver.NormalizeIdentifier("postgres", ident)
+}
+
+func sanitizePGTableName(ident string) string {
+	return sanitizePGIdentifier(ident)
+}
+
+// withSource returns a copy that knows the source dialect, so the canonical
+// type mapping can resolve dialect-dependent source types (e.g. MySQL FLOAT is
+// single-precision while MSSQL FLOAT is double; MySQL tinyint(1) is boolean).
+func (r deterministicDDL) withSource(sourceDialect string) deterministicDDL {
+	r.sourceDialect = strings.ToLower(strings.TrimSpace(sourceDialect))
+	return r
+}
+
+// RenderCreateTableDDLWithSource is RenderCreateTableDDLWithPolicy that also
+// knows the source dialect, so the canonical type mapping can resolve
+// dialect-dependent source types. sourceDialect "" reproduces the source-blind
+// behavior.
+func RenderCreateTableDDLWithSource(t *driver.Table, targetSchema string, unlogged bool, unknownTypePolicy, sourceDialect string) (string, map[string]string, error) {
+	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).createTable(t, targetSchema, unlogged)
+}
+
+// RenderColumnDefinitionWithSource is the source-dialect-aware variant of
+// RenderColumnDefinitionWithContextAndPolicy.
+func RenderColumnDefinitionWithSource(col driver.Column, tableColumns []driver.Column, unknownTypePolicy, sourceDialect string) (string, error) {
+	def, _, err := newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).columnDefinition(col, tableColumns)
+	return def, err
+}
+
+func RenderColumnTypeWithPolicy(col driver.Column, unknownTypePolicy string) (string, error) {
+	return newDeterministicDDL(unknownTypePolicy).columnType(col)
+}
+
+// RenderColumnTypeWithSource is the source-dialect-aware variant of
+// RenderColumnTypeWithPolicy.
+func RenderColumnTypeWithSource(col driver.Column, unknownTypePolicy, sourceDialect string) (string, error) {
+	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).columnType(col)
+}
+
+// RenderColumnDefaultDDLWithSource is the source-dialect-aware variant of
+// RenderColumnDefaultDDLWithPolicy, so boolean defaults are translated for the
+// source's boolean convention (MSSQL bit and MySQL tinyint(1) alike).
+func RenderColumnDefaultDDLWithSource(col driver.Column, unknownTypePolicy, sourceDialect string) (string, error) {
+	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).defaultExpression(col)
+}
+
+// RenderCreateIndexDDLWithSource is the source-dialect-aware variant of
+// RenderCreateIndexDDL, so a filtered-index predicate over a boolean-convention
+// column (MSSQL bit / MySQL tinyint(1)) is rewritten to boolean literals.
+func RenderCreateIndexDDLWithSource(t *driver.Table, idx *driver.Index, targetSchema, sourceDialect string) (string, error) {
+	return newDeterministicDDL().withSource(sourceDialect).createIndex(t, idx, targetSchema)
+}
+
+func RenderCreateForeignKeyDDL(t *driver.Table, fk *driver.ForeignKey, targetSchema string) (string, error) {
+	return newDeterministicDDL().createForeignKey(t, fk, targetSchema)
+}
+
+func RenderCreateCheckConstraintDDL(t *driver.Table, chk *driver.CheckConstraint, targetSchema string) (string, error) {
+	return newDeterministicDDL().createCheckConstraint(t, chk, targetSchema)
+}
+
+// RenderCreateCheckConstraintDDLWithSource is the source-dialect-aware variant
+// of RenderCreateCheckConstraintDDL, so a CHECK predicate over a
+// boolean-convention column (MSSQL bit / MySQL tinyint(1)) is rewritten to
+// boolean literals.
+func RenderCreateCheckConstraintDDLWithSource(t *driver.Table, chk *driver.CheckConstraint, targetSchema, sourceDialect string) (string, error) {
+	return newDeterministicDDL().withSource(sourceDialect).createCheckConstraint(t, chk, targetSchema)
+}
+
+func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlogged bool) (string, map[string]string, error) {
+	tableName := sanitizePGTableName(t.Name)
+	columnTypes := make(map[string]string, len(t.Columns))
+	lines := make([]string, 0, len(t.Columns)+1)
+
+	for _, col := range t.Columns {
+		def, colType, err := r.columnDefinition(col, t.Columns)
+		if err != nil {
+			return "", nil, fmt.Errorf("mapping column %s.%s: %w", t.Name, col.Name, err)
+		}
+		columnTypes[col.Name] = colType
+		columnTypes[sanitizePGIdentifier(col.Name)] = colType
+		lines = append(lines, "    "+def)
+	}
+
+	if len(t.PrimaryKey) > 0 {
+		cols := make([]string, len(t.PrimaryKey))
+		for i, c := range t.PrimaryKey {
+			cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+		}
+		pkName := "pk_" + tableName
+		lines = append(lines, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)",
+			r.dialect.QuoteIdentifier(pkName), strings.Join(cols, ", ")))
+	}
+
+	create := "CREATE TABLE"
+	if unlogged {
+		create = "CREATE UNLOGGED TABLE"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s (\n", create, r.dialect.QualifyTable(targetSchema, tableName))
+	b.WriteString(strings.Join(lines, ",\n"))
+	b.WriteString("\n)")
+	return b.String(), columnTypes, nil
+}
+
+func (r deterministicDDL) columnDefinition(col driver.Column, tableColumns ...[]driver.Column) (string, string, error) {
+	colName := sanitizePGIdentifier(col.Name)
+	colType, err := r.columnType(col)
+	if err != nil {
+		return "", "", err
+	}
+	contextColumns := []driver.Column(nil)
+	if len(tableColumns) > 0 {
+		contextColumns = tableColumns[0]
+	}
+	if col.IsComputed {
+		expr, err := r.sqlServerExpression(col.ComputedExpression)
+		if err != nil {
+			return "", "", fmt.Errorf("mapping computed column %s: %w", col.Name, err)
+		}
+		if strings.TrimSpace(expr) == "" {
+			return "", "", fmt.Errorf("computed column %s has no expression", col.Name)
+		}
+		if isTextualPGType(colType) {
+			expr = rewriteSQLServerStringConcat(expr)
+		}
+		expr = r.rewriteBooleanComparisons(expr, contextColumns)
+		if strings.EqualFold(strings.TrimSpace(col.DataType), "bit") {
+			expr = rewriteSQLServerBooleanResultLiterals(expr)
+		}
+		var b strings.Builder
+		b.WriteString(r.dialect.QuoteIdentifier(colName))
+		b.WriteString(" ")
+		b.WriteString(colType)
+		b.WriteString(" GENERATED ALWAYS AS (")
+		b.WriteString(expr)
+		b.WriteString(") STORED")
+		if !col.IsNullable {
+			b.WriteString(" NOT NULL")
+		}
+		return b.String(), colType, nil
+	}
+
+	var b strings.Builder
+	b.WriteString(r.dialect.QuoteIdentifier(colName))
+	b.WriteString(" ")
+	b.WriteString(colType)
+
+	if !col.IsIdentity && !col.IsNullable {
+		b.WriteString(" NOT NULL")
+	}
+	if !col.IsIdentity && driver.ColumnHasDefault(col) {
+		def := strings.TrimSpace(col.DefaultExpressionOverride)
+		if def == "" {
+			var err error
+			def, err = r.defaultExpression(col)
+			if err != nil {
+				return "", "", &driver.ExpressionRenderError{
+					Column: col.Name, Kind: "default", SourceExpr: col.DefaultExpression, Err: err,
+				}
+			}
+		}
+		if def != "" {
+			b.WriteString(" DEFAULT ")
+			b.WriteString(def)
+		}
+	}
+	return b.String(), colType, nil
+}
+
+func (r deterministicDDL) createIndex(t *driver.Table, idx *driver.Index, targetSchema string) (string, error) {
+	tableName := sanitizePGTableName(t.Name)
+	indexName := sanitizePGIdentifier(idx.Name)
+	if len(idx.Columns) == 0 {
+		return "", fmt.Errorf("index %s has no columns", idx.Name)
+	}
+
+	cols := make([]string, len(idx.Columns))
+	for i, c := range idx.Columns {
+		if i < len(idx.ColumnExpressions) && idx.ColumnExpressions[i] {
+			cols[i] = strings.TrimSpace(c)
+		} else {
+			cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("CREATE ")
+	if idx.IsUnique {
+		b.WriteString("UNIQUE ")
+	}
+	fmt.Fprintf(&b, "INDEX %s ON %s (%s)",
+		r.dialect.QuoteIdentifier(indexName),
+		r.dialect.QualifyTable(targetSchema, tableName),
+		strings.Join(cols, ", "))
+
+	if len(idx.IncludeCols) > 0 {
+		includeCols := make([]string, len(idx.IncludeCols))
+		for i, c := range idx.IncludeCols {
+			includeCols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+		}
+		fmt.Fprintf(&b, " INCLUDE (%s)", strings.Join(includeCols, ", "))
+	}
+
+	if filter := strings.TrimSpace(idx.Filter); filter != "" {
+		expr, err := r.sqlServerExpression(filter)
+		if err != nil {
+			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
+		}
+		expr = r.rewriteBooleanComparisons(expr, t.Columns)
+		b.WriteString(" WHERE ")
+		b.WriteString(expr)
+	}
+
+	return b.String(), nil
+}
+
+func (r deterministicDDL) createForeignKey(t *driver.Table, fk *driver.ForeignKey, targetSchema string) (string, error) {
+	tableName := sanitizePGTableName(t.Name)
+	fkName := sanitizePGIdentifier(fk.Name)
+	if len(fk.Columns) == 0 {
+		return "", fmt.Errorf("foreign key %s has no columns", fk.Name)
+	}
+	if len(fk.Columns) != len(fk.RefColumns) {
+		return "", fmt.Errorf("foreign key %s has %d columns but %d referenced columns", fk.Name, len(fk.Columns), len(fk.RefColumns))
+	}
+
+	cols := make([]string, len(fk.Columns))
+	for i, c := range fk.Columns {
+		cols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+	}
+	refCols := make([]string, len(fk.RefColumns))
+	for i, c := range fk.RefColumns {
+		refCols[i] = r.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+	}
+
+	refTable := sanitizePGTableName(fk.RefTable)
+	var b strings.Builder
+	fmt.Fprintf(&b, "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+		r.dialect.QualifyTable(targetSchema, tableName),
+		r.dialect.QuoteIdentifier(fkName),
+		strings.Join(cols, ", "),
+		r.dialect.QualifyTable(targetSchema, refTable),
+		strings.Join(refCols, ", "))
+
+	if rule := pgReferentialAction(fk.OnDelete); rule != "" {
+		b.WriteString(" ON DELETE ")
+		b.WriteString(rule)
+	}
+	if rule := pgReferentialAction(fk.OnUpdate); rule != "" {
+		b.WriteString(" ON UPDATE ")
+		b.WriteString(rule)
+	}
+	return b.String(), nil
+}
+
+func (r deterministicDDL) createCheckConstraint(t *driver.Table, chk *driver.CheckConstraint, targetSchema string) (string, error) {
+	tableName := sanitizePGTableName(t.Name)
+	checkName := sanitizePGIdentifier(chk.Name)
+	def := strings.TrimSpace(chk.Definition)
+	if def == "" {
+		return "", fmt.Errorf("check constraint %s has no definition", chk.Name)
+	}
+
+	expr := strings.TrimSpace(chk.DefinitionOverride)
+	if expr == "" {
+		// Expression IR first (#175); forms outside its grammar fall back to
+		// the legacy string-rewrite pipeline, which ends in the same
+		// fail-closed function gate.
+		out, err := exprir.Render(exprir.ParseCheck(def, r.sourceDialect), r.exprOpts("check", driver.Column{}, t.Columns))
+		if err != nil && errors.Is(err, exprir.ErrUnsupported) {
+			out, err = r.sqlServerExpression(def)
+			if err == nil {
+				out = r.rewriteBooleanComparisons(out, t.Columns)
+			}
+		}
+		if err != nil {
+			return "", &driver.ExpressionRenderError{
+				Column: chk.Name, Kind: "check", SourceExpr: chk.Definition, Err: err,
+			}
+		}
+		expr = out
+	}
+
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
+		r.dialect.QualifyTable(targetSchema, tableName),
+		r.dialect.QuoteIdentifier(checkName),
+		ensureOuterParens(expr)), nil
+}
+
+// ensureOuterParens wraps expr in parentheses unless it already carries a
+// balanced outer pair. CHECK requires them: source catalogs usually emit
+// parenthesized predicates (mssql `([amount]>(0))`, mysql "(`amount` > 0)"),
+// but pg_get_expr returns a bare expression for single-node predicates
+// (`is_active`), which would render as invalid `CHECK is_active`.
+func ensureOuterParens(expr string) string {
+	s := strings.TrimSpace(expr)
+	if len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
+		depth := 0
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 && i < len(s)-1 {
+					// The opening paren closes before the end — not an
+					// outer pair (e.g. "(a) AND (b)").
+					return "(" + s + ")"
+				}
+			}
+		}
+		return s
+	}
+	return "(" + s + ")"
+}
+
+func (r deterministicDDL) columnType(col driver.Column) (string, error) {
+	dt := strings.ToLower(strings.TrimSpace(col.DataType))
+
+	ct := canonical.ToCanonical(dt, driver.MetaOf(col), r.sourceDialect)
+	typ, warnings, err := canonical.FromCanonicalWithWarnings(ct, "postgres", canonical.RenderOpts{IsIdentity: col.IsIdentity})
+	if err != nil {
+		if errors.Is(err, canonical.ErrUnknownType) {
+			switch r.unknownTypePolicy {
+			case "warn":
+				logging.Warn("deterministic PostgreSQL type mapper: unsupported source type %q for column %s; using text because unknown_type_policy=warn", col.DataType, col.Name)
+				return "text", nil
+			case "text_fallback":
+				return "text", nil
+			}
+			return "", fmt.Errorf("unsupported source type %q", col.DataType)
+		}
+		return "", err
+	}
+	for _, w := range warnings {
+		source := r.sourceDialect
+		if source == "" {
+			source = "unknown"
+		}
+		logging.Warn("deterministic PostgreSQL type mapper: %s→postgres column %s rendered as %s with warning: %s", source, col.Name, typ, w.Reason)
+	}
+
+	if col.IsIdentity {
+		switch typ {
+		case "smallint", "integer", "bigint":
+			typ += " GENERATED BY DEFAULT AS IDENTITY"
+		default:
+			return "", fmt.Errorf("identity is only supported for integer-compatible types, got %s", typ)
+		}
+	}
+	return typ, nil
+}
+
+// defaultExpression renders a column DEFAULT through the expression IR
+// (#175): parse once, render for postgres. Forms outside the IR grammar fall
+// back to the legacy string-rewrite pipeline, which ends in the same
+// fail-closed function gate — never a silent passthrough.
+func (r deterministicDDL) defaultExpression(col driver.Column) (string, error) {
+	raw := strings.TrimSpace(col.DefaultExpression)
+	if raw == "" {
+		if !driver.ColumnHasDefault(col) {
+			return "", nil
+		}
+		return pgStringLiteral(col.DefaultExpression), nil
+	}
+	out, err := exprir.Render(exprir.ParseDefault(raw, r.sourceDialect), r.exprOpts("default", col, nil))
+	if err == nil {
+		return out, nil
+	}
+	if !errors.Is(err, exprir.ErrUnsupported) {
+		return "", err
+	}
+	return r.sqlServerExpression(unwrapDefaultParens(raw))
+}
+
+func pgStringLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// exprOpts assembles the IR render options: postgres target conventions plus
+// the column context (boolean/textual/TZ classification through the same
+// canonical mapping the type renderer uses). tableCols populates identifier
+// context for CHECK predicates.
+func (r deterministicDDL) exprOpts(kind string, col driver.Column, tableCols []driver.Column) exprir.Opts {
+	o := exprir.Opts{
+		Target: exprir.Postgres,
+		Source: r.sourceDialect,
+		Kind:   kind,
+		Col:    r.exprColInfo(col),
+		QuoteIdent: func(name string) string {
+			return r.dialect.QuoteIdentifier(sanitizePGIdentifier(name))
+		},
+	}
+	if len(tableCols) > 0 {
+		o.Columns = make(map[string]exprir.ColInfo, len(tableCols))
+		for _, c := range tableCols {
+			o.Columns[strings.ToLower(c.Name)] = r.exprColInfo(c)
+		}
+	}
+	return o
+}
+
+func (r deterministicDDL) exprColInfo(col driver.Column) exprir.ColInfo {
+	dt := strings.ToLower(strings.TrimSpace(col.DataType))
+	if dt == "" {
+		return exprir.ColInfo{}
+	}
+	return exprir.ColInfo{
+		Boolean:           canonical.ToCanonical(dt, driver.MetaOf(col), r.sourceDialect).Kind == canonical.Boolean,
+		Textual:           isTextualSourceType(col.DataType),
+		TZAware:           dt == "datetimeoffset" || dt == "timestamptz" || dt == "timestamp with time zone",
+		DatetimePrecision: col.DatetimePrecision,
+	}
+}
+
+func (r deterministicDDL) sqlServerExpression(expr string) (string, error) {
+	out := strings.TrimSpace(expr)
+	out = replaceBracketIdentifiers(out, func(name string) string {
+		return r.dialect.QuoteIdentifier(sanitizePGIdentifier(name))
+	})
+	out = replaceBacktickIdentifiers(out, func(name string) string {
+		return r.dialect.QuoteIdentifier(sanitizePGIdentifier(name))
+	})
+	out = stripSQLServerUnicodeStringPrefixes(out)
+	out = stripMySQLCharsetStringPrefixes(out)
+	out = rewriteMySQLConcat(out)
+	out = rewriteMySQLRegexpLike(out)
+	out = rewriteSQLServerLikePatterns(out)
+	out = strings.ReplaceAll(out, "GETDATE()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "getdate()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "GETUTCDATE()", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+	out = strings.ReplaceAll(out, "getutcdate()", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+	out = strings.ReplaceAll(out, "SYSDATETIME()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "sysdatetime()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "SYSDATETIMEOFFSET()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "sysdatetimeoffset()", "CURRENT_TIMESTAMP")
+	out = strings.ReplaceAll(out, "SYSUTCDATETIME()", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+	out = strings.ReplaceAll(out, "sysutcdatetime()", "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+	out = strings.ReplaceAll(out, "NEWID()", "gen_random_uuid()")
+	out = strings.ReplaceAll(out, "newid()", "gen_random_uuid()")
+	out = strings.ReplaceAll(out, "ISNULL(", "COALESCE(")
+	out = strings.ReplaceAll(out, "isnull(", "COALESCE(")
+	if err := rejectUnsupportedSQLServerExpression(out); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// rejectUnsupportedSQLServerExpression is the fail-closed tail of the legacy
+// string-rewrite pipeline. It delegates to the shared per-target gate in
+// internal/expr (#175) so all three targets reject unknown functions
+// identically. (CONVERT(date, <now>) handling moved into the expression IR.)
+func rejectUnsupportedSQLServerExpression(expr string) error {
+	return exprir.RejectUnknownFunctions(expr, exprir.Postgres)
+}
+
+func pgReferentialAction(rule string) string {
+	switch strings.ToUpper(strings.TrimSpace(rule)) {
+	case "", "NO ACTION":
+		return ""
+	case "CASCADE", "SET NULL", "SET DEFAULT", "RESTRICT":
+		return strings.ToUpper(strings.TrimSpace(rule))
+	default:
+		return ""
+	}
+}
+
+func unwrapDefaultParens(s string) string {
+	s = strings.TrimSpace(s)
+	for {
+		if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+			return s
+		}
+		inner := strings.TrimSpace(s[1 : len(s)-1])
+		if !balancedParens(inner) {
+			return s
+		}
+		s = inner
+	}
+}
+
+func balancedParens(s string) bool {
+	depth := 0
+	inSingleQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' {
+			if inSingleQuote && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if inSingleQuote {
+			continue
+		}
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0 && !inSingleQuote
+}
+
+func replaceBracketIdentifiers(s string, quote func(string) string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inSingleQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' {
+			b.WriteByte(ch)
+			if inSingleQuote && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				b.WriteByte(s[i])
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if !inSingleQuote && ch == '[' && startsBracketIdentifier(s, i) {
+			if end := strings.IndexByte(s[i+1:], ']'); end >= 0 {
+				name := s[i+1 : i+1+end]
+				if name != "" {
+					b.WriteString(quote(name))
+					i += end + 1
+					continue
+				}
+			}
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func startsBracketIdentifier(s string, idx int) bool {
+	if idx == 0 {
+		return true
+	}
+	prev := s[idx-1]
+	return !((prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_')
+}
+
+func replaceBacktickIdentifiers(s string, quote func(string) string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inSingleQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' {
+			b.WriteByte(ch)
+			if inSingleQuote && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				b.WriteByte(s[i])
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if !inSingleQuote && ch == '`' {
+			if end := strings.IndexByte(s[i+1:], '`'); end >= 0 {
+				name := strings.ReplaceAll(s[i+1:i+1+end], "``", "`")
+				b.WriteString(quote(name))
+				i += end + 1
+				continue
+			}
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func stripSQLServerUnicodeStringPrefixes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inSingleQuote := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if !inSingleQuote && (ch == 'N' || ch == 'n') && i+1 < len(s) && s[i+1] == '\'' && startsSQLStringPrefix(s, i) {
+			b.WriteByte('\'')
+			i++
+			inSingleQuote = true
+			continue
+		}
+		if ch == '\'' {
+			b.WriteByte(ch)
+			if inSingleQuote && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				b.WriteByte(s[i])
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+var (
+	mysqlEscapedCharsetStringRE = regexp.MustCompile(`(?i)_[a-z0-9]+\\'([^\\]*)\\'`)
+	mysqlCharsetStringRE        = regexp.MustCompile(`(?i)_[a-z0-9]+'([^']*)'`)
+)
+
+func stripMySQLCharsetStringPrefixes(s string) string {
+	out := mysqlEscapedCharsetStringRE.ReplaceAllString(s, `'$1'`)
+	out = mysqlCharsetStringRE.ReplaceAllString(out, `'$1'`)
+	return out
+}
+
+func startsSQLStringPrefix(s string, idx int) bool {
+	if idx == 0 {
+		return true
+	}
+	prev := s[idx-1]
+	return !((prev >= 'a' && prev <= 'z') ||
+		(prev >= 'A' && prev <= 'Z') ||
+		(prev >= '0' && prev <= '9') ||
+		prev == '_' ||
+		prev == '"')
+}
+
+func rewriteMySQLConcat(expr string) string {
+	trimmed := strings.TrimSpace(expr)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "concat(") || !strings.HasSuffix(trimmed, ")") {
+		return expr
+	}
+	inner := strings.TrimSpace(trimmed[len("concat(") : len(trimmed)-1])
+	if !balancedParens(inner) {
+		return expr
+	}
+	parts := splitTopLevelSQL(inner, ',')
+	if len(parts) < 2 {
+		return expr
+	}
+	return strings.Join(parts, " || ")
+}
+
+var mysqlRegexpLikeRE = regexp.MustCompile(`(?i)regexp_like\s*\(\s*([^,]+?)\s*,\s*('(?:''|[^'])*')\s*\)`)
+
+func rewriteMySQLRegexpLike(expr string) string {
+	re := mysqlRegexpLikeRE
+	return re.ReplaceAllString(expr, "($1 ~ $2)")
+}
+
+func splitTopLevelSQL(expr string, sep rune) []string {
+	var parts []string
+	var b strings.Builder
+	depth := 0
+	inSingleQuote := false
+	inDoubleQuote := false
+	for i, r := range expr {
+		if r == '\'' && !inDoubleQuote {
+			inSingleQuote = !inSingleQuote
+			b.WriteRune(r)
+			continue
+		}
+		if r == '"' && !inSingleQuote {
+			inDoubleQuote = !inDoubleQuote
+			b.WriteRune(r)
+			continue
+		}
+		if !inSingleQuote && !inDoubleQuote {
+			switch r {
+			case '(':
+				depth++
+			case ')':
+				if depth > 0 {
+					depth--
+				}
+			default:
+				if r == sep && depth == 0 {
+					parts = append(parts, strings.TrimSpace(b.String()))
+					b.Reset()
+					continue
+				}
+			}
+		}
+		b.WriteRune(r)
+		if r == '\'' && inSingleQuote && i+1 < len(expr) && expr[i+1] == '\'' {
+			continue
+		}
+	}
+	parts = append(parts, strings.TrimSpace(b.String()))
+	return parts
+}
+
+func isTextualPGType(colType string) bool {
+	colType = strings.ToLower(strings.TrimSpace(colType))
+	return strings.HasPrefix(colType, "character varying") ||
+		strings.HasPrefix(colType, "character(") ||
+		colType == "text"
+}
+
+func isTextualSourceType(dataType string) bool {
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "varchar", "nvarchar", "character varying", "char", "nchar", "character", "bpchar", "text", "ntext", "enum", "set":
+		return true
+	default:
+		return false
+	}
+}
+
+func rewriteSQLServerStringConcat(expr string) string {
+	var b strings.Builder
+	b.Grow(len(expr))
+	inSingleQuote := false
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if ch == '\'' {
+			b.WriteByte(ch)
+			if inSingleQuote && i+1 < len(expr) && expr[i+1] == '\'' {
+				i++
+				b.WriteByte(expr[i])
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if !inSingleQuote && ch == '+' {
+			b.WriteString(" || ")
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func rewriteSQLServerBooleanResultLiterals(expr string) string {
+	resultLiteralRE := regexp.MustCompile(`(?i)\b(THEN|ELSE)\s+\(?([01])\)?`)
+	return resultLiteralRE.ReplaceAllStringFunc(expr, func(match string) string {
+		parts := resultLiteralRE.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return match
+		}
+		lit := "false"
+		if parts[2] == "1" {
+			lit = "true"
+		}
+		return parts[1] + " " + lit
+	})
+}
+
+// rewriteBooleanComparisons rewrites integer 0/1 comparisons and IN-lists made
+// against columns that map to pg boolean into boolean literals, so predicates
+// from a source whose boolean convention is integer (MSSQL bit, MySQL
+// tinyint(1)) stay valid on the boolean target column. It covers `col = 1`,
+// `col <> 0`, and the redundant-domain `col IN (0,1)` form. Column boolean-ness
+// is decided by the same source-aware canonical classification the type mapping
+// uses, so it tracks the bit↔tinyint(1)↔boolean mapping automatically.
+func (r deterministicDDL) rewriteBooleanComparisons(expr string, cols []driver.Column) string {
+	out := expr
+	for _, col := range cols {
+		dt := strings.ToLower(strings.TrimSpace(col.DataType))
+		if canonical.ToCanonical(dt, driver.MetaOf(col), r.sourceDialect).Kind != canonical.Boolean {
+			continue
+		}
+		quoted := `"` + sanitizePGIdentifier(col.Name) + `"`
+		ident := regexp.QuoteMeta(quoted)
+		leftRE := regexp.MustCompile(`(?i)(` + ident + `)\s*(=|<>|!=)\s*(?:\(([01])\)|([01])\b)`)
+		out = leftRE.ReplaceAllStringFunc(out, func(match string) string {
+			parts := leftRE.FindStringSubmatch(match)
+			if len(parts) != 5 {
+				return match
+			}
+			return parts[1] + " " + parts[2] + " " + bitLiteral(firstNonEmpty(parts[3], parts[4]))
+		})
+		rightRE := regexp.MustCompile(`(?i)(?:\(([01])\)|([01])\b)\s*(=|<>|!=)\s*(` + ident + `)`)
+		out = rightRE.ReplaceAllStringFunc(out, func(match string) string {
+			parts := rightRE.FindStringSubmatch(match)
+			if len(parts) != 5 {
+				return match
+			}
+			return bitLiteral(firstNonEmpty(parts[1], parts[2])) + " " + parts[3] + " " + parts[4]
+		})
+		inRE := regexp.MustCompile(`(?i)(` + ident + `)\s+(NOT\s+)?IN\s*\(([^)]*)\)`)
+		out = inRE.ReplaceAllStringFunc(out, func(match string) string {
+			parts := inRE.FindStringSubmatch(match)
+			if len(parts) != 4 {
+				return match
+			}
+			items := strings.Split(parts[3], ",")
+			conv := make([]string, 0, len(items))
+			for _, item := range items {
+				switch strings.TrimSpace(item) {
+				case "0":
+					conv = append(conv, "false")
+				case "1":
+					conv = append(conv, "true")
+				default:
+					return match // not a pure 0/1 domain list — leave untouched
+				}
+			}
+			return parts[1] + " " + parts[2] + "IN (" + strings.Join(conv, ", ") + ")"
+		})
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func bitLiteral(v string) string {
+	if v == "1" {
+		return "true"
+	}
+	return "false"
+}
+
+var sqlServerLikeLiteralRE = regexp.MustCompile(`(?i)(("[^"]+"|[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)\s+)(NOT\s+)?LIKE\s+('(?:''|[^'])*')`)
+
+func rewriteSQLServerLikePatterns(s string) string {
+	return sqlServerLikeLiteralRE.ReplaceAllStringFunc(s, func(match string) string {
+		parts := sqlServerLikeLiteralRE.FindStringSubmatch(match)
+		if len(parts) != 5 {
+			return match
+		}
+		pattern := unquoteSQLString(parts[4])
+		if !strings.Contains(pattern, "[") || !strings.Contains(pattern, "]") {
+			return match
+		}
+		re, ok := sqlServerLikePatternToRegex(pattern)
+		if !ok {
+			return match
+		}
+		op := "~"
+		if strings.TrimSpace(parts[3]) != "" {
+			op = "!~"
+		}
+		return strings.TrimSpace(parts[1]) + " " + op + " " + quoteSQLString(re)
+	})
+}
+
+func sqlServerLikePatternToRegex(pattern string) (string, bool) {
+	var b strings.Builder
+	b.Grow(len(pattern) + 2)
+	b.WriteByte('^')
+	usedBracketClass := false
+	for i := 0; i < len(pattern); i++ {
+		ch := pattern[i]
+		switch ch {
+		case '%':
+			b.WriteString(".*")
+		case '_':
+			b.WriteByte('.')
+		case '[':
+			end := strings.IndexByte(pattern[i+1:], ']')
+			if end < 0 {
+				b.WriteString(`\[`)
+				continue
+			}
+			class := pattern[i+1 : i+1+end]
+			if class == "" {
+				b.WriteString(`\[\]`)
+			} else {
+				usedBracketClass = true
+				if class[0] == '^' {
+					class = "^" + regexp.QuoteMeta(class[1:])
+				} else {
+					class = regexp.QuoteMeta(class)
+				}
+				b.WriteByte('[')
+				b.WriteString(class)
+				b.WriteByte(']')
+			}
+			i += end + 1
+		default:
+			b.WriteString(regexp.QuoteMeta(string(ch)))
+		}
+	}
+	b.WriteByte('$')
+	return b.String(), usedBracketClass
+}
+
+func unquoteSQLString(lit string) string {
+	lit = strings.TrimSpace(lit)
+	if len(lit) >= 2 && lit[0] == '\'' && lit[len(lit)-1] == '\'' {
+		lit = lit[1 : len(lit)-1]
+	}
+	return strings.ReplaceAll(lit, "''", "'")
+}
+
+func quoteSQLString(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
