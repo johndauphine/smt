@@ -97,6 +97,86 @@ func TestPublicDDLSideObjectGoldens(t *testing.T) {
 	}
 }
 
+func TestPublicDDLClickHouseSideObjectErrorGolden(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "clickhouse", Schema: "analytics"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	table := schema.TableRef{Name: "events", Columns: []schema.Column{{Name: "id", DataType: "Int64"}}}
+	cases := []struct {
+		kind string
+		call func() error
+	}{
+		{
+			kind: "create_index",
+			call: func() error {
+				_, err := renderer.CreateIndex(table, schema.Index{Name: "ix_events_id", Columns: []string{"id"}})
+				return err
+			},
+		},
+		{
+			kind: "create_primary_key",
+			call: func() error {
+				_, err := renderer.CreatePrimaryKey(table, schema.PrimaryKey{Columns: []string{"id"}})
+				return err
+			},
+		},
+		{
+			kind: "create_unique_constraint",
+			call: func() error {
+				_, err := renderer.CreateUniqueConstraint(table, schema.UniqueConstraint{Name: "uq_events_id", Columns: []string{"id"}})
+				return err
+			},
+		},
+		{
+			kind: "create_check_constraint",
+			call: func() error {
+				_, err := renderer.CreateCheckConstraint(table, schema.CheckConstraint{Name: "ck_events_id", Expression: "id > 0"})
+				return err
+			},
+		},
+	}
+
+	lines := make([]string, 0, len(cases))
+	for _, tc := range cases {
+		err := tc.call()
+		var unsupported *schema.UnsupportedFeatureError
+		if !errors.As(err, &unsupported) {
+			t.Fatalf("%s error = %v, want UnsupportedFeatureError", tc.kind, err)
+		}
+		lines = append(lines, tc.kind+"\n"+unsupported.Error())
+	}
+	assertGolden(t, strings.Join(lines, "\n\n"), "clickhouse_side_objects.error.golden")
+}
+
+func TestPublicDDLSideObjectsPreserveOrderAndIdentifierConvention(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "postgres", Schema: "public"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	table := schema.TableRef{Name: "Order Lines"}
+
+	index, err := renderer.CreateIndex(table, schema.Index{
+		Name: "IX Order Lines", Columns: []string{"Tenant ID", "Order ID"},
+	})
+	if err != nil {
+		t.Fatalf("CreateIndex: %v", err)
+	}
+	const wantIndex = `CREATE INDEX "ix_order_lines" ON "public"."order_lines" ("tenant_id", "order_id")`
+	if index.SQL != wantIndex {
+		t.Fatalf("index SQL = %q, want %q", index.SQL, wantIndex)
+	}
+
+	primaryKey, err := renderer.CreatePrimaryKey(table, schema.PrimaryKey{Columns: []string{"Tenant ID", "Order ID"}})
+	if err != nil {
+		t.Fatalf("CreatePrimaryKey: %v", err)
+	}
+	const wantPrimaryKey = `ALTER TABLE "public"."order_lines" ADD CONSTRAINT "pk_order_lines" PRIMARY KEY ("tenant_id", "order_id")`
+	if primaryKey.SQL != wantPrimaryKey {
+		t.Fatalf("primary-key SQL = %q, want %q", primaryKey.SQL, wantPrimaryKey)
+	}
+}
+
 func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 	cases := []struct {
 		dialect                  string
