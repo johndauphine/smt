@@ -240,6 +240,24 @@ func TestPublicDDLRejectsNegativeIndexPrefixLength(t *testing.T) {
 	}
 }
 
+func TestPublicDDLFilteredIndexRejectsUnsupportedCrossDialectFunction(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "mssql", Schema: "dbo", SourceDialect: "postgres"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	_, err = renderer.CreateIndex(schema.TableRef{
+		Name:    "orders",
+		Columns: []schema.Column{{Name: "email", DataType: "varchar", MaxLength: 255}, {Name: "created_at", DataType: "timestamp"}},
+	}, schema.Index{
+		Name:    "ix_orders_active_email",
+		Columns: []string{"email"},
+		Filter:  "date_trunc('day', created_at) IS NOT NULL",
+	})
+	if err == nil || !strings.Contains(err.Error(), `unsupported SQL expression function "date_trunc"`) {
+		t.Fatalf("CreateIndex error = %v, want cross-dialect function validation error", err)
+	}
+}
+
 func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 	cases := []struct {
 		dialect                  string

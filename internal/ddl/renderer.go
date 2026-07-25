@@ -541,6 +541,9 @@ func (r Renderer) CreateIndexDDL(t *driver.Table, idx *driver.Index) (string, er
 			return "", fmt.Errorf("filtered indexes are not supported on mysql target: %s", idx.Name)
 		}
 		expr, err := r.Expression(filter, t.Columns)
+		if err == nil && r.crossDialect() {
+			err = exprir.RejectUnknownFunctions(expr, r.target)
+		}
 		if err != nil {
 			return "", fmt.Errorf("mapping filter for index %s: %w", idx.Name, err)
 		}
