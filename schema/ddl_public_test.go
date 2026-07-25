@@ -99,6 +99,268 @@ func TestPublicDDLRepresentativeGoldens(t *testing.T) {
 	}
 }
 
+func TestPublicDDLCreatePlanGoldens(t *testing.T) {
+	cases := []struct {
+		name   string
+		opts   schema.Options
+		tables []schema.Table
+		golden string
+	}{
+		{
+			name: "postgres",
+			opts: schema.Options{TargetDialect: "postgres", Schema: "public", SourceDialect: "postgres"},
+			tables: []schema.Table{{
+				Name: "Accounts",
+				Columns: []schema.Column{
+					{Name: "ID", DataType: "int4", IsIdentity: true},
+					{Name: "Name", DataType: "varchar", MaxLength: 80},
+				},
+				PrimaryKey: []string{"ID"},
+			}},
+			golden: "postgres_create_plan.sql.golden",
+		},
+		{
+			name: "mssql",
+			opts: schema.Options{TargetDialect: "mssql", Schema: "dbo", SourceDialect: "mssql"},
+			tables: []schema.Table{{
+				Name: "Accounts",
+				Columns: []schema.Column{
+					{Name: "ID", DataType: "int", IsIdentity: true},
+					{Name: "Name", DataType: "varchar", MaxLength: 80},
+				},
+				PrimaryKey: []string{"ID"},
+			}},
+			golden: "mssql_create_plan.sql.golden",
+		},
+		{
+			name: "mysql",
+			opts: schema.Options{TargetDialect: "mysql", Schema: "crm", SourceDialect: "mysql"},
+			tables: []schema.Table{{
+				Name: "Accounts",
+				Columns: []schema.Column{
+					{Name: "ID", DataType: "int", IsIdentity: true},
+					{Name: "Name", DataType: "varchar", MaxLength: 80},
+				},
+				PrimaryKey: []string{"ID"},
+			}},
+			golden: "mysql_create_plan.sql.golden",
+		},
+		{
+			name: "sqlite",
+			opts: schema.Options{TargetDialect: "sqlite", SourceDialect: "postgres"},
+			tables: []schema.Table{{
+				Name: "accounts",
+				Columns: []schema.Column{
+					{Name: "id", DataType: "int4", IsIdentity: true},
+					{Name: "name", DataType: "varchar", MaxLength: 80},
+				},
+				PrimaryKey: []string{"id"},
+			}},
+			golden: "sqlite_create_plan.sql.golden",
+		},
+		{
+			name: "clickhouse",
+			opts: schema.Options{TargetDialect: "clickhouse", Schema: "analytics", SourceDialect: "postgres"},
+			tables: []schema.Table{{
+				Name: "events",
+				Columns: []schema.Column{
+					{Name: "event_id", DataType: "bigint"},
+					{Name: "payload", DataType: "json", IsNullable: true},
+				},
+				PrimaryKey: []string{"event_id"},
+			}},
+			golden: "clickhouse_create_plan.sql.golden",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			renderer, err := schema.NewRenderer(tc.opts)
+			if err != nil {
+				t.Fatalf("NewRenderer: %v", err)
+			}
+			plan, err := renderer.PlanCreate(tc.tables)
+			if err != nil {
+				t.Fatalf("PlanCreate: %v", err)
+			}
+			assertPlanGolden(t, plan, tc.golden)
+		})
+	}
+}
+
+func TestPublicDDLPostgresEmptySchemaUsesUnqualifiedTable(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "postgres", SourceDialect: "postgres"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	plan, err := renderer.PlanCreate([]schema.Table{{
+		Name:       "Accounts",
+		Columns:    []schema.Column{{Name: "ID", DataType: "int4"}},
+		PrimaryKey: []string{"ID"},
+	}})
+	if err != nil {
+		t.Fatalf("PlanCreate: %v", err)
+	}
+	if len(plan.Statements) != 1 || plan.Statements[0].Kind != schema.StatementCreateTable {
+		t.Fatalf("plan = %#v, want one create-table statement", plan)
+	}
+	if strings.Contains(plan.Statements[0].SQL, `"".`) {
+		t.Fatalf("empty PostgreSQL schema was qualified: %s", plan.Statements[0].SQL)
+	}
+	if !strings.HasPrefix(plan.Statements[0].SQL, "CREATE TABLE \"accounts\"") {
+		t.Fatalf("unqualified PostgreSQL table = %s", plan.Statements[0].SQL)
+	}
+}
+
+func TestPublicDDLSQLiteIdentityCompatibility(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "sqlite", Schema: "ignored_by_sqlite", SourceDialect: "postgres"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+
+	result, err := renderer.CreateTable(schema.Table{
+		Name: "users",
+		Columns: []schema.Column{
+			{Name: "id", DataType: "int4", IsIdentity: true},
+			{Name: "email", DataType: "varchar", MaxLength: 255},
+		},
+		PrimaryKey: []string{"id"},
+	})
+	if err != nil {
+		t.Fatalf("CreateTable single-column identity: %v", err)
+	}
+	if !strings.Contains(result.SQL, `"id" INTEGER PRIMARY KEY AUTOINCREMENT`) {
+		t.Fatalf("SQLite identity DDL = %s", result.SQL)
+	}
+	if strings.Contains(result.SQL, `"ignored_by_sqlite".`) {
+		t.Fatalf("SQLite table was qualified by its ignored configured schema: %s", result.SQL)
+	}
+	if strings.Contains(result.SQL, `CONSTRAINT "pk_users"`) {
+		t.Fatalf("SQLite inline identity retained a duplicate primary key: %s", result.SQL)
+	}
+	plan, err := renderer.PlanCreate([]schema.Table{{
+		Name:       "plan_users",
+		Columns:    []schema.Column{{Name: "id", DataType: "int4", IsIdentity: true}},
+		PrimaryKey: []string{"id"},
+	}})
+	if err != nil || len(plan.Statements) != 1 || strings.Contains(plan.Statements[0].SQL, `"ignored_by_sqlite".`) {
+		t.Fatalf("PlanCreate SQLite schema compatibility = %#v, %v", plan, err)
+	}
+
+	result, err = renderer.CreateTable(schema.Table{
+		Name: "audit",
+		Columns: []schema.Column{
+			{Name: "tenant", DataType: "int4"},
+			{Name: "id", DataType: "int4", IsIdentity: true},
+		},
+		PrimaryKey: []string{"tenant", "id"},
+	})
+	if err != nil {
+		t.Fatalf("CreateTable composite identity: %v", err)
+	}
+	if strings.Contains(result.SQL, "AUTOINCREMENT") {
+		t.Fatalf("SQLite composite primary key used AUTOINCREMENT: %s", result.SQL)
+	}
+	if !strings.Contains(result.SQL, `"id" INTEGER NOT NULL`) || !strings.Contains(result.SQL, `PRIMARY KEY ("tenant", "id")`) {
+		t.Fatalf("SQLite composite identity lost table shape: %s", result.SQL)
+	}
+	if !hasWarningKind(result.Warnings, "sqlite-identity-best-effort") {
+		t.Fatalf("SQLite composite identity warnings = %#v", result.Warnings)
+	}
+
+	_, err = renderer.CreateColumn(schema.Column{Name: "id", DataType: "int4", IsIdentity: true})
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Feature, "standalone identity") {
+		t.Fatalf("CreateColumn identity error = %v, want standalone-identity guidance", err)
+	}
+}
+
+func TestPublicDDLCreationCapabilitiesAcrossDialects(t *testing.T) {
+	cases := []struct {
+		dialect  string
+		schema   bool
+		identity bool
+		defaults bool
+		computed bool
+	}{
+		{dialect: "postgres", schema: true, identity: true, defaults: true, computed: true},
+		{dialect: "mssql", schema: true, identity: true, defaults: true, computed: true},
+		{dialect: "mysql", schema: true, identity: true, defaults: true, computed: true},
+		{dialect: "sqlite", schema: false, identity: true, defaults: true, computed: false},
+		{dialect: "clickhouse", schema: true, identity: false, defaults: false, computed: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.dialect, func(t *testing.T) {
+			renderer, err := schema.NewRenderer(schema.Options{TargetDialect: tc.dialect})
+			if err != nil {
+				t.Fatalf("NewRenderer: %v", err)
+			}
+			got := renderer.Capabilities()
+			if !got.CreateTable || !got.CreateColumn || !got.PrimaryKeys || got.CreateSchema != tc.schema ||
+				got.IdentityColumns != tc.identity || got.Defaults != tc.defaults || got.ComputedColumns != tc.computed {
+				t.Fatalf("Capabilities() = %#v", got)
+			}
+		})
+	}
+}
+
+func TestPublicDDLCanonicalTypeMetaCompatibility(t *testing.T) {
+	column := schema.Column{
+		MaxLength: 80, Precision: 12, Scale: 4, IsUnsigned: true, DisplayWidth: 1,
+		EnumValues: []string{"new", "done"}, SRID: 4326, SpatialSubType: "point",
+	}
+	meta := column.TypeMeta()
+	if meta.MaxLength != 80 || meta.Precision != 12 || meta.Scale != 4 || !meta.IsUnsigned ||
+		meta.DisplayWidth != 1 || meta.SRID != 4326 || meta.SpatialSubType != "point" {
+		t.Fatalf("TypeMeta() = %#v", meta)
+	}
+	meta.EnumValues[0] = "mutated"
+	if column.EnumValues[0] != "new" {
+		t.Fatalf("TypeMeta() exposed Column.EnumValues backing storage")
+	}
+}
+
+// TestDMTCreatePathCompatibility documents the full first-milestone handoff:
+// discovery projects its data into schema.Table, DMT schedules and executes
+// the returned statements, and no DMT-owned SQL construction is needed.
+func TestDMTCreatePathCompatibility(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{
+		TargetDialect: "postgres", Schema: "public", SourceDialect: "postgres",
+	})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	plan, err := renderer.PlanCreate([]schema.Table{
+		{
+			Name:       "Accounts",
+			Columns:    []schema.Column{{Name: "ID", DataType: "int4", IsIdentity: true}},
+			PrimaryKey: []string{"ID"},
+		},
+		{
+			Name:       "Events",
+			Columns:    []schema.Column{{Name: "EventID", DataType: "int8"}},
+			PrimaryKey: []string{"EventID"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PlanCreate: %v", err)
+	}
+
+	var executed []string
+	for _, statement := range plan.Statements {
+		switch statement.Kind {
+		case schema.StatementCreateSchema, schema.StatementCreateTable:
+			executed = append(executed, statement.SQL) // DMT's executor receives SMT SQL verbatim.
+		default:
+			t.Fatalf("unexpected create-path statement kind %q", statement.Kind)
+		}
+	}
+	if len(executed) != 3 || !strings.Contains(executed[1], `CREATE TABLE "public"."accounts"`) ||
+		!strings.Contains(executed[2], `CREATE TABLE "public"."events"`) {
+		t.Fatalf("DMT-compatible execution sequence = %#v", executed)
+	}
+}
+
 func TestPublicDDLColumnAndFallbackWarnings(t *testing.T) {
 	renderer, err := schema.NewRenderer(schema.Options{
 		TargetDialect:     "clickhouse",
@@ -120,6 +382,50 @@ func TestPublicDDLColumnAndFallbackWarnings(t *testing.T) {
 	}
 	if !hasWarningKind(result.Warnings, "unknown-type-fallback") {
 		t.Fatalf("warnings = %#v, missing unknown-type-fallback", result.Warnings)
+	}
+}
+
+func TestPublicDDLCreateColumnGoldens(t *testing.T) {
+	cases := []struct {
+		name   string
+		opts   schema.Options
+		column schema.Column
+		golden string
+	}{
+		{
+			name: "postgres", opts: schema.Options{TargetDialect: "postgres", SourceDialect: "postgres"},
+			column: schema.Column{Name: "name", DataType: "varchar", MaxLength: 80}, golden: "postgres_column.sql.golden",
+		},
+		{
+			name: "mssql", opts: schema.Options{TargetDialect: "mssql", SourceDialect: "mssql"},
+			column: schema.Column{Name: "name", DataType: "varchar", MaxLength: 80}, golden: "mssql_column.sql.golden",
+		},
+		{
+			name: "mysql", opts: schema.Options{TargetDialect: "mysql", SourceDialect: "mysql"},
+			column: schema.Column{Name: "name", DataType: "varchar", MaxLength: 80}, golden: "mysql_column.sql.golden",
+		},
+		{
+			name: "sqlite", opts: schema.Options{TargetDialect: "sqlite", SourceDialect: "postgres"},
+			column: schema.Column{Name: "name", DataType: "varchar", MaxLength: 80}, golden: "sqlite_column.sql.golden",
+		},
+		{
+			name: "clickhouse", opts: schema.Options{TargetDialect: "clickhouse", SourceDialect: "postgres"},
+			column: schema.Column{Name: "name", DataType: "varchar", MaxLength: 80}, golden: "clickhouse_column.sql.golden",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			renderer, err := schema.NewRenderer(tc.opts)
+			if err != nil {
+				t.Fatalf("NewRenderer: %v", err)
+			}
+			result, err := renderer.CreateColumn(tc.column)
+			if err != nil {
+				t.Fatalf("CreateColumn: %v", err)
+			}
+			assertGolden(t, result.SQL, tc.golden)
+		})
 	}
 }
 
@@ -332,6 +638,20 @@ func assertGolden(t *testing.T, got, name string) {
 	if got != want {
 		t.Fatalf("DDL mismatch for %s:\n got: %s\nwant: %s", name, got, want)
 	}
+}
+
+func assertPlanGolden(t *testing.T, plan schema.Plan, name string) {
+	t.Helper()
+	var b strings.Builder
+	for i, statement := range plan.Statements {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(string(statement.Kind))
+		b.WriteString("\n")
+		b.WriteString(statement.SQL)
+	}
+	assertGolden(t, b.String(), name)
 }
 
 func hasWarningKind(warnings []schema.Warning, want string) bool {

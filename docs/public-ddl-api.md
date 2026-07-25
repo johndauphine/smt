@@ -41,6 +41,27 @@ for _, warning := range result.Warnings {
 }
 ```
 
+For a complete create path, use `PlanCreate`. It returns ordered public
+`schema.Statement` values (`create_schema`, then `create_table`) whose SQL can
+be executed verbatim by the caller. SMT does not open a connection or choose
+retry/concurrency policy for a plan.
+
+```go
+plan, err := renderer.PlanCreate([]schema.Table{tableA, tableB})
+if err != nil {
+    return err
+}
+for _, statement := range plan.Statements {
+    if err := target.ExecRaw(ctx, statement.SQL); err != nil {
+        return err
+    }
+}
+```
+
+The create plan deliberately contains only schema/database and table artifacts
+(including columns and primary keys). Indexes, foreign keys, checks, alters,
+and drops are not represented yet.
+
 `SourceDialect` is optional, but callers should set it whenever it is known:
 some names have source-specific meanings, such as MySQL `TINYINT(1)` and
 `TIMESTAMP`. `Column` includes the source type metadata needed by the public
@@ -64,7 +85,13 @@ Inspect `renderer.Capabilities()` before using identities, defaults, computed
 columns, or a named schema. If input requests an unsupported feature, rendering
 returns `*schema.UnsupportedFeatureError`; SMT never silently drops it.
 
-SQLite's named-schema creation is deliberately unsupported. ClickHouse supports
+SQLite's named-schema creation is deliberately unsupported when called through
+`CreateSchema`. `PlanCreate` follows DMT's established SQLite create behavior:
+it treats a configured schema as connection selection and emits unqualified
+table DDL. SQLite identities are supported through `CreateTable` only when the
+identity is the sole primary-key column, using `INTEGER PRIMARY KEY
+AUTOINCREMENT`; a standalone identity `CreateColumn` returns an explicit
+unsupported-feature error. ClickHouse supports
 the practical create-table subset: it emits `MergeTree` with `ORDER BY` set to
 the primary-key columns (or `tuple()` when there is no primary key). ClickHouse
 nullability is rendered as `Nullable(T)`, where `T` comes from the canonical

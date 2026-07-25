@@ -1,0 +1,9 @@
+create_schema
+CREATE DATABASE IF NOT EXISTS `analytics`
+
+create_table
+CREATE TABLE `analytics`.`events` (
+    `event_id` Int64,
+    `payload` Nullable(String),
+    PRIMARY KEY (`event_id`)
+) ENGINE = MergeTree ORDER BY (`event_id`)

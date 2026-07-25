@@ -1,0 +1,9 @@
+create_schema
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'dbo') EXEC(N'CREATE SCHEMA [dbo]')
+
+create_table
+CREATE TABLE [dbo].[Accounts] (
+    [ID] INT IDENTITY(1,1) NOT NULL,
+    [Name] VARCHAR(80) NOT NULL,
+    CONSTRAINT [pk_Accounts] PRIMARY KEY ([ID])
+)
