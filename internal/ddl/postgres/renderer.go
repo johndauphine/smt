@@ -40,6 +40,9 @@ func (deterministicDialect) QuoteIdentifier(name string) string {
 }
 
 func (d deterministicDialect) QualifyTable(schema, table string) string {
+	if strings.TrimSpace(schema) == "" {
+		return d.QuoteIdentifier(table)
+	}
 	return d.QuoteIdentifier(schema) + "." + d.QuoteIdentifier(table)
 }
 

@@ -67,6 +67,41 @@ type Result struct {
 	Warnings []Warning
 }
 
+// StatementKind identifies the create artifact emitted by a Statement. The
+// public create plan intentionally has no index, foreign-key, check, alter, or
+// drop kinds: those artifacts are outside the first public DDL milestone.
+type StatementKind string
+
+const (
+	// StatementCreateSchema creates the configured schema or database.
+	StatementCreateSchema StatementKind = "create_schema"
+	// StatementCreateTable creates one table, including its columns and
+	// primary key when supplied.
+	StatementCreateTable StatementKind = "create_table"
+)
+
+// Statement is one deterministic executable DDL artifact. SQL is exactly one
+// statement; callers retain execution, retry, and scheduling policy.
+//
+// Warnings apply only to this artifact. They are advisory and never change
+// SQL, which keeps plans deterministic and safe to persist or inspect before
+// execution.
+type Statement struct {
+	Kind     StatementKind
+	SQL      string
+	Warnings []Warning
+}
+
+// Plan is an ordered, deterministic set of CREATE statements. It owns no
+// connection or execution behavior, so applications such as DMT can discover
+// objects, schedule execution, and execute the resulting SQL themselves.
+type Plan struct {
+	Statements []Statement
+}
+
+// IsEmpty reports whether the plan has no executable statements.
+func (p Plan) IsEmpty() bool { return len(p.Statements) == 0 }
+
 // Warning identifies a lossy type mapping or target-specific semantic caveat.
 // Table and Column are empty when a warning applies to a broader artifact.
 type Warning struct {
@@ -103,6 +138,23 @@ type Column struct {
 	EnumValues         []string
 	SRID               int
 	SpatialSubType     string
+}
+
+// TypeMeta returns the public canonical-mapper metadata represented by c.
+// It is useful to callers that need to inspect or preflight the exact same
+// source-type facts that CreateColumn and CreateTable consume.
+func (c Column) TypeMeta() canonical.TypeMeta {
+	return canonical.TypeMeta{
+		MaxLength:         c.MaxLength,
+		Precision:         c.Precision,
+		Scale:             c.Scale,
+		DatetimePrecision: c.DatetimePrecision,
+		IsUnsigned:        c.IsUnsigned,
+		DisplayWidth:      c.DisplayWidth,
+		EnumValues:        append([]string(nil), c.EnumValues...),
+		SRID:              c.SRID,
+		SpatialSubType:    c.SpatialSubType,
+	}
 }
 
 // Table is the practical create-table subset shared by all built-in dialects.
@@ -306,6 +358,47 @@ func (r Renderer) CreateColumn(column Column) (Result, error) {
 	return r.dialect.RenderColumn(r.request, column)
 }
 
+// PlanCreate renders the supported create path in execution order: an
+// optional schema/database statement followed by the supplied tables in input
+// order. It deliberately does not infer dependency ordering or include
+// indexes, foreign keys, checks, alterations, or drops; those remain the
+// caller's scheduling responsibility and are outside this API's create scope.
+func (r Renderer) PlanCreate(tables []Table) (Plan, error) {
+	plan := Plan{Statements: make([]Statement, 0, len(tables)+1)}
+
+	// SQLite has no independently creatable schema. DMT has historically
+	// accepted a configured schema for SQLite and ignored it at create time, so
+	// retain that execution-compatible behavior in the whole create plan while
+	// CreateSchema continues to report named SQLite schema creation as
+	// unsupported when called directly.
+	if r.Dialect() != "sqlite" {
+		schemaResult, err := r.CreateSchema()
+		if err != nil {
+			return Plan{}, err
+		}
+		if schemaResult.SQL != "" {
+			plan.Statements = append(plan.Statements, Statement{
+				Kind:     StatementCreateSchema,
+				SQL:      schemaResult.SQL,
+				Warnings: append([]Warning(nil), schemaResult.Warnings...),
+			})
+		}
+	}
+
+	for _, table := range tables {
+		result, err := r.CreateTable(table)
+		if err != nil {
+			return Plan{}, err
+		}
+		plan.Statements = append(plan.Statements, Statement{
+			Kind:     StatementCreateTable,
+			SQL:      result.SQL,
+			Warnings: append([]Warning(nil), result.Warnings...),
+		})
+	}
+	return plan, nil
+}
+
 func (r Renderer) validateTable(table Table) error {
 	if !r.Capabilities().CreateTable {
 		return r.unsupported("table creation")
@@ -378,7 +471,7 @@ func builtinDialects() []Dialect {
 		builtinDialect{name: "mysql", aliases: []string{"mariadb", "maria"}, capabilities: full},
 		builtinDialect{
 			name: "sqlite", aliases: []string{"sqlite3"},
-			capabilities: Capabilities{CreateTable: true, CreateColumn: true, PrimaryKeys: true, Defaults: true},
+			capabilities: Capabilities{CreateTable: true, CreateColumn: true, PrimaryKeys: true, IdentityColumns: true, Defaults: true},
 		},
 		builtinDialect{
 			name: "clickhouse", aliases: []string{"click-house"},
@@ -419,10 +512,28 @@ func (d builtinDialect) RenderTable(request Request, table Table) (Result, error
 			Table:         table.Name,
 		})
 	}
+	if d.name == "sqlite" {
+		for _, column := range sqliteUnrepresentableIdentities(table) {
+			result.Warnings = append(result.Warnings, Warning{
+				Kind:          "sqlite-identity-best-effort",
+				Reason:        "SQLite AUTOINCREMENT requires an identity column to be the sole primary-key column; rendered without AUTOINCREMENT",
+				SourceDialect: sourceDialect(request.SourceDialect),
+				TargetDialect: d.name,
+				Table:         table.Name,
+				Column:        column.Name,
+			})
+		}
+	}
 	return result, nil
 }
 
 func (d builtinDialect) RenderColumn(request Request, column Column) (Result, error) {
+	if d.name == "sqlite" && column.IsIdentity {
+		return Result{}, &UnsupportedFeatureError{
+			Dialect: d.name,
+			Feature: "standalone identity column definitions; use CreateTable with a sole primary key",
+		}
+	}
 	renderer, err := d.renderer(request)
 	if err != nil {
 		return Result{}, err
@@ -453,7 +564,14 @@ func (d builtinDialect) publicRenderError(err error) error {
 }
 
 func (d builtinDialect) renderer(request Request) (ddl.Renderer, error) {
-	renderer, err := ddl.NewRenderer(d.name, request.Schema, string(request.UnknownTypePolicy))
+	targetSchema := request.Schema
+	if d.name == "sqlite" {
+		// SQLite's configured schema is a DMT compatibility input, not a
+		// qualifier: the target connection selects the database and CREATE
+		// TABLE must remain unqualified.
+		targetSchema = ""
+	}
+	renderer, err := ddl.NewRenderer(d.name, targetSchema, string(request.UnknownTypePolicy))
 	if err != nil {
 		return ddl.Renderer{}, err
 	}
@@ -496,20 +614,32 @@ func toDriverColumn(column Column) driver.Column {
 	}
 }
 
+// sqliteUnrepresentableIdentities returns identity columns that cannot use
+// SQLite's only identity form, INTEGER PRIMARY KEY AUTOINCREMENT. The core
+// renderer deliberately retains DMT's best-effort behavior for those tables:
+// it keeps the ordinary column and table-level primary key rather than
+// emitting invalid SQLite SQL.
+func sqliteUnrepresentableIdentities(table Table) []Column {
+	if len(table.PrimaryKey) == 1 {
+		for _, column := range table.Columns {
+			if column.Name == table.PrimaryKey[0] && column.IsIdentity {
+				return nil
+			}
+		}
+	}
+	var out []Column
+	for _, column := range table.Columns {
+		if column.IsIdentity {
+			out = append(out, column)
+		}
+	}
+	return out
+}
+
 func mappingWarnings(target string, request Request, table string, columns []Column) []Warning {
 	var out []Warning
 	for _, column := range columns {
-		ct := canonical.ToCanonical(column.DataType, canonical.TypeMeta{
-			MaxLength:         column.MaxLength,
-			Precision:         column.Precision,
-			Scale:             column.Scale,
-			DatetimePrecision: column.DatetimePrecision,
-			IsUnsigned:        column.IsUnsigned,
-			DisplayWidth:      column.DisplayWidth,
-			EnumValues:        column.EnumValues,
-			SRID:              column.SRID,
-			SpatialSubType:    column.SpatialSubType,
-		}, request.SourceDialect)
+		ct := canonical.ToCanonical(column.DataType, column.TypeMeta(), request.SourceDialect)
 		_, warnings, err := canonical.FromCanonicalWithWarnings(ct, target, canonical.RenderOpts{IsIdentity: column.IsIdentity})
 		for _, warning := range warnings {
 			out = append(out, Warning{

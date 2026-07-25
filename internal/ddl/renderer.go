@@ -162,8 +162,22 @@ func (r Renderer) CreateTableDDL(t *driver.Table) (string, map[string]string, er
 	tableName := r.normalize(t.Name)
 	columnTypes := make(map[string]string, len(t.Columns))
 	lines := make([]string, 0, len(t.Columns)+1)
-	for _, col := range t.Columns {
-		def, typ, err := r.ColumnDefinition(col, t.Columns)
+	inlineSQLiteIdentity := r.sqliteInlineIdentity(t)
+	for i, col := range t.Columns {
+		var (
+			def string
+			typ string
+			err error
+		)
+		if i == inlineSQLiteIdentity {
+			// SQLite accepts AUTOINCREMENT only as INTEGER PRIMARY KEY
+			// within a column definition. The public API's table method has
+			// the PK context required to make that choice safely.
+			def = fmt.Sprintf("%s INTEGER PRIMARY KEY AUTOINCREMENT", r.quote(r.normalize(col.Name)))
+			typ = "INTEGER"
+		} else {
+			def, typ, err = r.ColumnDefinition(col, t.Columns)
+		}
 		if err != nil {
 			return "", nil, fmt.Errorf("mapping column %s.%s: %w", t.Name, col.Name, err)
 		}
@@ -172,7 +186,7 @@ func (r Renderer) CreateTableDDL(t *driver.Table) (string, map[string]string, er
 		lines = append(lines, "    "+def)
 	}
 
-	if len(t.PrimaryKey) > 0 {
+	if len(t.PrimaryKey) > 0 && inlineSQLiteIdentity < 0 {
 		cols := make([]string, len(t.PrimaryKey))
 		for i, c := range t.PrimaryKey {
 			cols[i] = r.quote(r.normalize(c))
@@ -210,6 +224,24 @@ func (r Renderer) CreateTableDDL(t *driver.Table) (string, map[string]string, er
 		}
 	}
 	return b.String(), columnTypes, nil
+}
+
+// sqliteInlineIdentity returns the index of the column that can use SQLite's
+// exact identity form, or -1 when a table-level primary key must be retained.
+// AUTOINCREMENT is valid only for a sole INTEGER PRIMARY KEY. Rendering the
+// identity column as INTEGER intentionally mirrors DMT's established
+// SQLite-create behavior for source integer identities.
+func (r Renderer) sqliteInlineIdentity(t *driver.Table) int {
+	if r.target != "sqlite" || len(t.PrimaryKey) != 1 {
+		return -1
+	}
+	key := r.normalize(t.PrimaryKey[0])
+	for i, col := range t.Columns {
+		if r.normalize(col.Name) == key && col.IsIdentity {
+			return i
+		}
+	}
+	return -1
 }
 
 func (r Renderer) ColumnDefinition(col driver.Column, tableColumns ...[]driver.Column) (string, string, error) {
