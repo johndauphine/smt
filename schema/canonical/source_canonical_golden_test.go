@@ -1,7 +1,6 @@
 package canonical
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 )
@@ -154,20 +153,5 @@ func TestToCanonical_SourceGolden(t *testing.T) {
 				t.Fatalf("ToCanonical(%q, %#v, %q) = %#v, want %#v", tc.typeName, tc.meta, tc.source, got, tc.want)
 			}
 		})
-	}
-}
-
-// ClickHouse remains intentionally unsupported. ToCanonical is permissive for
-// shared type spellings and is not a supported-dialect registry; FromCanonical
-// is the target capability boundary. Add a dedicated dialect mapper and change
-// this expectation with its own golden suite when ClickHouse becomes supported.
-func TestFromCanonical_UnsupportedClickHouseTarget(t *testing.T) {
-	_, err := FromCanonical(CanonicalType{Kind: Integer}, "clickhouse", RenderOpts{})
-	if err == nil {
-		t.Fatal("FromCanonical unexpectedly supports ClickHouse")
-	}
-	want := fmt.Sprintf("FromCanonical: unsupported target dialect %q", "clickhouse")
-	if err.Error() != want {
-		t.Fatalf("FromCanonical error = %q, want %q", err, want)
 	}
 }

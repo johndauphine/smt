@@ -60,6 +60,8 @@ func FromCanonicalWithWarnings(ct CanonicalType, dialect string, opts RenderOpts
 		typ, err = fromCanonicalMySQL(ct, opts)
 	case "sqlite":
 		typ, err = fromCanonicalSQLite(ct, opts)
+	case "clickhouse":
+		typ, err = fromCanonicalClickHouse(ct, opts)
 	default:
 		return "", nil, fmt.Errorf("FromCanonical: unsupported target dialect %q", dialect)
 	}
@@ -686,6 +688,9 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 	if target == "sqlite" {
 		out = append(out, sqliteMappingWarnings(ct, rendered)...)
 	}
+	if target == "clickhouse" {
+		out = append(out, clickhouseMappingWarnings(ct, rendered)...)
+	}
 	add := func(reason string) {
 		out = append(out, MappingWarning{
 			Kind:          kindName(ct.Kind),
@@ -700,15 +705,15 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 			add("target has no 8-bit integer; rendered as " + rendered)
 		}
 	case MediumInt:
-		if target != "mysql" && target != "sqlite" {
+		if target != "mysql" && target != "sqlite" && target != "clickhouse" {
 			add("target has no 24-bit integer; rendered as " + rendered)
 		}
 	case SmallInt, Integer:
-		if ct.Unsigned && target != "mysql" && target != "sqlite" {
+		if ct.Unsigned && target != "mysql" && target != "sqlite" && target != "clickhouse" {
 			add("target has no unsigned integer flag; widened to " + rendered)
 		}
 	case BigInt:
-		if ct.Unsigned && target != "mysql" && target != "sqlite" && !opts.IsIdentity {
+		if ct.Unsigned && target != "mysql" && target != "sqlite" && target != "clickhouse" && !opts.IsIdentity {
 			add("target has no unsigned 64-bit integer; rendered as " + rendered)
 		}
 	case Decimal:
@@ -789,6 +794,12 @@ func mappingWarnings(ct CanonicalType, target, rendered string, opts RenderOpts)
 			add("MySQL has no native geography type; rendered as " + rendered)
 		}
 	case Array:
+		// ClickHouse has a native Array(T) type. Its mapper already emits
+		// element-level ClickHouse capability warnings above, so avoid the
+		// generic non-array fallback (and duplicate element warnings) here.
+		if target == "clickhouse" {
+			break
+		}
 		if target != "postgres" {
 			add("target has no native array type; rendered as " + rendered)
 			break
@@ -810,6 +821,8 @@ func temporalFSPMax(target string) int {
 		return 6
 	case "mssql":
 		return 7
+	case "clickhouse":
+		return 9
 	default:
 		return -1
 	}
