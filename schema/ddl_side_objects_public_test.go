@@ -517,6 +517,47 @@ func TestPublicDDLForeignKeyValidationAndActionCapabilities(t *testing.T) {
 	}
 }
 
+func TestPublicDDLLegacySideObjectDialectRemainsCompatible(t *testing.T) {
+	registry := schema.NewRegistry()
+	if err := registry.Register(legacySideObjectDialect{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	renderer, err := registry.NewRenderer(schema.Options{TargetDialect: "legacy-side-objects"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	table := schema.TableRef{Name: "items"}
+
+	for _, tc := range []struct {
+		name string
+		call func() (schema.Result, error)
+		want string
+	}{
+		{name: "index", call: func() (schema.Result, error) {
+			return renderer.CreateIndex(table, schema.Index{Name: "ix_items_id", Columns: []string{"id"}})
+		}, want: "LEGACY INDEX"},
+		{name: "primary key", call: func() (schema.Result, error) {
+			return renderer.CreatePrimaryKey(table, schema.PrimaryKey{Name: "pk_items", Columns: []string{"id"}})
+		}, want: "LEGACY PRIMARY KEY"},
+		{name: "unique", call: func() (schema.Result, error) {
+			return renderer.CreateUniqueConstraint(table, schema.UniqueConstraint{Name: "uq_items_id", Columns: []string{"id"}})
+		}, want: "LEGACY UNIQUE"},
+		{name: "check", call: func() (schema.Result, error) {
+			return renderer.CreateCheckConstraint(table, schema.CheckConstraint{Name: "ck_items_id", Expression: "id > 0"})
+		}, want: "LEGACY CHECK"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tc.call()
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			if result.SQL != tc.want {
+				t.Fatalf("SQL = %q, want %q", result.SQL, tc.want)
+			}
+		})
+	}
+}
+
 func TestPublicDDLSideObjectAdapterParity(t *testing.T) {
 	cases := []struct {
 		name       string

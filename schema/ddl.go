@@ -280,9 +280,19 @@ type SideObjectDialect interface {
 	Dialect
 	RenderIndex(Request, TableRef, Index) (Result, error)
 	RenderPrimaryKey(Request, TableRef, PrimaryKey) (Result, error)
-	RenderForeignKey(Request, TableRef, ForeignKey) (Result, error)
 	RenderUniqueConstraint(Request, TableRef, UniqueConstraint) (Result, error)
 	RenderCheckConstraint(Request, TableRef, CheckConstraint) (Result, error)
+}
+
+// ForeignKeyDialect is the optional extension for standalone foreign-key
+// rendering. It remains separate from SideObjectDialect so adding this API
+// does not break existing custom side-object implementations.
+//
+// A ForeignKeyDialect should set Capabilities.StandaloneForeignKeys to true.
+// Built-in dialects implement this interface.
+type ForeignKeyDialect interface {
+	Dialect
+	RenderForeignKey(Request, TableRef, ForeignKey) (Result, error)
 }
 
 var (
@@ -530,7 +540,7 @@ func (r Renderer) CreateForeignKey(table TableRef, foreignKey ForeignKey) (Resul
 	if err := validateForeignKeyActionSupport(r.Dialect(), foreignKey.OnUpdate); err != nil {
 		return Result{}, err
 	}
-	dialect, err := r.sideObjectDialect("standalone foreign keys")
+	dialect, err := r.foreignKeyDialect()
 	if err != nil {
 		return Result{}, err
 	}
@@ -676,6 +686,14 @@ func (r Renderer) sideObjectDialect(feature string) (SideObjectDialect, error) {
 	dialect, ok := r.dialect.(SideObjectDialect)
 	if !ok {
 		return nil, r.unsupported(feature)
+	}
+	return dialect, nil
+}
+
+func (r Renderer) foreignKeyDialect() (ForeignKeyDialect, error) {
+	dialect, ok := r.dialect.(ForeignKeyDialect)
+	if !ok {
+		return nil, r.unsupported("standalone foreign keys")
 	}
 	return dialect, nil
 }

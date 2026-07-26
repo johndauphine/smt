@@ -216,5 +216,7 @@ renderer, err := registry.NewRenderer(schema.Options{TargetDialect: "my-db"})
 The dialect interface receives only public `schema.Request`, `schema.Table`,
 and `schema.Column` values and returns `schema.Result`; it is safe to implement
 without importing SMT internals. A custom dialect can additionally implement
-`schema.SideObjectDialect` to render the five standalone side-object methods.
-Registries do not share mutable global state.
+`schema.SideObjectDialect` to render indexes and constraints, and
+`schema.ForeignKeyDialect` to render standalone foreign keys. These optional
+extensions are separate so existing custom side-object dialects remain source
+compatible. Registries do not share mutable global state.
