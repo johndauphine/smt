@@ -411,6 +411,18 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 		if err != nil {
 			return Batch{}, err
 		}
+		if d.name == "mssql" {
+			// SQL Server permits only one DEFAULT constraint per column. The
+			// existing constraint is catalog-named, so drop it first on the
+			// same connection before adding this renderer's deterministic name.
+			return Batch{
+				Statements: []Statement{
+					{Kind: StatementDropColumnDefault, SQL: renderer.DropColumnDefaultDDL(operation.Table.Name, operation.Column.Name)},
+					{Kind: StatementSetColumnDefault, SQL: sql},
+				},
+				RequiresSingleConnection: true,
+			}, nil
+		}
 		return batch(StatementSetColumnDefault, sql), nil
 	case EvolutionDropColumnDefault:
 		return batch(StatementDropColumnDefault, renderer.DropColumnDefaultDDL(operation.Table.Name, operation.Name)), nil

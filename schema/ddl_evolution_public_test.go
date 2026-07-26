@@ -371,6 +371,41 @@ func TestPublicDDLEvolutionConstraintKindsAndCleanupContracts(t *testing.T) {
 	}
 }
 
+func TestPublicDDLMSSQLSetColumnDefaultReplacesCatalogNamedConstraint(t *testing.T) {
+	renderer, err := schema.NewRenderer(schema.Options{TargetDialect: "mssql", Schema: "dbo", SourceDialect: "mssql"})
+	if err != nil {
+		t.Fatalf("NewRenderer(mssql): %v", err)
+	}
+	batch, err := renderer.SetColumnDefault(
+		schema.TableRef{Name: "Orders"},
+		schema.Column{Name: "Status", DataType: "int", DefaultExpression: "42"},
+	)
+	if err != nil {
+		t.Fatalf("SetColumnDefault: %v", err)
+	}
+	if !batch.RequiresSingleConnection || len(batch.Statements) != 2 {
+		t.Fatalf("replacement batch = %+v, want same-connection drop then add", batch)
+	}
+	drop, set := batch.Statements[0], batch.Statements[1]
+	if drop.Kind != schema.StatementDropColumnDefault || set.Kind != schema.StatementSetColumnDefault {
+		t.Fatalf("replacement statement kinds = %q, %q", drop.Kind, set.Kind)
+	}
+	for _, want := range []string{
+		"sys.default_constraints",
+		"t.name = N'Orders'",
+		"c.name = N'Status'",
+		"IF @constraintName IS NOT NULL",
+		"QUOTENAME(@constraintName)",
+	} {
+		if !strings.Contains(drop.SQL, want) {
+			t.Fatalf("replacement drop SQL missing %q:\n%s", want, drop.SQL)
+		}
+	}
+	if want := "ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [df_Orders_Status] DEFAULT 42 FOR [Status]"; set.SQL != want {
+		t.Fatalf("replacement add SQL = %q, want %q", set.SQL, want)
+	}
+}
+
 func TestPublicDDLEvolutionPreservesConfiguredSchemaName(t *testing.T) {
 	for _, tc := range []struct {
 		dialect string
@@ -532,8 +567,16 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 				if err != nil {
 					t.Fatalf("internal SetColumnDefault: %v", err)
 				}
-				if gotDefault.Statements[0].SQL != wantDefault {
-					t.Fatalf("set default SQL = %q, want %q", gotDefault.Statements[0].SQL, wantDefault)
+				if !batchContainsSQL(gotDefault, wantDefault) {
+					t.Fatalf("set default SQL = %+v, want %q", gotDefault.Statements, wantDefault)
+				}
+				if tc.dialect == "mssql" {
+					if !gotDefault.RequiresSingleConnection || len(gotDefault.Statements) != 2 {
+						t.Fatalf("MSSQL default replacement batch = %+v, want same-connection drop then add", gotDefault)
+					}
+					if wantDrop := internal.DropColumnDefaultDDL(table.Name, column.Name); gotDefault.Statements[0].SQL != wantDrop {
+						t.Fatalf("MSSQL default replacement drop = %q, want %q", gotDefault.Statements[0].SQL, wantDrop)
+					}
 				}
 			}
 			if caps.DropColumnDefaults {

@@ -31,6 +31,9 @@ alter_column_nullability
 ALTER TABLE [dbo].[Orders] ALTER COLUMN [subtotal] BIGINT NULL
 
 set_column_default
+requires_single_connection
+drop_column_default
+DECLARE @constraintName sysname; SELECT @constraintName = dc.name FROM sys.default_constraints dc JOIN sys.columns c ON c.default_object_id = dc.object_id JOIN sys.tables t ON t.object_id = c.object_id JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'dbo' AND t.name = N'Orders' AND c.name = N'subtotal'; IF @constraintName IS NOT NULL EXEC(N'ALTER TABLE [dbo].[Orders] DROP CONSTRAINT ' + QUOTENAME(@constraintName))
 set_column_default
 ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [df_Orders_subtotal] DEFAULT 0 FOR [subtotal]
 
