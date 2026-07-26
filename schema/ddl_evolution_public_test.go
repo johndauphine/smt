@@ -231,6 +231,65 @@ func TestPublicDDLEvolutionCapabilitiesAndUnsupportedErrors(t *testing.T) {
 	}
 }
 
+func TestPublicDDLEvolutionNullabilityUsesOperationSpecificValidation(t *testing.T) {
+	table := schema.TableRef{Name: "accounts"}
+	column := schema.Column{Name: "status", IsNullable: true}
+
+	postgres, err := schema.NewRenderer(schema.Options{TargetDialect: "postgres", Schema: "public"})
+	if err != nil {
+		t.Fatalf("NewRenderer(postgres): %v", err)
+	}
+	batch, err := postgres.AlterColumnNullability(table, column)
+	if err != nil {
+		t.Fatalf("PostgreSQL nullability without DataType: %v", err)
+	}
+	if got, want := batch.Statements[0].SQL, `ALTER TABLE "public"."accounts" ALTER COLUMN "status" DROP NOT NULL`; got != want {
+		t.Fatalf("PostgreSQL nullability SQL = %q, want %q", got, want)
+	}
+
+	registry := schema.NewRegistry()
+	if err := registry.Register(nullableOnlyEvolutionDialect{}); err != nil {
+		t.Fatalf("Register custom evolution dialect: %v", err)
+	}
+	custom, err := registry.NewRenderer(schema.Options{TargetDialect: "nullable-only"})
+	if err != nil {
+		t.Fatalf("NewRenderer(custom): %v", err)
+	}
+	if _, err := custom.AlterColumnNullability(table, column); err != nil {
+		t.Fatalf("custom nullability without DataType: %v", err)
+	}
+
+	for _, dialect := range []string{"mssql", "mysql"} {
+		renderer, err := schema.NewRenderer(schema.Options{TargetDialect: dialect})
+		if err != nil {
+			t.Fatalf("NewRenderer(%s): %v", dialect, err)
+		}
+		if _, err := renderer.AlterColumnNullability(table, column); err == nil ||
+			!strings.Contains(err.Error(), "empty source data type") {
+			t.Fatalf("%s nullability error = %v, want empty source data type", dialect, err)
+		}
+	}
+}
+
+func TestBuiltinEvolutionDialectReturnsTypedUnsupportedErrorsDirectly(t *testing.T) {
+	dialect, err := schema.NewRegistry().Resolve("sqlite")
+	if err != nil {
+		t.Fatalf("Resolve(sqlite): %v", err)
+	}
+	evolution := dialect.(schema.EvolutionDialect)
+	_, err = evolution.RenderEvolution(
+		schema.Request{Schema: "named"},
+		schema.Evolution{Kind: schema.EvolutionDropSchema},
+	)
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("RenderEvolution error = %v, want UnsupportedFeatureError", err)
+	}
+	if unsupported.Feature != "schema drops" {
+		t.Fatalf("Unsupported feature = %q, want %q", unsupported.Feature, "schema drops")
+	}
+}
+
 func TestPublicDDLEvolutionConstraintKindsAndCleanupContracts(t *testing.T) {
 	mysql, err := schema.NewRenderer(schema.Options{TargetDialect: "mysql", Schema: "crm"})
 	if err != nil {
@@ -488,6 +547,26 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+type nullableOnlyEvolutionDialect struct{ testDialect }
+
+func (nullableOnlyEvolutionDialect) Name() string      { return "nullable-only" }
+func (nullableOnlyEvolutionDialect) Aliases() []string { return nil }
+func (nullableOnlyEvolutionDialect) Capabilities() schema.Capabilities {
+	return schema.Capabilities{AlterColumnNullability: true}
+}
+func (nullableOnlyEvolutionDialect) RenderEvolution(_ schema.Request, operation schema.Evolution) (schema.Batch, error) {
+	if operation.Kind != schema.EvolutionAlterColumnNullability {
+		return schema.Batch{}, errors.New("unexpected evolution kind")
+	}
+	if operation.Column.DataType != "" {
+		return schema.Batch{}, errors.New("unexpected column data type")
+	}
+	return schema.Batch{Statements: []schema.Statement{{
+		Kind: schema.StatementAlterColumnNullability,
+		SQL:  "ALTER NULLABILITY",
+	}}}, nil
 }
 
 func batchContainsSQL(batch schema.Batch, want string) bool {

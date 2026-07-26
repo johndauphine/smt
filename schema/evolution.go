@@ -76,8 +76,10 @@ type ConstraintRef struct {
 }
 
 // Evolution is the typed public value received by a custom EvolutionDialect.
-// Renderer validates all fields before invoking the dialect; fields not used
-// by Kind are zero. No SMT internal driver value appears in this contract.
+// Renderer performs operation-specific validation before invoking the
+// dialect. Top-level fields not used by Kind are zero; Column contains the
+// caller's input, including any optional fields. No SMT internal driver value
+// appears in this contract.
 type Evolution struct {
 	Kind            EvolutionKind
 	Table           TableRef
@@ -225,6 +227,9 @@ func (r Renderer) AlterColumnType(table TableRef, column Column) (Batch, error) 
 }
 
 // AlterColumnNullability renders an in-place NULL/NOT NULL transition.
+// Column.Name and Column.IsNullable are always used. PostgreSQL and custom
+// dialects may omit Column.DataType; SQL Server and MySQL require it because
+// their ALTER syntax restates the column type.
 func (r Renderer) AlterColumnNullability(table TableRef, column Column) (Batch, error) {
 	if !r.Capabilities().AlterColumnNullability {
 		return Batch{}, r.unsupported("altering column nullability without rebuilding the table")
@@ -232,7 +237,7 @@ func (r Renderer) AlterColumnNullability(table TableRef, column Column) (Batch, 
 	if err := validateTableRef("column nullability change", table); err != nil {
 		return Batch{}, err
 	}
-	if err := r.validateColumn(column); err != nil {
+	if err := r.validateNullabilityColumn(column); err != nil {
 		return Batch{}, err
 	}
 	return r.renderEvolution(Evolution{Kind: EvolutionAlterColumnNullability, Table: table, Column: column})
@@ -287,6 +292,18 @@ func (r Renderer) TruncateTable(table TableRef, options TruncateOptions) (Batch,
 	return r.renderEvolution(Evolution{Kind: EvolutionTruncateTable, Table: table, TruncateOptions: options})
 }
 
+func (r Renderer) validateNullabilityColumn(column Column) error {
+	if strings.TrimSpace(column.Name) == "" {
+		return fmt.Errorf("render column: empty column name")
+	}
+	if dialect, ok := r.dialect.(builtinDialect); ok &&
+		(dialect.name == "mssql" || dialect.name == "mysql") &&
+		strings.TrimSpace(column.DataType) == "" {
+		return fmt.Errorf("render column %q: empty source data type", column.Name)
+	}
+	return nil
+}
+
 func (r Renderer) renderEvolution(operation Evolution) (Batch, error) {
 	dialect, ok := r.dialect.(EvolutionDialect)
 	if !ok {
@@ -296,6 +313,9 @@ func (r Renderer) renderEvolution(operation Evolution) (Batch, error) {
 }
 
 func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (Batch, error) {
+	if feature := d.unsupportedEvolutionFeature(operation); feature != "" {
+		return Batch{}, &UnsupportedFeatureError{Dialect: d.name, Feature: feature}
+	}
 	renderer, err := d.renderer(request)
 	if err != nil {
 		return Batch{}, err
@@ -322,13 +342,13 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 	case EvolutionDropSchema:
 		sql, err := renderer.DropSchemaDDL(operation.DropOptions.Cascade)
 		if err != nil {
-			return Batch{}, d.publicEvolutionError(err)
+			return Batch{}, err
 		}
 		return batch(StatementDropSchema, sql), nil
 	case EvolutionDropTable:
 		sql, err := renderer.DropTableWithOptionsDDL(operation.Table.Name, operation.DropOptions.Cascade)
 		if err != nil {
-			return Batch{}, d.publicEvolutionError(err)
+			return Batch{}, err
 		}
 		switch d.name {
 		case "mysql":
@@ -343,13 +363,13 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 	case EvolutionDropConstraint:
 		sql, err := renderer.DropConstraintDDL(operation.Table.Name, operation.Constraint.Name, string(operation.Constraint.Kind))
 		if err != nil {
-			return Batch{}, d.publicEvolutionError(err)
+			return Batch{}, err
 		}
 		return batch(StatementDropConstraint, sql), nil
 	case EvolutionAddColumn:
 		sql, err := renderer.AddColumnDDL(operation.Table.Name, toDriverColumn(operation.Column), toDriverColumns(operation.Table.Columns))
 		if err != nil {
-			return Batch{}, d.publicEvolutionError(err)
+			return Batch{}, err
 		}
 		return Batch{Statements: []Statement{{
 			Kind: StatementAddColumn, SQL: sql,
@@ -360,7 +380,7 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 	case EvolutionAlterColumnType:
 		sql, err := renderer.AlterColumnTypeDDL(operation.Table.Name, toDriverColumn(operation.Column))
 		if err != nil {
-			return Batch{}, d.publicEvolutionError(err)
+			return Batch{}, err
 		}
 		return Batch{Statements: []Statement{{
 			Kind: StatementAlterColumnType, SQL: sql,
@@ -369,13 +389,13 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 	case EvolutionAlterColumnNullability:
 		sql, err := renderer.AlterColumnNullabilityDDL(operation.Table.Name, toDriverColumn(operation.Column))
 		if err != nil {
-			return Batch{}, d.publicEvolutionError(err)
+			return Batch{}, err
 		}
 		return batch(StatementAlterColumnNullability, sql), nil
 	case EvolutionSetColumnDefault:
 		sql, err := renderer.SetColumnDefaultDDL(operation.Table.Name, toDriverColumn(operation.Column))
 		if err != nil {
-			return Batch{}, d.publicEvolutionError(err)
+			return Batch{}, err
 		}
 		return batch(StatementSetColumnDefault, sql), nil
 	case EvolutionDropColumnDefault:
@@ -383,7 +403,7 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 	case EvolutionTruncateTable:
 		sql, err := renderer.TruncateTableDDL(operation.Table.Name, operation.TruncateOptions.Cascade)
 		if err != nil {
-			return Batch{}, d.publicEvolutionError(err)
+			return Batch{}, err
 		}
 		switch d.name {
 		case "mysql":
@@ -402,18 +422,62 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 	}
 }
 
-func (d builtinDialect) publicEvolutionError(err error) error {
-	message := err.Error()
-	switch {
-	case strings.Contains(message, "schema-drop CASCADE"):
-		return &UnsupportedFeatureError{Dialect: d.name, Feature: "schema-drop CASCADE"}
-	case strings.Contains(message, "table-drop CASCADE"):
-		return &UnsupportedFeatureError{Dialect: d.name, Feature: "table-drop CASCADE"}
-	case strings.Contains(message, "truncate CASCADE"):
-		return &UnsupportedFeatureError{Dialect: d.name, Feature: "truncate CASCADE"}
-	case strings.Contains(message, "does not support dropping named constraints"):
-		return &UnsupportedFeatureError{Dialect: d.name, Feature: "constraint drops"}
-	default:
-		return err
+func (d builtinDialect) unsupportedEvolutionFeature(operation Evolution) string {
+	caps := d.capabilities
+	switch operation.Kind {
+	case EvolutionDropSchema:
+		if !caps.DropSchemas {
+			return "schema drops"
+		}
+		if operation.DropOptions.Cascade && !caps.DropSchemaCascade {
+			return "schema-drop CASCADE"
+		}
+	case EvolutionDropTable:
+		if !caps.DropTables {
+			return "table drops"
+		}
+		if operation.DropOptions.Cascade && !caps.DropTableCascade {
+			return "table-drop CASCADE"
+		}
+	case EvolutionDropIndex:
+		if !caps.DropIndexes {
+			return "index drops"
+		}
+	case EvolutionDropConstraint:
+		if !caps.DropConstraints {
+			return "constraint drops"
+		}
+	case EvolutionAddColumn:
+		if !caps.AddColumns {
+			return "adding columns"
+		}
+	case EvolutionDropColumn:
+		if !caps.DropColumns {
+			return "dropping columns"
+		}
+	case EvolutionAlterColumnType:
+		if !caps.AlterColumnTypes {
+			return "altering column types without rebuilding the table"
+		}
+	case EvolutionAlterColumnNullability:
+		if !caps.AlterColumnNullability {
+			return "altering column nullability without rebuilding the table"
+		}
+	case EvolutionSetColumnDefault:
+		if !caps.SetColumnDefaults {
+			return "setting column defaults"
+		}
+	case EvolutionDropColumnDefault:
+		if !caps.DropColumnDefaults {
+			return "dropping column defaults"
+		}
+	case EvolutionTruncateTable:
+		if !caps.TruncateTables {
+			return "truncating tables"
+		}
+		if operation.TruncateOptions.Cascade && !caps.TruncateTableCascade {
+			return "truncate CASCADE"
+		}
 	}
+	return ""
 }
