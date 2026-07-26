@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Public schema-evolution DDL API** ([#247]) — `schema.Renderer` now
+  exposes deterministic drops for schemas, tables, indexes, and named
+  constraints; column add/drop/type/nullability/default changes; and table
+  truncation. The public API returns ordered `schema.Batch` artifacts and
+  keeps execution, retry, and transaction policy with the caller. Built-in
+  capability reporting covers PostgreSQL, SQL Server, MySQL, SQLite, and
+  ClickHouse; unsupported operations return
+  `*schema.UnsupportedFeatureError` instead of silently degrading or proposing
+  a rebuild. PostgreSQL supports the complete current surface and explicit
+  cascade; SQL Server and MySQL support the non-cascade surface; SQLite and
+  ClickHouse advertise only their supported subsets. MySQL/SQLite destructive
+  batches carry same-connection cleanup semantics, SQL Server default
+  replacement is an ordered same-connection batch, and SQLite sequence cleanup
+  is explicitly best effort. `EvolutionCapabilities` is a companion extensible
+  public capability surface, preserving existing exported `Capabilities` and
+  `Statement` struct layouts. `RendererVersion` 19 → 20.
+
 - **Expression IR for DEFAULT / CHECK translation** ([#175]) — new
   `internal/expr` package: a source default or CHECK predicate is parsed once
   into a small dialect-neutral tree (`ParseDefault` / `ParseCheck`), rendered
