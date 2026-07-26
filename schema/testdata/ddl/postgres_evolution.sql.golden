@@ -1,0 +1,43 @@
+drop_schema
+drop_schema
+DROP SCHEMA IF EXISTS "public" CASCADE
+
+drop_table
+drop_table
+DROP TABLE IF EXISTS "public"."orders" CASCADE
+
+drop_index
+drop_index
+DROP INDEX "public"."ix_orders_subtotal"
+
+drop_foreign_key
+drop_constraint
+ALTER TABLE "public"."orders" DROP CONSTRAINT "fk_orders_account"
+
+add_column
+add_column
+ALTER TABLE "public"."orders" ADD COLUMN "subtotal" integer DEFAULT 0
+
+drop_column
+drop_column
+ALTER TABLE "public"."orders" DROP COLUMN "subtotal"
+
+alter_column_type
+alter_column_type
+ALTER TABLE "public"."orders" ALTER COLUMN "subtotal" TYPE bigint
+
+alter_column_nullability
+alter_column_nullability
+ALTER TABLE "public"."orders" ALTER COLUMN "subtotal" DROP NOT NULL
+
+set_column_default
+set_column_default
+ALTER TABLE "public"."orders" ALTER COLUMN "subtotal" SET DEFAULT 0
+
+drop_column_default
+drop_column_default
+ALTER TABLE "public"."orders" ALTER COLUMN "subtotal" DROP DEFAULT
+
+truncate_table
+truncate_table
+TRUNCATE TABLE "public"."orders" CASCADE

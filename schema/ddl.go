@@ -35,6 +35,20 @@ type Capabilities struct {
 	CreateSchema           bool
 	CreateTable            bool
 	CreateColumn           bool
+	DropSchemas            bool
+	DropSchemaCascade      bool
+	DropTables             bool
+	DropTableCascade       bool
+	DropIndexes            bool
+	DropConstraints        bool
+	AddColumns             bool
+	DropColumns            bool
+	AlterColumnTypes       bool
+	AlterColumnNullability bool
+	SetColumnDefaults      bool
+	DropColumnDefaults     bool
+	TruncateTables         bool
+	TruncateTableCascade   bool
 	PrimaryKeys            bool
 	IdentityColumns        bool
 	Defaults               bool
@@ -92,16 +106,20 @@ const (
 	StatementCreateTable StatementKind = "create_table"
 )
 
-// Statement is one deterministic executable DDL artifact. SQL is exactly one
-// statement; callers retain execution, retry, and scheduling policy.
+// Statement is one deterministic executable SQL unit. It is normally one DDL
+// statement; a dialect may use a single multi-statement SQL batch where that
+// is required for atomic scope (for example SQL Server default-constraint
+// discovery). Callers retain execution, retry, and scheduling policy.
 //
 // Warnings apply only to this artifact. They are advisory and never change
 // SQL, which keeps plans deterministic and safe to persist or inspect before
-// execution.
+// execution. BestEffort means an executor should record, but not fail the
+// containing operation for, an error from this cleanup statement.
 type Statement struct {
-	Kind     StatementKind
-	SQL      string
-	Warnings []Warning
+	Kind       StatementKind
+	SQL        string
+	Warnings   []Warning
+	BestEffort bool
 }
 
 // Plan is an ordered, deterministic set of CREATE statements. It owns no
@@ -846,6 +864,10 @@ type builtinDialect struct {
 func builtinDialects() []Dialect {
 	full := Capabilities{
 		CreateSchema: true, CreateTable: true, CreateColumn: true,
+		DropSchemas: true, DropSchemaCascade: true,
+		DropTables: true, DropTableCascade: true, DropIndexes: true, DropConstraints: true,
+		AddColumns: true, DropColumns: true, AlterColumnTypes: true, AlterColumnNullability: true,
+		SetColumnDefaults: true, DropColumnDefaults: true, TruncateTables: true, TruncateTableCascade: true,
 		PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
 		SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 		IndexExpressionKeys: true, IndexIncludeColumns: true, FilteredIndexes: true,
@@ -856,6 +878,9 @@ func builtinDialects() []Dialect {
 			name: "mssql", aliases: []string{"sqlserver", "sql-server", "sql_server"},
 			capabilities: Capabilities{
 				CreateSchema: true, CreateTable: true, CreateColumn: true,
+				DropSchemas: true, DropTables: true, DropIndexes: true, DropConstraints: true,
+				AddColumns: true, DropColumns: true, AlterColumnTypes: true, AlterColumnNullability: true,
+				SetColumnDefaults: true, DropColumnDefaults: true, TruncateTables: true,
 				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
 				SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 				IndexIncludeColumns: true, FilteredIndexes: true,
@@ -865,6 +890,9 @@ func builtinDialects() []Dialect {
 			name: "mysql", aliases: []string{"mariadb", "maria"},
 			capabilities: Capabilities{
 				CreateSchema: true, CreateTable: true, CreateColumn: true,
+				DropSchemas: true, DropTables: true, DropIndexes: true, DropConstraints: true,
+				AddColumns: true, DropColumns: true, AlterColumnTypes: true, AlterColumnNullability: true,
+				SetColumnDefaults: true, DropColumnDefaults: true, TruncateTables: true,
 				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
 				SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 				IndexExpressionKeys: true, IndexPrefixLengths: true,
@@ -874,12 +902,17 @@ func builtinDialects() []Dialect {
 			name: "sqlite", aliases: []string{"sqlite3"},
 			capabilities: Capabilities{
 				CreateTable: true, CreateColumn: true, PrimaryKeys: true, IdentityColumns: true, Defaults: true,
+				DropTables: true, DropIndexes: true, AddColumns: true, DropColumns: true, TruncateTables: true,
 				SecondaryIndexes: true, FilteredIndexes: true,
 			},
 		},
 		builtinDialect{
 			name: "clickhouse", aliases: []string{"click-house"},
-			capabilities: Capabilities{CreateSchema: true, CreateTable: true, CreateColumn: true, PrimaryKeys: true},
+			capabilities: Capabilities{
+				CreateSchema: true, CreateTable: true, CreateColumn: true,
+				DropSchemas: true, DropTables: true, AddColumns: true, DropColumns: true, TruncateTables: true,
+				PrimaryKeys: true,
+			},
 		},
 	}
 }

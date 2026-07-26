@@ -1,0 +1,43 @@
+drop_schema
+drop_schema
+IF SCHEMA_ID(N'dbo') IS NOT NULL EXEC(N'DROP SCHEMA [dbo]')
+
+drop_table
+drop_table
+DROP TABLE IF EXISTS [dbo].[Orders]
+
+drop_index
+drop_index
+DROP INDEX [IX Orders Subtotal] ON [dbo].[Orders]
+
+drop_foreign_key
+drop_constraint
+ALTER TABLE [dbo].[Orders] DROP CONSTRAINT [FK Orders Account]
+
+add_column
+add_column
+ALTER TABLE [dbo].[Orders] ADD [subtotal] INT DEFAULT 0
+
+drop_column
+drop_column
+ALTER TABLE [dbo].[Orders] DROP COLUMN [subtotal]
+
+alter_column_type
+alter_column_type
+ALTER TABLE [dbo].[Orders] ALTER COLUMN [subtotal] BIGINT NULL
+
+alter_column_nullability
+alter_column_nullability
+ALTER TABLE [dbo].[Orders] ALTER COLUMN [subtotal] BIGINT NULL
+
+set_column_default
+set_column_default
+ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [df_Orders_subtotal] DEFAULT 0 FOR [subtotal]
+
+drop_column_default
+drop_column_default
+DECLARE @constraintName sysname; SELECT @constraintName = dc.name FROM sys.default_constraints dc JOIN sys.columns c ON c.default_object_id = dc.object_id JOIN sys.tables t ON t.object_id = c.object_id JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'dbo' AND t.name = N'Orders' AND c.name = N'subtotal'; IF @constraintName IS NOT NULL EXEC(N'ALTER TABLE [dbo].[Orders] DROP CONSTRAINT ' + QUOTENAME(@constraintName))
+
+truncate_table
+truncate_table
+TRUNCATE TABLE [dbo].[Orders]

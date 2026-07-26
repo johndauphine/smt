@@ -1,0 +1,29 @@
+drop_table
+requires_single_connection
+session_setup
+PRAGMA foreign_keys = OFF
+drop_table
+DROP TABLE IF EXISTS "Orders"
+session_cleanup
+PRAGMA foreign_keys = ON
+on_failure_session_cleanup
+PRAGMA foreign_keys = ON
+
+drop_index
+drop_index
+DROP INDEX IF EXISTS "IX Orders Subtotal"
+
+add_column
+add_column
+ALTER TABLE "Orders" ADD COLUMN "subtotal" INTEGER DEFAULT 0
+
+drop_column
+drop_column
+ALTER TABLE "Orders" DROP COLUMN "subtotal"
+
+truncate_table
+truncate_table
+DELETE FROM "Orders"
+best_effort
+best_effort_cleanup
+DELETE FROM sqlite_sequence WHERE name = 'Orders'

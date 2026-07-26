@@ -1,0 +1,57 @@
+drop_schema
+drop_schema
+DROP DATABASE IF EXISTS `crm`
+
+drop_table
+requires_single_connection
+session_setup
+SET FOREIGN_KEY_CHECKS = 0
+drop_table
+DROP TABLE IF EXISTS `crm`.`Orders`
+session_cleanup
+SET FOREIGN_KEY_CHECKS = 1
+on_failure_session_cleanup
+SET FOREIGN_KEY_CHECKS = 1
+
+drop_index
+drop_index
+DROP INDEX `IX Orders Subtotal` ON `crm`.`Orders`
+
+drop_foreign_key
+drop_constraint
+ALTER TABLE `crm`.`Orders` DROP FOREIGN KEY `FK Orders Account`
+
+add_column
+add_column
+ALTER TABLE `crm`.`Orders` ADD COLUMN `subtotal` INT DEFAULT 0
+
+drop_column
+drop_column
+ALTER TABLE `crm`.`Orders` DROP COLUMN `subtotal`
+
+alter_column_type
+alter_column_type
+ALTER TABLE `crm`.`Orders` MODIFY COLUMN `subtotal` BIGINT
+
+alter_column_nullability
+alter_column_nullability
+ALTER TABLE `crm`.`Orders` MODIFY COLUMN `subtotal` BIGINT
+
+set_column_default
+set_column_default
+ALTER TABLE `crm`.`Orders` ALTER COLUMN `subtotal` SET DEFAULT 0
+
+drop_column_default
+drop_column_default
+ALTER TABLE `crm`.`Orders` ALTER COLUMN `subtotal` DROP DEFAULT
+
+truncate_table
+requires_single_connection
+session_setup
+SET FOREIGN_KEY_CHECKS = 0
+truncate_table
+TRUNCATE TABLE `crm`.`Orders`
+session_cleanup
+SET FOREIGN_KEY_CHECKS = 1
+on_failure_session_cleanup
+SET FOREIGN_KEY_CHECKS = 1
