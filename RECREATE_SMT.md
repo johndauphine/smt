@@ -1,11 +1,10 @@
-# Reconstruction Prompt: SMT’s Deterministic Schema-Migration and DDL Subsystem
+# Reconstruction Prompt: SMT’s Deterministic Schema-Migration and DDL Project
 
 Use this document as the complete build specification for recreating SMT’s
-schema-migration and deterministic DDL capability inside a new data migration
-tool. Assume you do **not** have access to the original repository. The result
-may be implemented in any language. Preserve the observable contracts below;
-do not imitate an implementation language or directory layout merely for
-historical similarity.
+schema-migration and deterministic DDL project. Assume you do **not** have
+access to the original repository. The result may be implemented in any
+language. Preserve the observable contracts below; do not imitate an
+implementation language or directory layout merely for historical similarity.
 
 ## 1. How to interpret this specification
 
@@ -39,7 +38,7 @@ If two requirements appear to conflict, use this priority order:
 
 ### Required contract
 
-Build a schema-only subsystem that:
+Build an independent schema-only project that:
 
 1. Introspects a source database schema.
 2. Preserves source type and expression meaning through one consistent
@@ -66,14 +65,16 @@ computed-column semantics, constraint structure, and index shape can and must
 be tested. A probabilistic author is unsuitable as the source of executable
 DDL.
 
-## 3. Boundary with the surrounding data migration tool
+## 3. Project independence and scope
 
 ### Required contract
 
-Treat the reconstructed component as the schema/DDL half of a larger data
-migration product.
+Treat the reconstructed SMT as a complete, standalone project. It MUST build,
+test, release, configure, and operate without source code, services,
+configuration, artifacts, or lifecycle coordination from another project. No
+external product is part of SMT’s required architecture or acceptance surface.
 
-The schema component owns:
+SMT owns:
 
 - schema catalog introspection;
 - the abstract schema model;
@@ -87,24 +88,8 @@ The schema component owns:
   records;
 - optional inspection of deterministic DDL.
 
-The surrounding data migration tool owns:
-
-- reading and writing table rows;
-- chunking, pagination, worker pools, bulk-load protocols, and buffer sizing;
-- row-transfer retry and resume;
-- data validation and row-count validation;
-- runtime transfer tuning;
-- scheduling schema work relative to data work;
-- connection lifecycle when it consumes the connection-free public DDL API.
-
-The schema component MUST NOT introduce row transfer, chunk-level progress,
-worker-pool tuning, read-ahead/write-ahead behavior, or data-copy SQL into its
-own architecture.
-
-The host tool MAY schedule table creation before row loading and secondary
-indexes/foreign keys/checks afterward. The renderer must therefore expose
-tables and standalone side objects independently. When the standalone SMT CLI
-builds a complete create plan, its fixed order is:
+The renderer MUST expose tables and standalone side objects independently.
+When the SMT CLI builds a complete create plan, its fixed order is:
 
 1. schema or database;
 2. tables, with columns and inline primary keys;
@@ -112,8 +97,15 @@ builds a complete create plan, its fixed order is:
 4. foreign keys;
 5. check constraints.
 
-The host must never ask an AI to regenerate SQL that the deterministic
-renderer has already produced.
+SMT MUST NOT ask an AI to regenerate SQL that the deterministic renderer has
+already produced.
+
+### Non-normative context
+
+An unrelated schema migration system may choose to invoke SMT’s CLI or
+connection-free public API. Such use does not create a shared architecture,
+dependency, release, or implementation requirement for SMT and is not part of
+reconstruction acceptance.
 
 ## 4. Explicit non-goals
 
@@ -571,8 +563,8 @@ The create surface MUST support these operations:
 - create named check constraint;
 - create an ordered plan containing schema/database and tables only.
 
-The plan operation intentionally excludes standalone side objects so a data
-migration host can schedule them independently.
+The plan operation intentionally excludes standalone side objects so callers
+can compose those objects explicitly through the same connection-free API.
 
 ### Built-in create capabilities
 
@@ -1526,8 +1518,9 @@ Do not declare completion until:
 - old snapshots/state/manifests satisfy the v1 read contract;
 - no secret or machine-specific path appears in source, fixtures, artifacts, or
   documentation;
-- the schema subsystem can be embedded in a data migration host without taking
-  ownership of row transfer.
+- SMT builds, tests, releases, configures, and operates without source code,
+  services, configuration, artifacts, or lifecycle coordination from another
+  project.
 
 ---
 
