@@ -1,19 +1,40 @@
-# SMT v1.0.0 Release Checklist
+# SMT v1.4.0 Release Checklist
 
 ## Current Release Status
 
-SMT v1.0.0 is published as a stable GitHub Release:
-[SMT v1.0.0](https://github.com/johndauphine/smt/releases/tag/v1.0.0).
+SMT v1.4.0 is the current release target. Treat it as published only after the
+annotated tag, release assets, checksums, and stable GitHub Release are present.
 
 | Item | Status |
 |------|--------|
-| Release | Published on 2026-06-23 at 02:10 UTC; not a draft or prerelease |
-| Tag | Annotated tag `v1.0.0`, targeting `b08be2c1fcf22ced8e38e7137420e5d81b8e8ec0` |
-| CI | Passing on `main` for Unit Tests, Race Tests, Lint, and Build CLI at the release commit |
-| Release blockers | No open `v1` or `release-blocker` issues; release readiness tracker [#144](https://github.com/johndauphine/smt/issues/144) is closed |
+| Release | Target: stable GitHub Release `v1.4.0`; not complete until published |
+| Tag | Create annotated tag `v1.4.0` at the commit that passed every release gate |
+| CI | Unit Tests, Race Tests, Lint, and Build CLI must pass on the release commit |
+| Release blockers | Confirm there are no open release-blocking issues before tagging |
 | Assets | `smt-linux-amd64`, `smt-darwin-arm64`, `smt-windows-amd64.exe`, `checksums.txt` |
-| Checksums | Local release checksums passed before upload; the published `checksums.txt` matches the local file |
-| Acceptance artifacts | `so2010_verification.json`, `crm_acceptance_matrix.json`, and `live_ai_smoke.json` were generated under `.acceptance-artifacts/` during release validation |
+| Checksums | Generate locally, verify before upload, then verify the published `checksums.txt` |
+| Acceptance artifacts | Generate `so2010_verification.json`, `crm_acceptance_matrix.json`, and `live_ai_smoke.json` under `.acceptance-artifacts/` during release validation |
+
+## v1.4 Scope
+
+The stable CLI surface is `init`, `create`, `sync`, `drift`, `snapshot`,
+`snapshot list`, `health-check`, `profile`, `init-secrets`, and `history`.
+Preview remains the default for create and sync; applying DDL is explicit. See
+[`docs/cli.md`](cli.md) for the command and flag contract.
+
+The public [`schema`](public-ddl-api.md) package covers deterministic creation
+of schemas/databases, tables, columns, indexes, standalone primary keys,
+foreign keys, named unique constraints, and check constraints. `PlanCreate`
+orders schema and table statements; callers render and order standalone side
+objects explicitly.
+
+The public evolution API renders typed, ordered batches for
+schema/table/index/constraint drops, column add/drop/type/nullability/default
+changes, and table truncation. PostgreSQL supports the complete current
+evolution surface including explicit cascade; SQL Server and MySQL support the
+non-cascade surface. SQLite and ClickHouse advertise their supported subsets.
+Every unsupported request returns `*schema.UnsupportedFeatureError` rather
+than silently dropping behavior or proposing a rebuild.
 
 ## Supported Artifacts
 
@@ -26,7 +47,7 @@ SMT v1.0.0 is published as a stable GitHub Release:
 `make release-checksums` writes `dist/checksums.txt` with SHA-256 checksums for
 the built artifacts.
 
-Other platforms can build from source with Go 1.23+:
+Other platforms can build from source with Go 1.25.7 or later:
 
 ```bash
 go build -trimpath -o smt ./cmd/smt
@@ -100,7 +121,7 @@ make test-live-ai
 Build artifacts and checksums:
 
 ```bash
-VERSION=v1.0.0 make release-checksums
+VERSION=v1.4.0 make release-checksums
 ```
 
 Archive:
@@ -112,6 +133,6 @@ Archive:
 
 ## GitHub Release Notes
 
-Use the `CHANGELOG.md` `1.0.0` section as the release body. It includes the v1
-support contract, compatibility notes, release gates, and breaking config
-changes needed to publish without reconstructing notes manually.
+Use the `CHANGELOG.md` `1.4.0` section as the release body. It records the
+public schema-evolution API and the deterministic CLI/rendering changes shipped
+since v1.0.0 without reconstructing notes manually.
