@@ -1,17 +1,17 @@
 # Public schema DDL API
 
 `github.com/johndauphine/smt/schema` is the supported library surface for
-deterministic schema, table, column, index, constraint, and foreign-key DDL. It uses SMT's
-existing renderer and canonical type mapper; its input and result types do not
-expose `internal/*` packages or database handles. It does not load a database
-driver or require a PostgreSQL client dependency.
+deterministic schema, table, column, index, constraint, foreign-key, and
+schema-evolution DDL. It uses SMT's existing renderer and canonical type
+mapper; its input and result types do not expose `internal/*` packages or
+database handles. It does not load a database driver or require a PostgreSQL
+client dependency.
 
 ## Module consumption
 
 Require the module as `github.com/johndauphine/smt`; the public canonical type
-API is `github.com/johndauphine/smt/schema/canonical`. SMT declares Go 1.25.7.
-Downstream DMT currently declares Go 1.25.0, so its module directive must be
-raised to Go 1.25.7 when it adds this dependency. No `replace` directive is
+API is `github.com/johndauphine/smt/schema/canonical`. SMT declares Go 1.25.7,
+so downstream consumers must use Go 1.25.7 or later. No `replace` directive is
 needed after an SMT release is available.
 
 ```go
@@ -129,7 +129,91 @@ explicit `NO ACTION` clause. SQL Server rejects `RESTRICT`, and MySQL rejects
 `SET DEFAULT`, with `*schema.UnsupportedFeatureError` rather than emitting
 invalid target SQL.
 
-Alter, drop, and scheduling remain outside this public milestone.
+## Schema evolution
+
+`Renderer` also renders deterministic, typed schema-evolution batches:
+
+- `DropSchema`, `DropTable`, `DropIndex`, and `DropConstraint`
+- `AddColumn` and `DropColumn`
+- `AlterColumnType` and `AlterColumnNullability`
+- `SetColumnDefault` and `DropColumnDefault`
+- `TruncateTable`
+
+These methods return `schema.Batch`, not a database connection or an execution
+plan. `Batch.Statements` are ordered and must be executed in order. The caller
+retains transaction choice, retries, live-state checks, and error policy.
+
+```go
+orders := schema.TableRef{
+    Name: "orders",
+    Columns: []schema.Column{
+        {Name: "id", DataType: "bigint"},
+        {Name: "status", DataType: "varchar", MaxLength: 32, IsNullable: false},
+    },
+}
+
+batch, err := renderer.SetColumnDefault(orders, schema.Column{
+    Name: "status", HasDefault: true, DefaultExpression: "'pending'",
+})
+if err != nil {
+    return err
+}
+for i, statement := range batch.Statements {
+    if err := target.ExecRaw(ctx, statement.SQL); err != nil && !batch.IsBestEffort(i) {
+        return err
+    }
+}
+```
+
+Some batches make an execution contract explicit. When
+`Batch.RequiresSingleConnection` is true, execute every statement on one
+physical connection. If a required statement fails, run `Batch.Cleanup` on
+that same connection before returning the original failure. MySQL destructive
+table operations use this contract to restore `FOREIGN_KEY_CHECKS`; SQLite
+table drops use it to restore `PRAGMA foreign_keys`; and SQL Server replacement
+defaults use it to drop the existing catalog-named default before adding the
+deterministic replacement. SQLite truncation is rendered as `DELETE` followed
+by an advisory `sqlite_sequence` cleanup; callers can identify that statement
+with `Batch.IsBestEffort`.
+
+`DropOptions.Cascade` and `TruncateOptions.Cascade` are never inferred.
+PostgreSQL advertises the corresponding cascade capabilities; another dialect
+returns `*schema.UnsupportedFeatureError` if asked to render them. The same
+typed error is returned for every unsupported evolution operation rather than
+silently proposing a table rebuild or degrading the requested operation.
+
+Inspect evolution support independently of the existing fixed-layout create
+capabilities:
+
+```go
+if renderer.SupportsEvolution(schema.EvolutionCapabilityAlterColumnType) {
+    batch, err := renderer.AlterColumnType(orders, schema.Column{
+        Name: "status", DataType: "varchar", MaxLength: 64, IsNullable: false,
+    })
+    // execute batch or handle err
+    _ = batch
+    _ = err
+}
+```
+
+`Renderer.EvolutionCapabilities()` returns an extensible capability slice, so
+future evolution features do not alter the exported `Capabilities` or
+`Statement` struct layouts. PostgreSQL supports the complete current evolution
+surface, including explicit cascade. MSSQL and MySQL support every current
+operation except cascade. SQLite supports table/index drops, add/drop column,
+and truncate; constraint drops, in-place type/nullability changes, and default
+changes are explicitly unsupported. ClickHouse supports schema/table drops,
+add/drop column, and truncate; index/constraint drops and in-place column
+alteration/default changes are explicitly unsupported.
+
+For the operations that render a full column definition (`AddColumn` and
+`AlterColumnType`), provide the normal `Column` type metadata. PostgreSQL
+nullability changes and all built-in default changes need only the fields their
+SQL uses; SQL Server and MySQL nullability changes restate the type and require
+`Column.DataType`. `SetColumnDefault` requires `Column.Name` and an explicit
+default (`HasDefault` signals that a DEFAULT clause is present; set it when
+`DefaultExpression` is intentionally empty to represent a bare `DEFAULT ''`
+or similar zero-value clause rather than "no default").
 
 `SourceDialect` is optional, but callers should set it whenever it is known:
 some names have source-specific meanings, such as MySQL `TINYINT(1)` and
@@ -216,7 +300,9 @@ renderer, err := registry.NewRenderer(schema.Options{TargetDialect: "my-db"})
 The dialect interface receives only public `schema.Request`, `schema.Table`,
 and `schema.Column` values and returns `schema.Result`; it is safe to implement
 without importing SMT internals. A custom dialect can additionally implement
-`schema.SideObjectDialect` to render indexes and constraints, and
-`schema.ForeignKeyDialect` to render standalone foreign keys. These optional
-extensions are separate so existing custom side-object dialects remain source
-compatible. Registries do not share mutable global state.
+`schema.SideObjectDialect` to render indexes and constraints,
+`schema.ForeignKeyDialect` to render standalone foreign keys, and
+`schema.EvolutionDialect` to render the typed `schema.Evolution` operations
+and advertise `EvolutionCapabilities`. These optional extensions are separate
+so existing custom dialects remain source compatible. Registries do not share
+mutable global state.
