@@ -273,8 +273,9 @@ func TestPublicDDLEvolutionNullabilityUsesOperationSpecificValidation(t *testing
 
 func TestPublicDDLEvolutionSetDefaultUsesOperationSpecificValidation(t *testing.T) {
 	table := schema.TableRef{Name: "accounts"}
-	// Column.DataType is intentionally omitted; no builtin dialect restates
-	// the type in a SET DEFAULT statement.
+	// Column.DataType is intentionally omitted to assert that no builtin
+	// dialect requires it for SET DEFAULT. Column.DefaultExpression satisfies
+	// the required non-empty default check.
 	column := schema.Column{Name: "status", DefaultExpression: "0"}
 
 	for _, dialect := range []string{"postgres", "mssql", "mysql"} {

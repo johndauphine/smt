@@ -307,6 +307,10 @@ func (r Renderer) validateNullabilityColumn(column Column) error {
 	return nil
 }
 
+// validateSetDefaultColumn validates that column has the minimum fields required
+// for SET DEFAULT operations. Only column.Name is required: no builtin dialect
+// restates the column type in a SET DEFAULT statement. Custom dialects that
+// need DataType should validate it inside RenderEvolution.
 func validateSetDefaultColumn(column Column) error {
 	if strings.TrimSpace(column.Name) == "" {
 		return fmt.Errorf("render column: empty column name")
