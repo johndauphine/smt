@@ -75,8 +75,9 @@ exercise. Update golden files only for an intentional, reviewed behavior change.
 - Fail explicitly for unknown or unsupported operations. Do not emit
   plausible-looking SQL that weakens fidelity or bypasses capability checks.
 - Keep identifier normalization centralized through the existing driver helper.
-- Driver registration uses `init()` plus the blank imports in
-  `internal/pool/factory.go`; a new CLI database driver needs both pieces.
+- Driver registration uses `init()` plus the applicable blank imports in
+  `internal/pool/factory.go` and `internal/config/config.go`; a new CLI database
+  driver needs both pieces.
 
 When deterministic output changes for the same input, assess
 `internal/ddl.RendererVersion`, manifests, compatibility tests, and SQL goldens.
