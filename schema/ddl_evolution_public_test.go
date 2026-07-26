@@ -271,6 +271,23 @@ func TestPublicDDLEvolutionNullabilityUsesOperationSpecificValidation(t *testing
 	}
 }
 
+func TestPublicDDLEvolutionSetDefaultUsesOperationSpecificValidation(t *testing.T) {
+	table := schema.TableRef{Name: "accounts"}
+	// Column.DataType is intentionally omitted; no builtin dialect restates
+	// the type in a SET DEFAULT statement.
+	column := schema.Column{Name: "status", DefaultExpression: "0"}
+
+	for _, dialect := range []string{"postgres", "mssql", "mysql"} {
+		renderer, err := schema.NewRenderer(schema.Options{TargetDialect: dialect})
+		if err != nil {
+			t.Fatalf("NewRenderer(%s): %v", dialect, err)
+		}
+		if _, err := renderer.SetColumnDefault(table, column); err != nil {
+			t.Fatalf("%s SetColumnDefault without DataType: %v", dialect, err)
+		}
+	}
+}
+
 func TestBuiltinEvolutionDialectReturnsTypedUnsupportedErrorsDirectly(t *testing.T) {
 	dialect, err := schema.NewRegistry().Resolve("sqlite")
 	if err != nil {

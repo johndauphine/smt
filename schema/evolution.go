@@ -245,7 +245,10 @@ func (r Renderer) AlterColumnNullability(table TableRef, column Column) (Batch, 
 
 // SetColumnDefault renders a deterministic default assignment. The column
 // must explicitly carry a default, including HasDefault for an intentional
-// empty-string default.
+// empty-string default. Column.Name is always required; Column.DataType is
+// optional because no builtin dialect restates the type in a SET DEFAULT
+// statement. Custom dialects that need DataType should validate it inside
+// RenderEvolution.
 func (r Renderer) SetColumnDefault(table TableRef, column Column) (Batch, error) {
 	if !r.Capabilities().SetColumnDefaults {
 		return Batch{}, r.unsupported("setting column defaults")
@@ -253,7 +256,7 @@ func (r Renderer) SetColumnDefault(table TableRef, column Column) (Batch, error)
 	if err := validateTableRef("set column default", table); err != nil {
 		return Batch{}, err
 	}
-	if err := r.validateColumn(column); err != nil {
+	if err := validateSetDefaultColumn(column); err != nil {
 		return Batch{}, err
 	}
 	if !column.HasDefault && strings.TrimSpace(column.DefaultExpression) == "" {
@@ -300,6 +303,13 @@ func (r Renderer) validateNullabilityColumn(column Column) error {
 		(dialect.name == "mssql" || dialect.name == "mysql") &&
 		strings.TrimSpace(column.DataType) == "" {
 		return fmt.Errorf("render column %q: empty source data type", column.Name)
+	}
+	return nil
+}
+
+func validateSetDefaultColumn(column Column) error {
+	if strings.TrimSpace(column.Name) == "" {
+		return fmt.Errorf("render column: empty column name")
 	}
 	return nil
 }
