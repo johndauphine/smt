@@ -6,23 +6,27 @@ SMT is the schema-only counterpart to [DMT](https://github.com/johndauphine/dmt)
 
 ## Release Status
 
-SMT v1.0.0 is published as a stable GitHub Release:
-[SMT v1.0.0](https://github.com/johndauphine/smt/releases/tag/v1.0.0).
-The release tag points at commit
-`b08be2c1fcf22ced8e38e7137420e5d81b8e8ec0`, and downloadable Linux, macOS,
-and Windows artifacts are available with SHA-256 checksums. See
+SMT v1.4.0 is the release target for this source tree. The release publishes
+Linux, macOS, and Windows artifacts with SHA-256 checksums after the documented
+validation gates pass. See
 [docs/release-checklist.md](docs/release-checklist.md#current-release-status)
-for the current release status, validation gates, and asset list.
+for the target status, validation gates, and asset list, and
+[CHANGELOG.md](CHANGELOG.md#140---2026-07-26) for the release notes.
 
 ## Supported databases
 
 PostgreSQL, SQL Server, MySQL — both as source and target. New engines are added by dropping a package under `internal/driver/foo/` that implements `driver.Driver`/`Reader`/`Writer` and registers itself in `init()`.
 
 For applications that need deterministic schema DDL without using the SMT CLI,
-the public [`github.com/johndauphine/smt/schema`](docs/public-ddl-api.md) package exposes a registry,
-public schema values, explicit capability checks, and structured mapping
-warnings. It currently renders PostgreSQL, SQL Server, MySQL, SQLite, and
-ClickHouse DDL at schema/table/column scope.
+the public
+[`github.com/johndauphine/smt/schema`](docs/public-ddl-api.md) package exposes
+deterministic create and schema-evolution DDL. The create surface covers
+schemas/databases, tables, columns, indexes, and standalone primary-key,
+foreign-key, named-unique, and check constraints. The evolution surface covers
+schema/table/index/constraint drops, column add/drop/type/nullability/default
+changes, and table truncation as ordered batches. PostgreSQL, SQL Server,
+MySQL, SQLite, and ClickHouse advertise their exact supported subsets through
+capability APIs; unsupported requests fail explicitly.
 
 ## Quick start
 
@@ -33,6 +37,7 @@ make build
 ./smt health-check
 ./smt create                        # write target DDL to schema.sql
 ./smt create --apply                # execute DDL against the configured target
+./smt drift                         # report source-derived vs live-target drift
 ./smt snapshot                      # capture source schema as a baseline
 # ...time passes, source schema evolves...
 ./smt sync                          # diff source vs live target, render ALTERs to migration.sql
@@ -40,7 +45,8 @@ make build
 ./smt sync --apply                  # execute the ALTERs against the target
 ```
 
-Run `./smt` with no arguments to launch the TUI. See `./smt --help` for command help and [docs/cli.md](docs/cli.md) for the v1 CLI surface contract.
+Run `./smt` with no arguments to launch the TUI. See `./smt --help` for command
+help and [docs/cli.md](docs/cli.md) for the v1.4 CLI surface contract.
 
 ## Commands
 
@@ -49,6 +55,7 @@ Run `./smt` with no arguments to launch the TUI. See `./smt --help` for command 
 | `smt init` | build a `config.yaml` with a guided wizard (`--non-interactive` + per-field flags for scripting; `--print` to stdout) |
 | `smt create` | extract source schema and emit CREATE TABLE / CREATE INDEX / etc to `schema.sql` |
 | `smt create --apply` | also execute the generated DDL against the configured target |
+| `smt drift` | report read-only drift between the source-derived schema and the live target |
 | `smt snapshot` | save the current source schema as a baseline for future diffing |
 | `smt snapshot list` | list stored snapshots (id, source, schema, table count, captured-at); `--limit N` |
 | `smt sync` | diff source against the live target schema; generate target-dialect SQL; emit to `migration.sql` for review |
