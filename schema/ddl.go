@@ -838,9 +838,10 @@ func hasPositive(values []int) bool {
 }
 
 type builtinDialect struct {
-	name         string
-	aliases      []string
-	capabilities Capabilities
+	name                  string
+	aliases               []string
+	capabilities          Capabilities
+	evolutionCapabilities EvolutionCapabilities
 }
 
 func builtinDialects() []Dialect {
@@ -850,8 +851,24 @@ func builtinDialects() []Dialect {
 		SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 		IndexExpressionKeys: true, IndexIncludeColumns: true, FilteredIndexes: true,
 	}
+	fullEvolution := EvolutionCapabilities{
+		EvolutionCapabilityDropSchema,
+		EvolutionCapabilityDropSchemaCascade,
+		EvolutionCapabilityDropTable,
+		EvolutionCapabilityDropTableCascade,
+		EvolutionCapabilityDropIndex,
+		EvolutionCapabilityDropConstraint,
+		EvolutionCapabilityAddColumn,
+		EvolutionCapabilityDropColumn,
+		EvolutionCapabilityAlterColumnType,
+		EvolutionCapabilityAlterColumnNullability,
+		EvolutionCapabilitySetColumnDefault,
+		EvolutionCapabilityDropColumnDefault,
+		EvolutionCapabilityTruncateTable,
+		EvolutionCapabilityTruncateTableCascade,
+	}
 	return []Dialect{
-		builtinDialect{name: "postgres", aliases: []string{"postgresql", "pg"}, capabilities: full},
+		builtinDialect{name: "postgres", aliases: []string{"postgresql", "pg"}, capabilities: full, evolutionCapabilities: fullEvolution},
 		builtinDialect{
 			name: "mssql", aliases: []string{"sqlserver", "sql-server", "sql_server"},
 			capabilities: Capabilities{
@@ -859,6 +876,19 @@ func builtinDialects() []Dialect {
 				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
 				SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 				IndexIncludeColumns: true, FilteredIndexes: true,
+			},
+			evolutionCapabilities: EvolutionCapabilities{
+				EvolutionCapabilityDropSchema,
+				EvolutionCapabilityDropTable,
+				EvolutionCapabilityDropIndex,
+				EvolutionCapabilityDropConstraint,
+				EvolutionCapabilityAddColumn,
+				EvolutionCapabilityDropColumn,
+				EvolutionCapabilityAlterColumnType,
+				EvolutionCapabilityAlterColumnNullability,
+				EvolutionCapabilitySetColumnDefault,
+				EvolutionCapabilityDropColumnDefault,
+				EvolutionCapabilityTruncateTable,
 			},
 		},
 		builtinDialect{
@@ -869,6 +899,19 @@ func builtinDialects() []Dialect {
 				SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 				IndexExpressionKeys: true, IndexPrefixLengths: true,
 			},
+			evolutionCapabilities: EvolutionCapabilities{
+				EvolutionCapabilityDropSchema,
+				EvolutionCapabilityDropTable,
+				EvolutionCapabilityDropIndex,
+				EvolutionCapabilityDropConstraint,
+				EvolutionCapabilityAddColumn,
+				EvolutionCapabilityDropColumn,
+				EvolutionCapabilityAlterColumnType,
+				EvolutionCapabilityAlterColumnNullability,
+				EvolutionCapabilitySetColumnDefault,
+				EvolutionCapabilityDropColumnDefault,
+				EvolutionCapabilityTruncateTable,
+			},
 		},
 		builtinDialect{
 			name: "sqlite", aliases: []string{"sqlite3"},
@@ -876,10 +919,27 @@ func builtinDialects() []Dialect {
 				CreateTable: true, CreateColumn: true, PrimaryKeys: true, IdentityColumns: true, Defaults: true,
 				SecondaryIndexes: true, FilteredIndexes: true,
 			},
+			evolutionCapabilities: EvolutionCapabilities{
+				EvolutionCapabilityDropTable,
+				EvolutionCapabilityDropIndex,
+				EvolutionCapabilityAddColumn,
+				EvolutionCapabilityDropColumn,
+				EvolutionCapabilityTruncateTable,
+			},
 		},
 		builtinDialect{
 			name: "clickhouse", aliases: []string{"click-house"},
-			capabilities: Capabilities{CreateSchema: true, CreateTable: true, CreateColumn: true, PrimaryKeys: true},
+			capabilities: Capabilities{
+				CreateSchema: true, CreateTable: true, CreateColumn: true,
+				PrimaryKeys: true,
+			},
+			evolutionCapabilities: EvolutionCapabilities{
+				EvolutionCapabilityDropSchema,
+				EvolutionCapabilityDropTable,
+				EvolutionCapabilityAddColumn,
+				EvolutionCapabilityDropColumn,
+				EvolutionCapabilityTruncateTable,
+			},
 		},
 	}
 }
@@ -887,6 +947,9 @@ func builtinDialects() []Dialect {
 func (d builtinDialect) Name() string               { return d.name }
 func (d builtinDialect) Aliases() []string          { return append([]string(nil), d.aliases...) }
 func (d builtinDialect) Capabilities() Capabilities { return d.capabilities }
+func (d builtinDialect) EvolutionCapabilities() EvolutionCapabilities {
+	return append(EvolutionCapabilities(nil), d.evolutionCapabilities...)
+}
 
 func (d builtinDialect) RenderSchema(request Request) (Result, error) {
 	renderer, err := d.renderer(request)

@@ -71,7 +71,10 @@ import (
 // constraint rendering, including fail-closed cross-dialect index predicates.
 // "19": foreign-key references honor an explicit referenced schema and emit
 // explicit NO ACTION clauses when callers request them.
-const RendererVersion = "19"
+// "20": public schema-evolution rendering adds deterministic drop, ALTER,
+// default, and truncate operations, including explicit session-affinity
+// batches for destructive MySQL and SQLite paths.
+const RendererVersion = "20"
 
 // ClickHouseNullableCompositeError reports a nullable composite that ClickHouse
 // cannot represent as Nullable(T). Rewriting it to Array(Nullable(T)) would
@@ -688,6 +691,8 @@ func (r Renderer) DropIndexDDL(tableName, indexName string) string {
 		return fmt.Sprintf("DROP INDEX %s ON %s", r.quote(r.normalize(indexName)), r.qualify(r.normalize(tableName)))
 	case "mysql":
 		return fmt.Sprintf("DROP INDEX %s ON %s", r.quote(r.normalize(indexName)), r.qualify(r.normalize(tableName)))
+	case "sqlite":
+		return fmt.Sprintf("DROP INDEX IF EXISTS %s", r.quote(r.normalize(indexName)))
 	default:
 		return ""
 	}
@@ -707,9 +712,74 @@ func (r Renderer) DropCheckDDL(tableName, chkName string) string {
 }
 
 func (r Renderer) DropTableDDL(tableName string) string {
-	// IF EXISTS is supported by all three targets (MSSQL since 2016, and SMT
-	// requires compatibility level 140+).
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s", r.qualify(r.normalize(tableName)))
+	sql, _ := r.DropTableWithOptionsDDL(tableName, false)
+	return sql
+}
+
+// DropSchemaDDL renders a dialect-safe, idempotent schema/database drop. A
+// cascade is intentionally explicit: only PostgreSQL accepts it, and callers
+// must opt in before a schema drop may remove dependent objects.
+func (r Renderer) DropSchemaDDL(cascade bool) (string, error) {
+	schema := strings.TrimSpace(r.schema)
+	if schema == "" {
+		return "", nil
+	}
+	if cascade && r.target != "postgres" {
+		return "", fmt.Errorf("%s does not support schema-drop CASCADE", r.target)
+	}
+	switch r.target {
+	case "postgres":
+		sql := fmt.Sprintf("DROP SCHEMA IF EXISTS %s", r.quote(schema))
+		if cascade {
+			sql += " CASCADE"
+		}
+		return sql, nil
+	case "mssql":
+		escapedName := strings.ReplaceAll(schema, "'", "''")
+		escapedDDL := strings.ReplaceAll(fmt.Sprintf("DROP SCHEMA %s", r.quote(schema)), "'", "''")
+		return fmt.Sprintf("IF SCHEMA_ID(N'%s') IS NOT NULL EXEC(N'%s')", escapedName, escapedDDL), nil
+	case "mysql", "clickhouse":
+		return fmt.Sprintf("DROP DATABASE IF EXISTS %s", r.quote(schema)), nil
+	default:
+		return "", fmt.Errorf("%s does not support dropping named schemas", r.target)
+	}
+}
+
+// DropTableWithOptionsDDL renders a dialect-safe, idempotent table drop.
+// PostgreSQL CASCADE is explicit so callers can preserve dependency policy in
+// their own scheduling layer.
+func (r Renderer) DropTableWithOptionsDDL(tableName string, cascade bool) (string, error) {
+	if cascade && r.target != "postgres" {
+		return "", fmt.Errorf("%s does not support table-drop CASCADE", r.target)
+	}
+	sql := fmt.Sprintf("DROP TABLE IF EXISTS %s", r.qualify(r.normalize(tableName)))
+	if cascade {
+		sql += " CASCADE"
+	}
+	return sql, nil
+}
+
+// TruncateTableDDL renders the data-clearing command for one table. SQLite
+// deliberately uses DELETE because it has no TRUNCATE statement.
+func (r Renderer) TruncateTableDDL(tableName string, cascade bool) (string, error) {
+	if cascade && r.target != "postgres" {
+		return "", fmt.Errorf("%s does not support truncate CASCADE", r.target)
+	}
+	table := r.qualify(r.normalize(tableName))
+	switch r.target {
+	case "postgres":
+		sql := "TRUNCATE TABLE " + table
+		if cascade {
+			sql += " CASCADE"
+		}
+		return sql, nil
+	case "mssql", "mysql", "clickhouse":
+		return "TRUNCATE TABLE " + table, nil
+	case "sqlite":
+		return "DELETE FROM " + table, nil
+	default:
+		return "", fmt.Errorf("unsupported deterministic DDL target %q", r.target)
+	}
 }
 
 func (r Renderer) AddColumnDDL(tableName string, col driver.Column, tableColumns []driver.Column) (string, error) {
@@ -725,7 +795,38 @@ func (r Renderer) AddColumnDDL(tableName string, col driver.Column, tableColumns
 }
 
 func (r Renderer) DropColumnDDL(tableName, colName string) string {
+	if r.target == "clickhouse" {
+		return fmt.Sprintf("ALTER TABLE %s DROP COLUMN IF EXISTS %s", r.qualify(r.normalize(tableName)), r.quote(r.normalize(colName)))
+	}
 	return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", r.qualify(r.normalize(tableName)), r.quote(r.normalize(colName)))
+}
+
+// DropConstraintDDL renders a named relational-constraint drop. MySQL uses
+// different syntax for each constraint kind, while PostgreSQL and SQL Server
+// share ALTER TABLE ... DROP CONSTRAINT. Supported kinds are primary_key,
+// unique, foreign_key, and check.
+func (r Renderer) DropConstraintDDL(tableName, name, kind string) (string, error) {
+	table := r.qualify(r.normalize(tableName))
+	constraint := r.quote(r.normalize(name))
+	switch r.target {
+	case "postgres", "mssql":
+		return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", table, constraint), nil
+	case "mysql":
+		switch kind {
+		case "primary_key":
+			return fmt.Sprintf("ALTER TABLE %s DROP PRIMARY KEY", table), nil
+		case "unique":
+			return fmt.Sprintf("ALTER TABLE %s DROP INDEX %s", table, constraint), nil
+		case "foreign_key":
+			return fmt.Sprintf("ALTER TABLE %s DROP FOREIGN KEY %s", table, constraint), nil
+		case "check":
+			return fmt.Sprintf("ALTER TABLE %s DROP CHECK %s", table, constraint), nil
+		default:
+			return "", fmt.Errorf("unsupported MySQL constraint kind %q", kind)
+		}
+	default:
+		return "", fmt.Errorf("%s does not support dropping named constraints", r.target)
+	}
 }
 
 func (r Renderer) AlterColumnTypeDDL(tableName string, col driver.Column) (string, error) {

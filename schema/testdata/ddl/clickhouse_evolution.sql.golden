@@ -1,0 +1,19 @@
+drop_schema
+drop_schema
+DROP DATABASE IF EXISTS `analytics`
+
+drop_table
+drop_table
+DROP TABLE IF EXISTS `analytics`.`Orders`
+
+add_column
+add_column
+ALTER TABLE `analytics`.`Orders` ADD COLUMN `subtotal` Nullable(Int64)
+
+drop_column
+drop_column
+ALTER TABLE `analytics`.`Orders` DROP COLUMN IF EXISTS `subtotal`
+
+truncate_table
+truncate_table
+TRUNCATE TABLE `analytics`.`Orders`
