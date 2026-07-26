@@ -628,6 +628,32 @@ type duplicateAliasesDialect struct {
 func (d duplicateAliasesDialect) Name() string      { return d.name }
 func (d duplicateAliasesDialect) Aliases() []string { return d.aliases }
 
+// legacySideObjectDialect intentionally implements the pre-ForeignKey
+// SideObjectDialect method set to pin source compatibility for custom users.
+type legacySideObjectDialect struct{ testDialect }
+
+func (legacySideObjectDialect) Name() string      { return "legacy-side-objects" }
+func (legacySideObjectDialect) Aliases() []string { return nil }
+func (legacySideObjectDialect) Capabilities() schema.Capabilities {
+	return schema.Capabilities{
+		CreateSchema: true, CreateTable: true, CreateColumn: true,
+		SecondaryIndexes: true, StandalonePrimaryKeys: true,
+		NamedUniqueConstraints: true, CheckConstraints: true,
+	}
+}
+func (legacySideObjectDialect) RenderIndex(schema.Request, schema.TableRef, schema.Index) (schema.Result, error) {
+	return schema.Result{SQL: "LEGACY INDEX"}, nil
+}
+func (legacySideObjectDialect) RenderPrimaryKey(schema.Request, schema.TableRef, schema.PrimaryKey) (schema.Result, error) {
+	return schema.Result{SQL: "LEGACY PRIMARY KEY"}, nil
+}
+func (legacySideObjectDialect) RenderUniqueConstraint(schema.Request, schema.TableRef, schema.UniqueConstraint) (schema.Result, error) {
+	return schema.Result{SQL: "LEGACY UNIQUE"}, nil
+}
+func (legacySideObjectDialect) RenderCheckConstraint(schema.Request, schema.TableRef, schema.CheckConstraint) (schema.Result, error) {
+	return schema.Result{SQL: "LEGACY CHECK"}, nil
+}
+
 func assertGolden(t *testing.T, got, name string) {
 	t.Helper()
 	wantBytes, err := os.ReadFile(filepath.Join("testdata", "ddl", name))

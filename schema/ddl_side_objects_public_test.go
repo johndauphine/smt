@@ -86,10 +86,18 @@ func TestPublicDDLSideObjectGoldens(t *testing.T) {
 				if err != nil {
 					t.Fatalf("CreateCheckConstraint: %v", err)
 				}
+				foreignKey, err := renderer.CreateForeignKey(tc.table, schema.ForeignKey{
+					Name: "FK_Orders_Accounts", Columns: []string{"ID"}, RefSchema: "identity", RefTable: "Accounts", RefColumns: []string{"ID"},
+					OnDelete: schema.ReferentialActionCascade, OnUpdate: schema.ReferentialActionSetNull,
+				})
+				if err != nil {
+					t.Fatalf("CreateForeignKey: %v", err)
+				}
 				statements = append(statements,
 					"create_primary_key\n"+primaryKey.SQL,
 					"create_unique_constraint\n"+unique.SQL,
 					"create_check_constraint\n"+check.SQL,
+					"create_foreign_key\n"+foreignKey.SQL,
 				)
 			}
 			assertGolden(t, strings.Join(statements, "\n\n"), tc.golden)
@@ -135,6 +143,13 @@ func TestPublicDDLClickHouseSideObjectErrorGolden(t *testing.T) {
 				return err
 			},
 		},
+		{
+			kind: "create_foreign_key",
+			call: func() error {
+				_, err := renderer.CreateForeignKey(table, schema.ForeignKey{Name: "fk_events_id", Columns: []string{"id"}, RefTable: "accounts", RefColumns: []string{"id"}})
+				return err
+			},
+		},
 	}
 
 	lines := make([]string, 0, len(cases))
@@ -174,6 +189,18 @@ func TestPublicDDLSideObjectsPreserveOrderAndIdentifierConvention(t *testing.T) 
 	const wantPrimaryKey = `ALTER TABLE "public"."order_lines" ADD CONSTRAINT "pk_order_lines" PRIMARY KEY ("tenant_id", "order_id")`
 	if primaryKey.SQL != wantPrimaryKey {
 		t.Fatalf("primary-key SQL = %q, want %q", primaryKey.SQL, wantPrimaryKey)
+	}
+
+	foreignKey, err := renderer.CreateForeignKey(table, schema.ForeignKey{
+		Name: "FK Order Lines Orders", Columns: []string{"Tenant ID", "Order ID"}, RefSchema: "Catalog Data", RefTable: "Orders", RefColumns: []string{"Tenant ID", "ID"},
+		OnDelete: schema.ReferentialActionNoAction, OnUpdate: schema.ReferentialActionCascade,
+	})
+	if err != nil {
+		t.Fatalf("CreateForeignKey: %v", err)
+	}
+	const wantForeignKey = `ALTER TABLE "public"."order_lines" ADD CONSTRAINT "fk_order_lines_orders" FOREIGN KEY ("tenant_id", "order_id") REFERENCES "catalog_data"."orders" ("tenant_id", "id") ON DELETE NO ACTION ON UPDATE CASCADE`
+	if foreignKey.SQL != wantForeignKey {
+		t.Fatalf("foreign-key SQL = %q, want %q", foreignKey.SQL, wantForeignKey)
 	}
 }
 
@@ -284,6 +311,7 @@ func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 		dialect                  string
 		secondaryIndexes         bool
 		standalonePrimaryKeys    bool
+		standaloneForeignKeys    bool
 		namedUniqueConstraints   bool
 		checkConstraints         bool
 		expressionKeys           bool
@@ -293,25 +321,25 @@ func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 		unsupportedSideArtifacts []string
 	}{
 		{
-			dialect: "postgres", secondaryIndexes: true, standalonePrimaryKeys: true, namedUniqueConstraints: true, checkConstraints: true,
+			dialect: "postgres", secondaryIndexes: true, standalonePrimaryKeys: true, standaloneForeignKeys: true, namedUniqueConstraints: true, checkConstraints: true,
 			expressionKeys: true, includeColumns: true, filteredIndexes: true,
 		},
 		{
-			dialect: "mssql", secondaryIndexes: true, standalonePrimaryKeys: true, namedUniqueConstraints: true, checkConstraints: true,
+			dialect: "mssql", secondaryIndexes: true, standalonePrimaryKeys: true, standaloneForeignKeys: true, namedUniqueConstraints: true, checkConstraints: true,
 			includeColumns: true, filteredIndexes: true,
 		},
 		{
-			dialect: "mysql", secondaryIndexes: true, standalonePrimaryKeys: true, namedUniqueConstraints: true, checkConstraints: true,
+			dialect: "mysql", secondaryIndexes: true, standalonePrimaryKeys: true, standaloneForeignKeys: true, namedUniqueConstraints: true, checkConstraints: true,
 			expressionKeys: true, prefixLengths: true,
 		},
 		{
 			dialect: "sqlite", secondaryIndexes: true,
 			filteredIndexes:          true,
-			unsupportedSideArtifacts: []string{"standalone primary keys", "named unique constraints", "check constraints"},
+			unsupportedSideArtifacts: []string{"standalone primary keys", "standalone foreign keys", "named unique constraints", "check constraints"},
 		},
 		{
 			dialect:                  "clickhouse",
-			unsupportedSideArtifacts: []string{"secondary indexes", "standalone primary keys", "named unique constraints", "check constraints"},
+			unsupportedSideArtifacts: []string{"secondary indexes", "standalone primary keys", "standalone foreign keys", "named unique constraints", "check constraints"},
 		},
 	}
 
@@ -323,7 +351,7 @@ func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 				t.Fatalf("NewRenderer: %v", err)
 			}
 			got := renderer.Capabilities()
-			if got.SecondaryIndexes != tc.secondaryIndexes || got.StandalonePrimaryKeys != tc.standalonePrimaryKeys ||
+			if got.SecondaryIndexes != tc.secondaryIndexes || got.StandalonePrimaryKeys != tc.standalonePrimaryKeys || got.StandaloneForeignKeys != tc.standaloneForeignKeys ||
 				got.NamedUniqueConstraints != tc.namedUniqueConstraints || got.CheckConstraints != tc.checkConstraints ||
 				got.IndexExpressionKeys != tc.expressionKeys || got.IndexPrefixLengths != tc.prefixLengths ||
 				got.IndexIncludeColumns != tc.includeColumns || got.FilteredIndexes != tc.filteredIndexes {
@@ -337,6 +365,8 @@ func TestPublicDDLSideObjectCapabilitiesAndUnsupportedErrors(t *testing.T) {
 					_, err = renderer.CreateIndex(table, schema.Index{Name: "ix_items_name", Columns: []string{"name"}})
 				case "standalone primary keys":
 					_, err = renderer.CreatePrimaryKey(table, schema.PrimaryKey{Columns: []string{"id"}})
+				case "standalone foreign keys":
+					_, err = renderer.CreateForeignKey(table, schema.ForeignKey{Name: "fk_items_parent", Columns: []string{"id"}, RefTable: "parent", RefColumns: []string{"id"}})
 				case "named unique constraints":
 					_, err = renderer.CreateUniqueConstraint(table, schema.UniqueConstraint{Name: "uq_items_name", Columns: []string{"name"}})
 				case "check constraints":
@@ -445,6 +475,89 @@ func TestPublicDDLSideObjectFeatureValidation(t *testing.T) {
 	}
 }
 
+func TestPublicDDLForeignKeyValidationAndActionCapabilities(t *testing.T) {
+	table := schema.TableRef{Name: "items"}
+	foreignKey := schema.ForeignKey{Name: "fk_items_parent", Columns: []string{"parent_id"}, RefTable: "parents", RefColumns: []string{"id"}}
+
+	postgres, err := schema.NewRenderer(schema.Options{TargetDialect: "postgres"})
+	if err != nil {
+		t.Fatalf("NewRenderer postgres: %v", err)
+	}
+	foreignKey.OnDelete = schema.ReferentialAction("rename")
+	if _, err := postgres.CreateForeignKey(table, foreignKey); err == nil || !strings.Contains(err.Error(), "invalid ON DELETE action") {
+		t.Fatalf("CreateForeignKey invalid action error = %v", err)
+	}
+	foreignKey.OnDelete = ""
+	foreignKey.RefColumns = nil
+	if _, err := postgres.CreateForeignKey(table, foreignKey); err == nil || !strings.Contains(err.Error(), "1 columns but 0 referenced columns") {
+		t.Fatalf("CreateForeignKey mismatched columns error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		dialect string
+		action  schema.ReferentialAction
+		feature string
+	}{
+		{name: "mssql restrict", dialect: "mssql", action: schema.ReferentialActionRestrict, feature: "foreign-key RESTRICT actions"},
+		{name: "mysql set default", dialect: "mysql", action: schema.ReferentialActionSetDefault, feature: "foreign-key SET DEFAULT actions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renderer, err := schema.NewRenderer(schema.Options{TargetDialect: tc.dialect})
+			if err != nil {
+				t.Fatalf("NewRenderer: %v", err)
+			}
+			fk := schema.ForeignKey{Name: "fk_items_parent", Columns: []string{"parent_id"}, RefTable: "parents", RefColumns: []string{"id"}, OnDelete: tc.action}
+			_, err = renderer.CreateForeignKey(table, fk)
+			var unsupported *schema.UnsupportedFeatureError
+			if !errors.As(err, &unsupported) || unsupported.Dialect != tc.dialect || unsupported.Feature != tc.feature {
+				t.Fatalf("CreateForeignKey error = %#v, want UnsupportedFeatureError for %q", err, tc.feature)
+			}
+		})
+	}
+}
+
+func TestPublicDDLLegacySideObjectDialectRemainsCompatible(t *testing.T) {
+	registry := schema.NewRegistry()
+	if err := registry.Register(legacySideObjectDialect{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	renderer, err := registry.NewRenderer(schema.Options{TargetDialect: "legacy-side-objects"})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	table := schema.TableRef{Name: "items"}
+
+	for _, tc := range []struct {
+		name string
+		call func() (schema.Result, error)
+		want string
+	}{
+		{name: "index", call: func() (schema.Result, error) {
+			return renderer.CreateIndex(table, schema.Index{Name: "ix_items_id", Columns: []string{"id"}})
+		}, want: "LEGACY INDEX"},
+		{name: "primary key", call: func() (schema.Result, error) {
+			return renderer.CreatePrimaryKey(table, schema.PrimaryKey{Name: "pk_items", Columns: []string{"id"}})
+		}, want: "LEGACY PRIMARY KEY"},
+		{name: "unique", call: func() (schema.Result, error) {
+			return renderer.CreateUniqueConstraint(table, schema.UniqueConstraint{Name: "uq_items_id", Columns: []string{"id"}})
+		}, want: "LEGACY UNIQUE"},
+		{name: "check", call: func() (schema.Result, error) {
+			return renderer.CreateCheckConstraint(table, schema.CheckConstraint{Name: "ck_items_id", Expression: "id > 0"})
+		}, want: "LEGACY CHECK"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tc.call()
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			if result.SQL != tc.want {
+				t.Fatalf("SQL = %q, want %q", result.SQL, tc.want)
+			}
+		})
+	}
+}
+
 func TestPublicDDLSideObjectAdapterParity(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -518,6 +631,25 @@ func TestPublicDDLSideObjectAdapterParity(t *testing.T) {
 			}
 			if gotPrimaryKey.SQL != wantPrimaryKey {
 				t.Fatalf("primary-key adapter SQL = %q, want core SQL %q", gotPrimaryKey.SQL, wantPrimaryKey)
+			}
+
+			foreignKey := schema.ForeignKey{
+				Name: "FK_Orders_Accounts", Columns: []string{"ID"}, RefSchema: "identity", RefTable: "Accounts", RefColumns: []string{"ID"},
+				OnDelete: schema.ReferentialActionCascade, OnUpdate: schema.ReferentialActionSetNull,
+			}
+			gotForeignKey, err := public.CreateForeignKey(tc.table, foreignKey)
+			if err != nil {
+				t.Fatalf("CreateForeignKey: %v", err)
+			}
+			wantForeignKey, err := core.CreateForeignKeyDDL(coreTable, &driver.ForeignKey{
+				Name: foreignKey.Name, Columns: append([]string(nil), foreignKey.Columns...), RefSchema: foreignKey.RefSchema, RefTable: foreignKey.RefTable,
+				RefColumns: append([]string(nil), foreignKey.RefColumns...), OnDelete: string(foreignKey.OnDelete), OnUpdate: string(foreignKey.OnUpdate),
+			})
+			if err != nil {
+				t.Fatalf("core CreateForeignKeyDDL: %v", err)
+			}
+			if gotForeignKey.SQL != wantForeignKey {
+				t.Fatalf("foreign-key adapter SQL = %q, want core SQL %q", gotForeignKey.SQL, wantForeignKey)
 			}
 
 			gotUnique, err := public.CreateUniqueConstraint(tc.table, schema.UniqueConstraint{Name: "UQ_Orders_Email", Columns: []string{"Email"}})

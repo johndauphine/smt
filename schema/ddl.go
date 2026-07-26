@@ -41,6 +41,7 @@ type Capabilities struct {
 	ComputedColumns        bool
 	SecondaryIndexes       bool
 	StandalonePrimaryKeys  bool
+	StandaloneForeignKeys  bool
 	NamedUniqueConstraints bool
 	CheckConstraints       bool
 	IndexExpressionKeys    bool
@@ -78,8 +79,9 @@ type Result struct {
 // StatementKind identifies the create artifact emitted by a Statement. The
 // public create plan contains schema and table statements only. Independent
 // side objects are rendered through Renderer.CreateIndex,
-// Renderer.CreatePrimaryKey, Renderer.CreateUniqueConstraint, and
-// Renderer.CreateCheckConstraint so callers retain their own schedule.
+// Renderer.CreatePrimaryKey, Renderer.CreateForeignKey,
+// Renderer.CreateUniqueConstraint, and Renderer.CreateCheckConstraint so
+// callers retain their own schedule.
 type StatementKind string
 
 const (
@@ -212,6 +214,35 @@ type PrimaryKey struct {
 	Columns []string
 }
 
+// ReferentialAction controls the action a foreign key takes when its
+// referenced row is deleted or updated. The empty value omits the clause;
+// use ReferentialActionNoAction when an explicit NO ACTION clause is needed.
+type ReferentialAction string
+
+const (
+	ReferentialActionNoAction   ReferentialAction = "NO ACTION"
+	ReferentialActionRestrict   ReferentialAction = "RESTRICT"
+	ReferentialActionCascade    ReferentialAction = "CASCADE"
+	ReferentialActionSetNull    ReferentialAction = "SET NULL"
+	ReferentialActionSetDefault ReferentialAction = "SET DEFAULT"
+)
+
+// ForeignKey is a standalone, named foreign-key constraint. RefSchema is
+// optional: when empty, the renderer's configured schema is used for both
+// tables; when set, it explicitly qualifies RefTable.
+//
+// Columns and RefColumns are positionally aligned and must have the same
+// non-zero length. OnDelete and OnUpdate accept the ReferentialAction values.
+type ForeignKey struct {
+	Name       string
+	Columns    []string
+	RefSchema  string
+	RefTable   string
+	RefColumns []string
+	OnDelete   ReferentialAction
+	OnUpdate   ReferentialAction
+}
+
 // UniqueConstraint is a named UNIQUE constraint. It is deliberately separate
 // from Index with IsUnique so callers choose the database object they intend.
 type UniqueConstraint struct {
@@ -251,6 +282,17 @@ type SideObjectDialect interface {
 	RenderPrimaryKey(Request, TableRef, PrimaryKey) (Result, error)
 	RenderUniqueConstraint(Request, TableRef, UniqueConstraint) (Result, error)
 	RenderCheckConstraint(Request, TableRef, CheckConstraint) (Result, error)
+}
+
+// ForeignKeyDialect is the optional extension for standalone foreign-key
+// rendering. It remains separate from SideObjectDialect so adding this API
+// does not break existing custom side-object implementations.
+//
+// A ForeignKeyDialect should set Capabilities.StandaloneForeignKeys to true.
+// Built-in dialects implement this interface.
+type ForeignKeyDialect interface {
+	Dialect
+	RenderForeignKey(Request, TableRef, ForeignKey) (Result, error)
 }
 
 var (
@@ -482,6 +524,29 @@ func (r Renderer) CreatePrimaryKey(table TableRef, primaryKey PrimaryKey) (Resul
 	return dialect.RenderPrimaryKey(r.request, table, primaryKey)
 }
 
+// CreateForeignKey renders a standalone, named foreign-key constraint. The
+// local table uses the renderer's configured schema; ForeignKey.RefSchema
+// optionally selects a distinct schema or database for the referenced table.
+func (r Renderer) CreateForeignKey(table TableRef, foreignKey ForeignKey) (Result, error) {
+	if !r.Capabilities().StandaloneForeignKeys {
+		return Result{}, r.unsupported("standalone foreign keys")
+	}
+	if err := validateForeignKey(table, &foreignKey); err != nil {
+		return Result{}, err
+	}
+	if err := validateForeignKeyActionSupport(r.Dialect(), foreignKey.OnDelete); err != nil {
+		return Result{}, err
+	}
+	if err := validateForeignKeyActionSupport(r.Dialect(), foreignKey.OnUpdate); err != nil {
+		return Result{}, err
+	}
+	dialect, err := r.foreignKeyDialect()
+	if err != nil {
+		return Result{}, err
+	}
+	return dialect.RenderForeignKey(r.request, table, foreignKey)
+}
+
 // CreateUniqueConstraint renders a standalone, named UNIQUE constraint. Use
 // CreateIndex with Index.IsUnique for a unique index instead.
 func (r Renderer) CreateUniqueConstraint(table TableRef, unique UniqueConstraint) (Result, error) {
@@ -625,6 +690,14 @@ func (r Renderer) sideObjectDialect(feature string) (SideObjectDialect, error) {
 	return dialect, nil
 }
 
+func (r Renderer) foreignKeyDialect() (ForeignKeyDialect, error) {
+	dialect, ok := r.dialect.(ForeignKeyDialect)
+	if !ok {
+		return nil, r.unsupported("standalone foreign keys")
+	}
+	return dialect, nil
+}
+
 func validateTableRef(artifact string, table TableRef) error {
 	if strings.TrimSpace(table.Name) == "" {
 		return fmt.Errorf("render %s: empty table name", artifact)
@@ -687,6 +760,65 @@ func validateKeyConstraint(kind string, table TableRef, name string, columns []s
 	return nil
 }
 
+func validateForeignKey(table TableRef, foreignKey *ForeignKey) error {
+	if err := validateTableRef("foreign key", table); err != nil {
+		return err
+	}
+	if strings.TrimSpace(foreignKey.Name) == "" {
+		return fmt.Errorf("render foreign key on table %q: empty constraint name", table.Name)
+	}
+	if strings.TrimSpace(foreignKey.RefTable) == "" {
+		return fmt.Errorf("render foreign key %q: empty referenced table", foreignKey.Name)
+	}
+	if len(foreignKey.Columns) == 0 {
+		return fmt.Errorf("render foreign key %q: no columns", foreignKey.Name)
+	}
+	if len(foreignKey.Columns) != len(foreignKey.RefColumns) {
+		return fmt.Errorf("render foreign key %q: %d columns but %d referenced columns", foreignKey.Name, len(foreignKey.Columns), len(foreignKey.RefColumns))
+	}
+	for i, column := range foreignKey.Columns {
+		if strings.TrimSpace(column) == "" {
+			return fmt.Errorf("render foreign key %q: column %d is empty", foreignKey.Name, i)
+		}
+	}
+	for i, column := range foreignKey.RefColumns {
+		if strings.TrimSpace(column) == "" {
+			return fmt.Errorf("render foreign key %q: referenced column %d is empty", foreignKey.Name, i)
+		}
+	}
+	var err error
+	if foreignKey.OnDelete, err = normalizeReferentialAction("ON DELETE", foreignKey.Name, foreignKey.OnDelete); err != nil {
+		return err
+	}
+	if foreignKey.OnUpdate, err = normalizeReferentialAction("ON UPDATE", foreignKey.Name, foreignKey.OnUpdate); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeReferentialAction(clause, name string, action ReferentialAction) (ReferentialAction, error) {
+	canonical := ReferentialAction(strings.ToUpper(strings.Join(strings.Fields(string(action)), " ")))
+	switch canonical {
+	case "", ReferentialActionNoAction, ReferentialActionRestrict, ReferentialActionCascade, ReferentialActionSetNull, ReferentialActionSetDefault:
+		return canonical, nil
+	default:
+		return "", fmt.Errorf("render foreign key %q: invalid %s action %q", name, clause, action)
+	}
+}
+
+func validateForeignKeyActionSupport(dialect string, action ReferentialAction) error {
+	if action == "" || action == ReferentialActionNoAction || action == ReferentialActionCascade || action == ReferentialActionSetNull {
+		return nil
+	}
+	if dialect == "mssql" && action == ReferentialActionRestrict {
+		return &UnsupportedFeatureError{Dialect: dialect, Feature: "foreign-key RESTRICT actions"}
+	}
+	if dialect == "mysql" && action == ReferentialActionSetDefault {
+		return &UnsupportedFeatureError{Dialect: dialect, Feature: "foreign-key SET DEFAULT actions"}
+	}
+	return nil
+}
+
 func hasTrue(values []bool) bool {
 	for _, value := range values {
 		if value {
@@ -715,7 +847,7 @@ func builtinDialects() []Dialect {
 	full := Capabilities{
 		CreateSchema: true, CreateTable: true, CreateColumn: true,
 		PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
-		SecondaryIndexes: true, StandalonePrimaryKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
+		SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 		IndexExpressionKeys: true, IndexIncludeColumns: true, FilteredIndexes: true,
 	}
 	return []Dialect{
@@ -725,7 +857,7 @@ func builtinDialects() []Dialect {
 			capabilities: Capabilities{
 				CreateSchema: true, CreateTable: true, CreateColumn: true,
 				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
-				SecondaryIndexes: true, StandalonePrimaryKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
+				SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 				IndexIncludeColumns: true, FilteredIndexes: true,
 			},
 		},
@@ -734,7 +866,7 @@ func builtinDialects() []Dialect {
 			capabilities: Capabilities{
 				CreateSchema: true, CreateTable: true, CreateColumn: true,
 				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
-				SecondaryIndexes: true, StandalonePrimaryKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
+				SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 				IndexExpressionKeys: true, IndexPrefixLengths: true,
 			},
 		},
@@ -841,6 +973,18 @@ func (d builtinDialect) RenderPrimaryKey(request Request, table TableRef, primar
 	return Result{SQL: sql}, nil
 }
 
+func (d builtinDialect) RenderForeignKey(request Request, table TableRef, foreignKey ForeignKey) (Result, error) {
+	renderer, err := d.renderer(request)
+	if err != nil {
+		return Result{}, err
+	}
+	sql, err := renderer.CreateForeignKeyDDL(toDriverTableRef(table), toDriverForeignKey(foreignKey))
+	if err != nil {
+		return Result{}, d.publicRenderError(err)
+	}
+	return Result{SQL: sql}, nil
+}
+
 func (d builtinDialect) RenderUniqueConstraint(request Request, table TableRef, unique UniqueConstraint) (Result, error) {
 	renderer, err := d.renderer(request)
 	if err != nil {
@@ -931,6 +1075,18 @@ func toDriverIndex(index Index) *driver.Index {
 		IsUnique:            index.IsUnique,
 		IncludeCols:         append([]string(nil), index.IncludeColumns...),
 		Filter:              index.Filter,
+	}
+}
+
+func toDriverForeignKey(foreignKey ForeignKey) *driver.ForeignKey {
+	return &driver.ForeignKey{
+		Name:       foreignKey.Name,
+		Columns:    append([]string(nil), foreignKey.Columns...),
+		RefSchema:  strings.TrimSpace(foreignKey.RefSchema),
+		RefTable:   foreignKey.RefTable,
+		RefColumns: append([]string(nil), foreignKey.RefColumns...),
+		OnDelete:   string(foreignKey.OnDelete),
+		OnUpdate:   string(foreignKey.OnUpdate),
 	}
 }
 

@@ -181,6 +181,47 @@ func TestRenderer_FinalizationMySQL(t *testing.T) {
 	assertEqualSQL(t, checkSQL, "ALTER TABLE `crm`.`Companies` ADD CONSTRAINT `CK_Companies_Active` CHECK (`IsActive` = 1)")
 }
 
+func TestRenderer_ForeignKeyReferenceSchemaAndExplicitNoAction(t *testing.T) {
+	cases := []struct {
+		target string
+		schema string
+		want   string
+	}{
+		{
+			target: "mssql",
+			schema: "dbo",
+			want:   `ALTER TABLE [dbo].[OrderLines] ADD CONSTRAINT [FK_OrderLines_Orders] FOREIGN KEY ([TenantId], [OrderId]) REFERENCES [identity].[Orders] ([TenantId], [Id]) ON DELETE NO ACTION ON UPDATE CASCADE`,
+		},
+		{
+			target: "mysql",
+			schema: "crm",
+			want:   "ALTER TABLE `crm`.`OrderLines` ADD CONSTRAINT `FK_OrderLines_Orders` FOREIGN KEY (`TenantId`, `OrderId`) REFERENCES `identity`.`Orders` (`TenantId`, `Id`) ON DELETE NO ACTION ON UPDATE CASCADE",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.target, func(t *testing.T) {
+			renderer, err := NewRenderer(tc.target, tc.schema, "fail")
+			if err != nil {
+				t.Fatalf("NewRenderer: %v", err)
+			}
+			got, err := renderer.CreateForeignKeyDDL(&driver.Table{Name: "OrderLines"}, &driver.ForeignKey{
+				Name:       "FK_OrderLines_Orders",
+				Columns:    []string{"TenantId", "OrderId"},
+				RefSchema:  "identity",
+				RefTable:   "Orders",
+				RefColumns: []string{"TenantId", "Id"},
+				OnDelete:   "NO ACTION",
+				OnUpdate:   "CASCADE",
+			})
+			if err != nil {
+				t.Fatalf("CreateForeignKeyDDL: %v", err)
+			}
+			assertEqualSQL(t, got, tc.want)
+		})
+	}
+}
+
 func TestRenderer_DropIndexPostgresWithoutSchema(t *testing.T) {
 	renderer, err := NewRenderer("postgres", "", "fail")
 	if err != nil {

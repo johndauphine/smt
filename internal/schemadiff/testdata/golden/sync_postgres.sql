@@ -53,11 +53,11 @@ ALTER TABLE "tgt"."audit_log" ADD CONSTRAINT "ck_audit_action" CHECK ("action" I
 
 -- [blocking] create foreign key fk_users_org
 -- note: foreign key validation can scan existing rows
-ALTER TABLE "tgt"."users" ADD CONSTRAINT "fk_users_org" FOREIGN KEY ("org_id") REFERENCES "tgt"."orgs" ("id") ON DELETE SET NULL;
+ALTER TABLE "tgt"."users" ADD CONSTRAINT "fk_users_org" FOREIGN KEY ("org_id") REFERENCES "app"."orgs" ("id") ON DELETE SET NULL;
 
 -- [blocking] create foreign key fk_audit_actor
 -- note: foreign key validation can scan existing rows
-ALTER TABLE "tgt"."audit_log" ADD CONSTRAINT "fk_audit_actor" FOREIGN KEY ("actor") REFERENCES "tgt"."users" ("username") ON DELETE CASCADE;
+ALTER TABLE "tgt"."audit_log" ADD CONSTRAINT "fk_audit_actor" FOREIGN KEY ("actor") REFERENCES "app"."users" ("username") ON DELETE CASCADE;
 
 -- [data-loss-risk] drop table line_items
 -- note: drops the table and its data

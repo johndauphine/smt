@@ -9,3 +9,6 @@ ALTER TABLE "public"."orders" ADD CONSTRAINT "uq_orders_email" UNIQUE ("email")
 
 create_check_constraint
 ALTER TABLE "public"."orders" ADD CONSTRAINT "ck_orders_total" CHECK ("total" >= 0)
+
+create_foreign_key
+ALTER TABLE "public"."orders" ADD CONSTRAINT "fk_orders_accounts" FOREIGN KEY ("id") REFERENCES "identity"."accounts" ("id") ON DELETE CASCADE ON UPDATE SET NULL

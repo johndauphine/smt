@@ -9,3 +9,6 @@ ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [UQ_Orders_Email] UNIQUE ([Email])
 
 create_check_constraint
 ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [CK_Orders_Total] CHECK ([Total] >= 0)
+
+create_foreign_key
+ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [FK_Orders_Accounts] FOREIGN KEY ([ID]) REFERENCES [identity].[Accounts] ([ID]) ON DELETE CASCADE ON UPDATE SET NULL
