@@ -333,6 +333,7 @@ history since v0.9.0:
 [#158]: https://github.com/johndauphine/smt/issues/158
 [#159]: https://github.com/johndauphine/smt/issues/159
 [#177]: https://github.com/johndauphine/smt/issues/177
+[#247]: https://github.com/johndauphine/smt/issues/247
 [#46]: https://github.com/johndauphine/smt/issues/46
 [#57]: https://github.com/johndauphine/smt/issues/57
 [#58]: https://github.com/johndauphine/smt/issues/58

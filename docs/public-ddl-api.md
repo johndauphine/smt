@@ -211,7 +211,9 @@ For the operations that render a full column definition (`AddColumn` and
 nullability changes and all built-in default changes need only the fields their
 SQL uses; SQL Server and MySQL nullability changes restate the type and require
 `Column.DataType`. `SetColumnDefault` requires `Column.Name` and an explicit
-default (`HasDefault` preserves an intentional empty-string default).
+default (`HasDefault` signals that a DEFAULT clause is present; set it when
+`DefaultExpression` is intentionally empty to represent a bare `DEFAULT ''`
+or similar zero-value clause rather than "no default").
 
 `SourceDialect` is optional, but callers should set it whenever it is known:
 some names have source-specific meanings, such as MySQL `TINYINT(1)` and
