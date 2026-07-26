@@ -20,10 +20,26 @@ type Batch struct {
 	Statements               []Statement
 	Cleanup                  []Statement
 	RequiresSingleConnection bool
+	// BestEffortStatementIndexes identifies zero-based entries in Statements
+	// whose execution errors are advisory. An executor should record those
+	// errors but continue the containing batch. Entries not listed are
+	// required. The built-in renderers emit sorted, unique, in-range indexes.
+	BestEffortStatementIndexes []int
 }
 
 // IsEmpty reports whether b contains no executable statements.
 func (b Batch) IsEmpty() bool { return len(b.Statements) == 0 }
+
+// IsBestEffort reports whether the Statement at index has advisory failure
+// semantics. Out-of-range indexes are never best effort.
+func (b Batch) IsBestEffort(index int) bool {
+	for _, bestEffort := range b.BestEffortStatementIndexes {
+		if bestEffort == index {
+			return true
+		}
+	}
+	return false
+}
 
 // EvolutionKind identifies an operation supplied to an EvolutionDialect.
 // Applications normally use the corresponding Renderer method; this type is
@@ -43,6 +59,43 @@ const (
 	EvolutionDropColumnDefault      EvolutionKind = "drop_column_default"
 	EvolutionTruncateTable          EvolutionKind = "truncate_table"
 )
+
+// EvolutionCapability identifies one public schema-evolution feature. The
+// corresponding Renderer method returns UnsupportedFeatureError when the
+// selected dialect does not advertise the feature.
+type EvolutionCapability string
+
+const (
+	EvolutionCapabilityDropSchema             EvolutionCapability = "drop_schema"
+	EvolutionCapabilityDropSchemaCascade      EvolutionCapability = "drop_schema_cascade"
+	EvolutionCapabilityDropTable              EvolutionCapability = "drop_table"
+	EvolutionCapabilityDropTableCascade       EvolutionCapability = "drop_table_cascade"
+	EvolutionCapabilityDropIndex              EvolutionCapability = "drop_index"
+	EvolutionCapabilityDropConstraint         EvolutionCapability = "drop_constraint"
+	EvolutionCapabilityAddColumn              EvolutionCapability = "add_column"
+	EvolutionCapabilityDropColumn             EvolutionCapability = "drop_column"
+	EvolutionCapabilityAlterColumnType        EvolutionCapability = "alter_column_type"
+	EvolutionCapabilityAlterColumnNullability EvolutionCapability = "alter_column_nullability"
+	EvolutionCapabilitySetColumnDefault       EvolutionCapability = "set_column_default"
+	EvolutionCapabilityDropColumnDefault      EvolutionCapability = "drop_column_default"
+	EvolutionCapabilityTruncateTable          EvolutionCapability = "truncate_table"
+	EvolutionCapabilityTruncateTableCascade   EvolutionCapability = "truncate_table_cascade"
+)
+
+// EvolutionCapabilities is the feature set advertised by an EvolutionDialect.
+// It is a slice rather than another fixed-width struct so future capabilities
+// can be added without changing existing composite-literal layouts.
+type EvolutionCapabilities []EvolutionCapability
+
+// Supports reports whether c advertises capability.
+func (c EvolutionCapabilities) Supports(capability EvolutionCapability) bool {
+	for _, available := range c {
+		if available == capability {
+			return true
+		}
+	}
+	return false
+}
 
 // DropOptions selects explicit destructive-drop behavior. Cascade is never
 // inferred: callers must request it and the target dialect must advertise the
@@ -95,7 +148,25 @@ type Evolution struct {
 // side-object implementations remain source compatible.
 type EvolutionDialect interface {
 	Dialect
+	EvolutionCapabilities() EvolutionCapabilities
 	RenderEvolution(Request, Evolution) (Batch, error)
+}
+
+// EvolutionCapabilities reports the schema-evolution features supported by
+// the selected dialect. The returned slice is a copy and may be safely
+// modified by the caller. A dialect without EvolutionDialect support returns
+// no evolution capabilities.
+func (r Renderer) EvolutionCapabilities() EvolutionCapabilities {
+	dialect, ok := r.dialect.(EvolutionDialect)
+	if !ok {
+		return nil
+	}
+	return append(EvolutionCapabilities(nil), dialect.EvolutionCapabilities()...)
+}
+
+// SupportsEvolution reports whether the selected dialect supports capability.
+func (r Renderer) SupportsEvolution(capability EvolutionCapability) bool {
+	return r.EvolutionCapabilities().Supports(capability)
 }
 
 const (
@@ -124,10 +195,10 @@ func (r Renderer) DropSchema(options DropOptions) (Batch, error) {
 	if strings.TrimSpace(r.request.Schema) == "" {
 		return Batch{}, nil
 	}
-	if !r.Capabilities().DropSchemas {
+	if !r.SupportsEvolution(EvolutionCapabilityDropSchema) {
 		return Batch{}, r.unsupported("schema drops")
 	}
-	if options.Cascade && !r.Capabilities().DropSchemaCascade {
+	if options.Cascade && !r.SupportsEvolution(EvolutionCapabilityDropSchemaCascade) {
 		return Batch{}, r.unsupported("schema-drop CASCADE")
 	}
 	return r.renderEvolution(Evolution{Kind: EvolutionDropSchema, DropOptions: options})
@@ -136,10 +207,10 @@ func (r Renderer) DropSchema(options DropOptions) (Batch, error) {
 // DropTable renders an idempotent table drop. Cascade is an explicit option
 // because it may remove dependent objects.
 func (r Renderer) DropTable(table TableRef, options DropOptions) (Batch, error) {
-	if !r.Capabilities().DropTables {
+	if !r.SupportsEvolution(EvolutionCapabilityDropTable) {
 		return Batch{}, r.unsupported("table drops")
 	}
-	if options.Cascade && !r.Capabilities().DropTableCascade {
+	if options.Cascade && !r.SupportsEvolution(EvolutionCapabilityDropTableCascade) {
 		return Batch{}, r.unsupported("table-drop CASCADE")
 	}
 	if err := validateTableRef("table drop", table); err != nil {
@@ -150,7 +221,7 @@ func (r Renderer) DropTable(table TableRef, options DropOptions) (Batch, error) 
 
 // DropIndex renders a named-index drop for a table.
 func (r Renderer) DropIndex(table TableRef, name string) (Batch, error) {
-	if !r.Capabilities().DropIndexes {
+	if !r.SupportsEvolution(EvolutionCapabilityDropIndex) {
 		return Batch{}, r.unsupported("index drops")
 	}
 	if err := validateTableRef("index drop", table); err != nil {
@@ -166,7 +237,7 @@ func (r Renderer) DropIndex(table TableRef, name string) (Batch, error) {
 // constraint drop. SQLite and ClickHouse report a typed unsupported error
 // rather than silently proposing a table rebuild.
 func (r Renderer) DropConstraint(table TableRef, constraint ConstraintRef) (Batch, error) {
-	if !r.Capabilities().DropConstraints {
+	if !r.SupportsEvolution(EvolutionCapabilityDropConstraint) {
 		return Batch{}, r.unsupported("constraint drops")
 	}
 	if err := validateTableRef("constraint drop", table); err != nil {
@@ -185,7 +256,7 @@ func (r Renderer) DropConstraint(table TableRef, constraint ConstraintRef) (Batc
 
 // AddColumn renders a complete ALTER TABLE add-column operation.
 func (r Renderer) AddColumn(table TableRef, column Column) (Batch, error) {
-	if !r.Capabilities().AddColumns {
+	if !r.SupportsEvolution(EvolutionCapabilityAddColumn) {
 		return Batch{}, r.unsupported("adding columns")
 	}
 	if err := validateTableRef("add column", table); err != nil {
@@ -199,7 +270,7 @@ func (r Renderer) AddColumn(table TableRef, column Column) (Batch, error) {
 
 // DropColumn renders a data-destructive column drop.
 func (r Renderer) DropColumn(table TableRef, name string) (Batch, error) {
-	if !r.Capabilities().DropColumns {
+	if !r.SupportsEvolution(EvolutionCapabilityDropColumn) {
 		return Batch{}, r.unsupported("dropping columns")
 	}
 	if err := validateTableRef("column drop", table); err != nil {
@@ -214,7 +285,7 @@ func (r Renderer) DropColumn(table TableRef, name string) (Batch, error) {
 // AlterColumnType renders an in-place type change when the dialect supports
 // one. SQLite and ClickHouse report a typed rebuild-required capability error.
 func (r Renderer) AlterColumnType(table TableRef, column Column) (Batch, error) {
-	if !r.Capabilities().AlterColumnTypes {
+	if !r.SupportsEvolution(EvolutionCapabilityAlterColumnType) {
 		return Batch{}, r.unsupported("altering column types without rebuilding the table")
 	}
 	if err := validateTableRef("column type change", table); err != nil {
@@ -231,7 +302,7 @@ func (r Renderer) AlterColumnType(table TableRef, column Column) (Batch, error) 
 // dialects may omit Column.DataType; SQL Server and MySQL require it because
 // their ALTER syntax restates the column type.
 func (r Renderer) AlterColumnNullability(table TableRef, column Column) (Batch, error) {
-	if !r.Capabilities().AlterColumnNullability {
+	if !r.SupportsEvolution(EvolutionCapabilityAlterColumnNullability) {
 		return Batch{}, r.unsupported("altering column nullability without rebuilding the table")
 	}
 	if err := validateTableRef("column nullability change", table); err != nil {
@@ -250,7 +321,7 @@ func (r Renderer) AlterColumnNullability(table TableRef, column Column) (Batch, 
 // statement. Custom dialects that need DataType should validate it inside
 // RenderEvolution.
 func (r Renderer) SetColumnDefault(table TableRef, column Column) (Batch, error) {
-	if !r.Capabilities().SetColumnDefaults {
+	if !r.SupportsEvolution(EvolutionCapabilitySetColumnDefault) {
 		return Batch{}, r.unsupported("setting column defaults")
 	}
 	if err := validateTableRef("set column default", table); err != nil {
@@ -267,7 +338,7 @@ func (r Renderer) SetColumnDefault(table TableRef, column Column) (Batch, error)
 
 // DropColumnDefault renders a deterministic default removal.
 func (r Renderer) DropColumnDefault(table TableRef, name string) (Batch, error) {
-	if !r.Capabilities().DropColumnDefaults {
+	if !r.SupportsEvolution(EvolutionCapabilityDropColumnDefault) {
 		return Batch{}, r.unsupported("dropping column defaults")
 	}
 	if err := validateTableRef("drop column default", table); err != nil {
@@ -283,10 +354,10 @@ func (r Renderer) DropColumnDefault(table TableRef, name string) (Batch, error) 
 // deterministic sqlite_sequence cleanup; MySQL additionally declares the
 // required same-connection foreign-key-check sequence.
 func (r Renderer) TruncateTable(table TableRef, options TruncateOptions) (Batch, error) {
-	if !r.Capabilities().TruncateTables {
+	if !r.SupportsEvolution(EvolutionCapabilityTruncateTable) {
 		return Batch{}, r.unsupported("truncating tables")
 	}
-	if options.Cascade && !r.Capabilities().TruncateTableCascade {
+	if options.Cascade && !r.SupportsEvolution(EvolutionCapabilityTruncateTableCascade) {
 		return Batch{}, r.unsupported("truncate CASCADE")
 	}
 	if err := validateTableRef("truncate table", table); err != nil {
@@ -438,8 +509,8 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 			cleanup := fmt.Sprintf("DELETE FROM sqlite_sequence WHERE name = '%s'", strings.ReplaceAll(driver.NormalizeIdentifier(d.name, operation.Table.Name), "'", "''"))
 			return Batch{Statements: []Statement{
 				{Kind: StatementTruncateTable, SQL: sql},
-				{Kind: StatementBestEffortCleanup, SQL: cleanup, BestEffort: true},
-			}}, nil
+				{Kind: StatementBestEffortCleanup, SQL: cleanup},
+			}, BestEffortStatementIndexes: []int{1}}, nil
 		default:
 			return batch(StatementTruncateTable, sql), nil
 		}
@@ -449,59 +520,59 @@ func (d builtinDialect) RenderEvolution(request Request, operation Evolution) (B
 }
 
 func (d builtinDialect) unsupportedEvolutionFeature(operation Evolution) string {
-	caps := d.capabilities
+	caps := d.EvolutionCapabilities()
 	switch operation.Kind {
 	case EvolutionDropSchema:
-		if !caps.DropSchemas {
+		if !caps.Supports(EvolutionCapabilityDropSchema) {
 			return "schema drops"
 		}
-		if operation.DropOptions.Cascade && !caps.DropSchemaCascade {
+		if operation.DropOptions.Cascade && !caps.Supports(EvolutionCapabilityDropSchemaCascade) {
 			return "schema-drop CASCADE"
 		}
 	case EvolutionDropTable:
-		if !caps.DropTables {
+		if !caps.Supports(EvolutionCapabilityDropTable) {
 			return "table drops"
 		}
-		if operation.DropOptions.Cascade && !caps.DropTableCascade {
+		if operation.DropOptions.Cascade && !caps.Supports(EvolutionCapabilityDropTableCascade) {
 			return "table-drop CASCADE"
 		}
 	case EvolutionDropIndex:
-		if !caps.DropIndexes {
+		if !caps.Supports(EvolutionCapabilityDropIndex) {
 			return "index drops"
 		}
 	case EvolutionDropConstraint:
-		if !caps.DropConstraints {
+		if !caps.Supports(EvolutionCapabilityDropConstraint) {
 			return "constraint drops"
 		}
 	case EvolutionAddColumn:
-		if !caps.AddColumns {
+		if !caps.Supports(EvolutionCapabilityAddColumn) {
 			return "adding columns"
 		}
 	case EvolutionDropColumn:
-		if !caps.DropColumns {
+		if !caps.Supports(EvolutionCapabilityDropColumn) {
 			return "dropping columns"
 		}
 	case EvolutionAlterColumnType:
-		if !caps.AlterColumnTypes {
+		if !caps.Supports(EvolutionCapabilityAlterColumnType) {
 			return "altering column types without rebuilding the table"
 		}
 	case EvolutionAlterColumnNullability:
-		if !caps.AlterColumnNullability {
+		if !caps.Supports(EvolutionCapabilityAlterColumnNullability) {
 			return "altering column nullability without rebuilding the table"
 		}
 	case EvolutionSetColumnDefault:
-		if !caps.SetColumnDefaults {
+		if !caps.Supports(EvolutionCapabilitySetColumnDefault) {
 			return "setting column defaults"
 		}
 	case EvolutionDropColumnDefault:
-		if !caps.DropColumnDefaults {
+		if !caps.Supports(EvolutionCapabilityDropColumnDefault) {
 			return "dropping column defaults"
 		}
 	case EvolutionTruncateTable:
-		if !caps.TruncateTables {
+		if !caps.Supports(EvolutionCapabilityTruncateTable) {
 			return "truncating tables"
 		}
-		if operation.TruncateOptions.Cascade && !caps.TruncateTableCascade {
+		if operation.TruncateOptions.Cascade && !caps.Supports(EvolutionCapabilityTruncateTableCascade) {
 			return "truncate CASCADE"
 		}
 	}

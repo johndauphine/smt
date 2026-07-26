@@ -35,20 +35,6 @@ type Capabilities struct {
 	CreateSchema           bool
 	CreateTable            bool
 	CreateColumn           bool
-	DropSchemas            bool
-	DropSchemaCascade      bool
-	DropTables             bool
-	DropTableCascade       bool
-	DropIndexes            bool
-	DropConstraints        bool
-	AddColumns             bool
-	DropColumns            bool
-	AlterColumnTypes       bool
-	AlterColumnNullability bool
-	SetColumnDefaults      bool
-	DropColumnDefaults     bool
-	TruncateTables         bool
-	TruncateTableCascade   bool
 	PrimaryKeys            bool
 	IdentityColumns        bool
 	Defaults               bool
@@ -106,20 +92,16 @@ const (
 	StatementCreateTable StatementKind = "create_table"
 )
 
-// Statement is one deterministic executable SQL unit. It is normally one DDL
-// statement; a dialect may use a single multi-statement SQL batch where that
-// is required for atomic scope (for example SQL Server default-constraint
-// discovery). Callers retain execution, retry, and scheduling policy.
+// Statement is one deterministic executable DDL artifact. SQL is exactly one
+// statement; callers retain execution, retry, and scheduling policy.
 //
 // Warnings apply only to this artifact. They are advisory and never change
 // SQL, which keeps plans deterministic and safe to persist or inspect before
-// execution. BestEffort means an executor should record, but not fail the
-// containing operation for, an error from this cleanup statement.
+// execution.
 type Statement struct {
-	Kind       StatementKind
-	SQL        string
-	Warnings   []Warning
-	BestEffort bool
+	Kind     StatementKind
+	SQL      string
+	Warnings []Warning
 }
 
 // Plan is an ordered, deterministic set of CREATE statements. It owns no
@@ -856,62 +838,107 @@ func hasPositive(values []int) bool {
 }
 
 type builtinDialect struct {
-	name         string
-	aliases      []string
-	capabilities Capabilities
+	name                  string
+	aliases               []string
+	capabilities          Capabilities
+	evolutionCapabilities EvolutionCapabilities
 }
 
 func builtinDialects() []Dialect {
 	full := Capabilities{
 		CreateSchema: true, CreateTable: true, CreateColumn: true,
-		DropSchemas: true, DropSchemaCascade: true,
-		DropTables: true, DropTableCascade: true, DropIndexes: true, DropConstraints: true,
-		AddColumns: true, DropColumns: true, AlterColumnTypes: true, AlterColumnNullability: true,
-		SetColumnDefaults: true, DropColumnDefaults: true, TruncateTables: true, TruncateTableCascade: true,
 		PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
 		SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 		IndexExpressionKeys: true, IndexIncludeColumns: true, FilteredIndexes: true,
 	}
+	fullEvolution := EvolutionCapabilities{
+		EvolutionCapabilityDropSchema,
+		EvolutionCapabilityDropSchemaCascade,
+		EvolutionCapabilityDropTable,
+		EvolutionCapabilityDropTableCascade,
+		EvolutionCapabilityDropIndex,
+		EvolutionCapabilityDropConstraint,
+		EvolutionCapabilityAddColumn,
+		EvolutionCapabilityDropColumn,
+		EvolutionCapabilityAlterColumnType,
+		EvolutionCapabilityAlterColumnNullability,
+		EvolutionCapabilitySetColumnDefault,
+		EvolutionCapabilityDropColumnDefault,
+		EvolutionCapabilityTruncateTable,
+		EvolutionCapabilityTruncateTableCascade,
+	}
 	return []Dialect{
-		builtinDialect{name: "postgres", aliases: []string{"postgresql", "pg"}, capabilities: full},
+		builtinDialect{name: "postgres", aliases: []string{"postgresql", "pg"}, capabilities: full, evolutionCapabilities: fullEvolution},
 		builtinDialect{
 			name: "mssql", aliases: []string{"sqlserver", "sql-server", "sql_server"},
 			capabilities: Capabilities{
 				CreateSchema: true, CreateTable: true, CreateColumn: true,
-				DropSchemas: true, DropTables: true, DropIndexes: true, DropConstraints: true,
-				AddColumns: true, DropColumns: true, AlterColumnTypes: true, AlterColumnNullability: true,
-				SetColumnDefaults: true, DropColumnDefaults: true, TruncateTables: true,
 				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
 				SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 				IndexIncludeColumns: true, FilteredIndexes: true,
+			},
+			evolutionCapabilities: EvolutionCapabilities{
+				EvolutionCapabilityDropSchema,
+				EvolutionCapabilityDropTable,
+				EvolutionCapabilityDropIndex,
+				EvolutionCapabilityDropConstraint,
+				EvolutionCapabilityAddColumn,
+				EvolutionCapabilityDropColumn,
+				EvolutionCapabilityAlterColumnType,
+				EvolutionCapabilityAlterColumnNullability,
+				EvolutionCapabilitySetColumnDefault,
+				EvolutionCapabilityDropColumnDefault,
+				EvolutionCapabilityTruncateTable,
 			},
 		},
 		builtinDialect{
 			name: "mysql", aliases: []string{"mariadb", "maria"},
 			capabilities: Capabilities{
 				CreateSchema: true, CreateTable: true, CreateColumn: true,
-				DropSchemas: true, DropTables: true, DropIndexes: true, DropConstraints: true,
-				AddColumns: true, DropColumns: true, AlterColumnTypes: true, AlterColumnNullability: true,
-				SetColumnDefaults: true, DropColumnDefaults: true, TruncateTables: true,
 				PrimaryKeys: true, IdentityColumns: true, Defaults: true, ComputedColumns: true,
 				SecondaryIndexes: true, StandalonePrimaryKeys: true, StandaloneForeignKeys: true, NamedUniqueConstraints: true, CheckConstraints: true,
 				IndexExpressionKeys: true, IndexPrefixLengths: true,
+			},
+			evolutionCapabilities: EvolutionCapabilities{
+				EvolutionCapabilityDropSchema,
+				EvolutionCapabilityDropTable,
+				EvolutionCapabilityDropIndex,
+				EvolutionCapabilityDropConstraint,
+				EvolutionCapabilityAddColumn,
+				EvolutionCapabilityDropColumn,
+				EvolutionCapabilityAlterColumnType,
+				EvolutionCapabilityAlterColumnNullability,
+				EvolutionCapabilitySetColumnDefault,
+				EvolutionCapabilityDropColumnDefault,
+				EvolutionCapabilityTruncateTable,
 			},
 		},
 		builtinDialect{
 			name: "sqlite", aliases: []string{"sqlite3"},
 			capabilities: Capabilities{
 				CreateTable: true, CreateColumn: true, PrimaryKeys: true, IdentityColumns: true, Defaults: true,
-				DropTables: true, DropIndexes: true, AddColumns: true, DropColumns: true, TruncateTables: true,
 				SecondaryIndexes: true, FilteredIndexes: true,
+			},
+			evolutionCapabilities: EvolutionCapabilities{
+				EvolutionCapabilityDropTable,
+				EvolutionCapabilityDropIndex,
+				EvolutionCapabilityAddColumn,
+				EvolutionCapabilityDropColumn,
+				EvolutionCapabilityTruncateTable,
 			},
 		},
 		builtinDialect{
 			name: "clickhouse", aliases: []string{"click-house"},
 			capabilities: Capabilities{
 				CreateSchema: true, CreateTable: true, CreateColumn: true,
-				DropSchemas: true, DropTables: true, AddColumns: true, DropColumns: true, TruncateTables: true,
 				PrimaryKeys: true,
+			},
+			evolutionCapabilities: EvolutionCapabilities{
+				EvolutionCapabilityDropSchema,
+				EvolutionCapabilityDropTable,
+				EvolutionCapabilityAddColumn,
+				EvolutionCapabilityDropColumn,
+				EvolutionCapabilityTruncateTable,
 			},
 		},
 	}
@@ -920,6 +947,9 @@ func builtinDialects() []Dialect {
 func (d builtinDialect) Name() string               { return d.name }
 func (d builtinDialect) Aliases() []string          { return append([]string(nil), d.aliases...) }
 func (d builtinDialect) Capabilities() Capabilities { return d.capabilities }
+func (d builtinDialect) EvolutionCapabilities() EvolutionCapabilities {
+	return append(EvolutionCapabilities(nil), d.evolutionCapabilities...)
+}
 
 func (d builtinDialect) RenderSchema(request Request) (Result, error) {
 	renderer, err := d.renderer(request)

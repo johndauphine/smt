@@ -70,7 +70,7 @@ func TestPublicDDLEvolutionGoldens(t *testing.T) {
 func renderEvolutionArtifacts(t *testing.T, renderer schema.Renderer, column, alter schema.Column) string {
 	t.Helper()
 	table := schema.TableRef{Name: "Orders", Columns: []schema.Column{{Name: "id", DataType: column.DataType}, column}}
-	caps := renderer.Capabilities()
+	caps := renderer.EvolutionCapabilities()
 	var artifacts []string
 	appendBatch := func(name string, render func() (schema.Batch, error)) {
 		t.Helper()
@@ -81,44 +81,44 @@ func renderEvolutionArtifacts(t *testing.T, renderer schema.Renderer, column, al
 		artifacts = append(artifacts, name+"\n"+formatBatch(batch))
 	}
 
-	if caps.DropSchemas {
+	if caps.Supports(schema.EvolutionCapabilityDropSchema) {
 		appendBatch("drop_schema", func() (schema.Batch, error) {
-			return renderer.DropSchema(schema.DropOptions{Cascade: caps.DropSchemaCascade})
+			return renderer.DropSchema(schema.DropOptions{Cascade: caps.Supports(schema.EvolutionCapabilityDropSchemaCascade)})
 		})
 	}
 	appendBatch("drop_table", func() (schema.Batch, error) {
-		return renderer.DropTable(table, schema.DropOptions{Cascade: caps.DropTableCascade})
+		return renderer.DropTable(table, schema.DropOptions{Cascade: caps.Supports(schema.EvolutionCapabilityDropTableCascade)})
 	})
-	if caps.DropIndexes {
+	if caps.Supports(schema.EvolutionCapabilityDropIndex) {
 		appendBatch("drop_index", func() (schema.Batch, error) {
 			return renderer.DropIndex(table, "IX Orders Subtotal")
 		})
 	}
-	if caps.DropConstraints {
+	if caps.Supports(schema.EvolutionCapabilityDropConstraint) {
 		appendBatch("drop_foreign_key", func() (schema.Batch, error) {
 			return renderer.DropConstraint(table, schema.ConstraintRef{Name: "FK Orders Account", Kind: schema.ConstraintForeignKey})
 		})
 	}
 	appendBatch("add_column", func() (schema.Batch, error) { return renderer.AddColumn(table, column) })
 	appendBatch("drop_column", func() (schema.Batch, error) { return renderer.DropColumn(table, column.Name) })
-	if caps.AlterColumnTypes {
+	if caps.Supports(schema.EvolutionCapabilityAlterColumnType) {
 		appendBatch("alter_column_type", func() (schema.Batch, error) { return renderer.AlterColumnType(table, alter) })
 	}
-	if caps.AlterColumnNullability {
+	if caps.Supports(schema.EvolutionCapabilityAlterColumnNullability) {
 		appendBatch("alter_column_nullability", func() (schema.Batch, error) {
 			return renderer.AlterColumnNullability(table, alter)
 		})
 	}
-	if caps.SetColumnDefaults {
+	if caps.Supports(schema.EvolutionCapabilitySetColumnDefault) {
 		appendBatch("set_column_default", func() (schema.Batch, error) { return renderer.SetColumnDefault(table, column) })
 	}
-	if caps.DropColumnDefaults {
+	if caps.Supports(schema.EvolutionCapabilityDropColumnDefault) {
 		appendBatch("drop_column_default", func() (schema.Batch, error) {
 			return renderer.DropColumnDefault(table, column.Name)
 		})
 	}
 	appendBatch("truncate_table", func() (schema.Batch, error) {
-		return renderer.TruncateTable(table, schema.TruncateOptions{Cascade: caps.TruncateTableCascade})
+		return renderer.TruncateTable(table, schema.TruncateOptions{Cascade: caps.Supports(schema.EvolutionCapabilityTruncateTableCascade)})
 	})
 	return strings.Join(artifacts, "\n\n")
 }
@@ -128,8 +128,8 @@ func formatBatch(batch schema.Batch) string {
 	if batch.RequiresSingleConnection {
 		lines = append(lines, "requires_single_connection")
 	}
-	for _, statement := range batch.Statements {
-		if statement.BestEffort {
+	for i, statement := range batch.Statements {
+		if batch.IsBestEffort(i) {
 			lines = append(lines, "best_effort")
 		}
 		lines = append(lines, string(statement.Kind), statement.SQL)
@@ -161,15 +161,49 @@ func TestPublicDDLEvolutionCapabilitiesAndUnsupportedErrors(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewRenderer: %v", err)
 			}
-			got := renderer.Capabilities()
-			if got.DropSchemas != tc.want.dropSchemas || got.DropSchemaCascade != tc.want.dropSchemaCascade ||
-				got.DropTables != tc.want.dropTables || got.DropTableCascade != tc.want.dropTableCascade ||
-				got.DropIndexes != tc.want.dropIndexes || got.DropConstraints != tc.want.dropConstraints ||
-				got.AddColumns != tc.want.addColumns || got.DropColumns != tc.want.dropColumns ||
-				got.AlterColumnTypes != tc.want.alterTypes || got.AlterColumnNullability != tc.want.alterNullability ||
-				got.SetColumnDefaults != tc.want.setDefaults || got.DropColumnDefaults != tc.want.dropDefaults ||
-				got.TruncateTables != tc.want.truncate || got.TruncateTableCascade != tc.want.truncateCascade {
+			got := renderer.EvolutionCapabilities()
+			if got.Supports(schema.EvolutionCapabilityDropSchema) != tc.want.dropSchemas ||
+				got.Supports(schema.EvolutionCapabilityDropSchemaCascade) != tc.want.dropSchemaCascade ||
+				got.Supports(schema.EvolutionCapabilityDropTable) != tc.want.dropTables ||
+				got.Supports(schema.EvolutionCapabilityDropTableCascade) != tc.want.dropTableCascade ||
+				got.Supports(schema.EvolutionCapabilityDropIndex) != tc.want.dropIndexes ||
+				got.Supports(schema.EvolutionCapabilityDropConstraint) != tc.want.dropConstraints ||
+				got.Supports(schema.EvolutionCapabilityAddColumn) != tc.want.addColumns ||
+				got.Supports(schema.EvolutionCapabilityDropColumn) != tc.want.dropColumns ||
+				got.Supports(schema.EvolutionCapabilityAlterColumnType) != tc.want.alterTypes ||
+				got.Supports(schema.EvolutionCapabilityAlterColumnNullability) != tc.want.alterNullability ||
+				got.Supports(schema.EvolutionCapabilitySetColumnDefault) != tc.want.setDefaults ||
+				got.Supports(schema.EvolutionCapabilityDropColumnDefault) != tc.want.dropDefaults ||
+				got.Supports(schema.EvolutionCapabilityTruncateTable) != tc.want.truncate ||
+				got.Supports(schema.EvolutionCapabilityTruncateTableCascade) != tc.want.truncateCascade {
 				t.Fatalf("evolution capabilities = %+v, want %+v", got, tc.want)
+			}
+			for _, capability := range []schema.EvolutionCapability{
+				schema.EvolutionCapabilityDropSchema,
+				schema.EvolutionCapabilityDropSchemaCascade,
+				schema.EvolutionCapabilityDropTable,
+				schema.EvolutionCapabilityDropTableCascade,
+				schema.EvolutionCapabilityDropIndex,
+				schema.EvolutionCapabilityDropConstraint,
+				schema.EvolutionCapabilityAddColumn,
+				schema.EvolutionCapabilityDropColumn,
+				schema.EvolutionCapabilityAlterColumnType,
+				schema.EvolutionCapabilityAlterColumnNullability,
+				schema.EvolutionCapabilitySetColumnDefault,
+				schema.EvolutionCapabilityDropColumnDefault,
+				schema.EvolutionCapabilityTruncateTable,
+				schema.EvolutionCapabilityTruncateTableCascade,
+			} {
+				if renderer.SupportsEvolution(capability) != got.Supports(capability) {
+					t.Fatalf("SupportsEvolution(%q) differs from EvolutionCapabilities", capability)
+				}
+			}
+			if len(got) > 0 {
+				first := got[0]
+				got[0] = ""
+				if !renderer.SupportsEvolution(first) {
+					t.Fatalf("EvolutionCapabilities returned an aliased slice")
+				}
 			}
 		})
 	}
@@ -366,7 +400,7 @@ func TestPublicDDLEvolutionConstraintKindsAndCleanupContracts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TruncateTable(sqlite): %v", err)
 	}
-	if len(batch.Statements) != 2 || !batch.Statements[1].BestEffort || batch.Statements[1].Kind != schema.StatementBestEffortCleanup || batch.Statements[1].SQL != "DELETE FROM sqlite_sequence WHERE name = 'O''Reilly'" {
+	if len(batch.Statements) != 2 || !batch.IsBestEffort(1) || batch.IsBestEffort(0) || batch.IsBestEffort(2) || batch.Statements[1].Kind != schema.StatementBestEffortCleanup || batch.Statements[1].SQL != "DELETE FROM sqlite_sequence WHERE name = 'O''Reilly'" {
 		t.Fatalf("sqlite truncate cleanup = %+v, want quoted best-effort sqlite_sequence cleanup", batch)
 	}
 }
@@ -485,8 +519,8 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 				t.Fatalf("add SQL = %q, want %q", gotAdd.Statements[0].SQL, wantAdd)
 			}
 
-			caps := public.Capabilities()
-			if caps.DropSchemas {
+			caps := public.EvolutionCapabilities()
+			if caps.Supports(schema.EvolutionCapabilityDropSchema) {
 				gotSchema, err := public.DropSchema(schema.DropOptions{})
 				if err != nil {
 					t.Fatalf("DropSchema: %v", err)
@@ -499,7 +533,7 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 					t.Fatalf("drop schema SQL = %q, want %q", gotSchema.Statements[0].SQL, wantSchema)
 				}
 			}
-			if caps.DropIndexes {
+			if caps.Supports(schema.EvolutionCapabilityDropIndex) {
 				gotIndex, err := public.DropIndex(table, "ix_orders_extra")
 				if err != nil {
 					t.Fatalf("DropIndex: %v", err)
@@ -508,7 +542,7 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 					t.Fatalf("drop index SQL = %q, want %q", gotIndex.Statements[0].SQL, want)
 				}
 			}
-			if caps.DropConstraints {
+			if caps.Supports(schema.EvolutionCapabilityDropConstraint) {
 				gotConstraint, err := public.DropConstraint(table, schema.ConstraintRef{Name: "fk_orders_parent", Kind: schema.ConstraintForeignKey})
 				if err != nil {
 					t.Fatalf("DropConstraint: %v", err)
@@ -521,7 +555,7 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 					t.Fatalf("drop constraint SQL = %q, want %q", gotConstraint.Statements[0].SQL, wantConstraint)
 				}
 			}
-			if caps.DropColumns {
+			if caps.Supports(schema.EvolutionCapabilityDropColumn) {
 				gotColumn, err := public.DropColumn(table, column.Name)
 				if err != nil {
 					t.Fatalf("DropColumn: %v", err)
@@ -530,7 +564,7 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 					t.Fatalf("drop column SQL = %q, want %q", gotColumn.Statements[0].SQL, want)
 				}
 			}
-			if caps.AlterColumnTypes {
+			if caps.Supports(schema.EvolutionCapabilityAlterColumnType) {
 				gotType, err := public.AlterColumnType(table, column)
 				if err != nil {
 					t.Fatalf("AlterColumnType: %v", err)
@@ -543,7 +577,7 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 					t.Fatalf("alter type SQL = %q, want %q", gotType.Statements[0].SQL, wantType)
 				}
 			}
-			if caps.AlterColumnNullability {
+			if caps.Supports(schema.EvolutionCapabilityAlterColumnNullability) {
 				gotNullability, err := public.AlterColumnNullability(table, column)
 				if err != nil {
 					t.Fatalf("AlterColumnNullability: %v", err)
@@ -556,7 +590,7 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 					t.Fatalf("alter nullability SQL = %q, want %q", gotNullability.Statements[0].SQL, wantNullability)
 				}
 			}
-			if caps.SetColumnDefaults {
+			if caps.Supports(schema.EvolutionCapabilitySetColumnDefault) {
 				defaultColumn := column
 				defaultColumn.DefaultExpression = "0"
 				gotDefault, err := public.SetColumnDefault(table, defaultColumn)
@@ -579,7 +613,7 @@ func TestPublicDDLEvolutionAdapterParity(t *testing.T) {
 					}
 				}
 			}
-			if caps.DropColumnDefaults {
+			if caps.Supports(schema.EvolutionCapabilityDropColumnDefault) {
 				gotDefault, err := public.DropColumnDefault(table, column.Name)
 				if err != nil {
 					t.Fatalf("DropColumnDefault: %v", err)
@@ -615,7 +649,10 @@ type nullableOnlyEvolutionDialect struct{ testDialect }
 func (nullableOnlyEvolutionDialect) Name() string      { return "nullable-only" }
 func (nullableOnlyEvolutionDialect) Aliases() []string { return nil }
 func (nullableOnlyEvolutionDialect) Capabilities() schema.Capabilities {
-	return schema.Capabilities{AlterColumnNullability: true}
+	return schema.Capabilities{}
+}
+func (nullableOnlyEvolutionDialect) EvolutionCapabilities() schema.EvolutionCapabilities {
+	return schema.EvolutionCapabilities{schema.EvolutionCapabilityAlterColumnNullability}
 }
 func (nullableOnlyEvolutionDialect) RenderEvolution(_ schema.Request, operation schema.Evolution) (schema.Batch, error) {
 	if operation.Kind != schema.EvolutionAlterColumnNullability {
