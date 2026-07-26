@@ -6,11 +6,14 @@ SMT is the schema-only counterpart to [DMT](https://github.com/johndauphine/dmt)
 
 ## Release Status
 
-SMT v1.4.0 is the release target for this source tree. The release publishes
-Linux, macOS, and Windows artifacts with SHA-256 checksums after the documented
-validation gates pass. See
+SMT v1.4.0 is published as a
+[stable GitHub Release](https://github.com/johndauphine/smt/releases/tag/v1.4.0).
+Its annotated tag points to release commit
+`3f1e459189e0c90fee0c5d7a42069798064d2994`, whose required CI and acceptance
+gates passed. Linux, macOS, and Windows artifacts are published with verified
+SHA-256 checksums. See
 [docs/release-checklist.md](docs/release-checklist.md#current-release-status)
-for the target status, validation gates, and asset list, and
+for the published status, validation gates, and asset list, and
 [CHANGELOG.md](CHANGELOG.md#140---2026-07-26) for the release notes.
 
 ## Supported databases

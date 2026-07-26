@@ -2,18 +2,19 @@
 
 ## Current Release Status
 
-SMT v1.4.0 is the current release target. Treat it as published only after the
-annotated tag, release assets, checksums, and stable GitHub Release are present.
+SMT v1.4.0 was published as a stable GitHub Release on 2026-07-26. The
+annotated tag, release assets, checksums, required CI, and acceptance evidence
+have all been verified.
 
 | Item | Status |
 |------|--------|
-| Release | Target: stable GitHub Release `v1.4.0`; not complete until published |
-| Tag | Create annotated tag `v1.4.0` at the commit that passed every release gate |
-| CI | Unit Tests, Race Tests, Lint, and Build CLI must pass on the release commit |
-| Release blockers | Confirm there are no open release-blocking issues before tagging |
-| Assets | `smt-linux-amd64`, `smt-darwin-arm64`, `smt-windows-amd64.exe`, `checksums.txt` |
-| Checksums | Generate locally, verify before upload, then verify the published `checksums.txt` |
-| Acceptance artifacts | Generate `so2010_verification.json`, `crm_acceptance_matrix.json`, and `live_ai_smoke.json` under `.acceptance-artifacts/` during release validation |
+| Release | [Stable GitHub Release `v1.4.0`](https://github.com/johndauphine/smt/releases/tag/v1.4.0), published 2026-07-26 |
+| Tag | Annotated tag `v1.4.0` points to `3f1e459189e0c90fee0c5d7a42069798064d2994` |
+| CI | Unit Tests, Race Tests, Lint, Build CLI, and CRM Fixture Matrix passed on the exact release commit |
+| Release blockers | No open issues or pull requests remained at release verification |
+| Assets | Published `smt-linux-amd64`, `smt-darwin-arm64`, `smt-windows-amd64.exe`, and `checksums.txt` |
+| Checksums | Generated locally, verified before upload, and reverified from the published `checksums.txt` |
+| Acceptance artifacts | `so2010_verification.json`, `crm_acceptance_matrix.json`, and `live_ai_smoke.json` were generated under `.acceptance-artifacts/` and passed |
 
 ## v1.4 Scope
 
