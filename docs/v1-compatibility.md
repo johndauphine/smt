@@ -65,6 +65,15 @@ fields are part of the v1 reader contract for downstream tooling:
 1.x releases may add new manifest fields. Downstream readers should ignore
 unknown fields and treat missing optional arrays as empty.
 
+The unreleased fidelity extension adds optional `fidelity_profile`,
+`fidelity_semantics_version`, `fidelity_findings`, and `fidelity_requirements`
+fields. Legacy manifests omit them. Opt-in source and plan fingerprints include
+the profile and semantics version so caches cannot reuse a legacy artifact for
+checked or strict requests. Legacy fingerprint computation stays unchanged.
+PostgreSQL CHECK validation status is optional internal snapshot metadata;
+absence is unknown to the opt-in comparison, not proof of validation. Legacy
+comparisons and fingerprints omit this new validation evidence.
+
 For `ai_review_warnings`, `method` is part of the v1 review contract. Current
 table DDL review and side-object review for indexes, foreign keys, and check
 constraints record `deterministic_comparator`. Downstream readers should still
@@ -83,3 +92,6 @@ stale. Regenerate `schema.sql` or `migration.sql`, inspect the new manifest, and
 compare the old and new DDL before applying. A renderer bump does not by itself
 require re-baselining the source snapshot; re-run `smt snapshot` when the live
 source schema is the new intended baseline.
+
+Renderer version 21 introduces the opt-in fidelity path. Existing legacy SQL is
+preserved; the version distinguishes binaries that understand the new policy.

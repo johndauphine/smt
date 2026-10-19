@@ -18,6 +18,16 @@ gating — with these deltas from the target-mode contract:
 
 ## Supported Changes
 
+These existing operations describe the default legacy profile. The unreleased
+`--fidelity checked|strict` path is deliberately narrower: SQL Server to
+PostgreSQL new tables and verified unchanged existing tables only. It compares
+generated restrictions by exact expected name, recognized predicate, and live
+validation status. Existing-table evolution, target-only tables, missing or
+changed restrictions, and snapshot baselines return an explicit error before a
+partial plan can be applied. A stronger profile never truncates or cleans rows.
+See [CLI fidelity profiles](cli.md#opt-in-fidelity-profiles).
+
+
 SMT v1 can render these sync changes:
 
 - added tables, including managed indexes, foreign keys, and check constraints;

@@ -1,0 +1,90 @@
+[
+  {
+    "name": "TIME(7) retains seventh fractional digit",
+    "category": "stored_value",
+    "source_basis": "TIME defaults to scale 7 (100 ns).",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_default) VALUES ('X','2025-01-01','12:34:56.1234567') RETURNING t_default::text;",
+    "expected_result": "12:34:56.1234567"
+  },
+  {
+    "name": "DATETIME2(7) retains seventh fractional digit",
+    "category": "stored_value",
+    "source_basis": "Unspecified DATETIME2 has scale 7.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetime2-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"Companies\"(code,name,created_at) VALUES ('GAP','Gap','2025-01-01T12:34:56.1234567') RETURNING created_at::text;",
+    "expected_result": "2025-01-01 12:34:56.1234567"
+  },
+  {
+    "name": "DATETIMEOFFSET retains original offset",
+    "category": "stored_value",
+    "source_basis": "Original +05:30 offset must remain recoverable; UTC instant alone is insufficient. Text round-trip is a diagnostic for this candidate, not a universal representation test.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,dto_p2) VALUES ('X','2025-01-01','2025-01-01T12:00:00.12+05:30') RETURNING dto_p2::text;",
+    "expected_result": "2025-01-01 12:00:00.12+05:30"
+  },
+  {
+    "name": "TIME(7) maximum accepted exactly",
+    "category": "stored_value",
+    "source_basis": "23:59:59.9999999 is a valid source value.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_default) VALUES ('X','2025-01-01','23:59:59.9999999') RETURNING t_default::text;",
+    "expected_result": "23:59:59.9999999"
+  },
+  {
+    "name": "SMALLDATETIME rounds seconds 29",
+    "category": "assignment",
+    "source_basis": "Source assignment rounds to the nearest minute; valid input must not simply be rejected.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/smalldatetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_smalldt) VALUES ('X','2025-01-01','2025-01-01T12:00:29') RETURNING legacy_smalldt::text;",
+    "expected_result": "2025-01-01 12:00:00"
+  },
+  {
+    "name": "SMALLDATETIME rounds seconds 30",
+    "category": "assignment",
+    "source_basis": "Source assignment rounds to the nearest minute; valid input must not simply be rejected.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/smalldatetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_smalldt) VALUES ('X','2025-01-01','2025-01-01T12:00:30') RETURNING legacy_smalldt::text;",
+    "expected_result": "2025-01-01 12:01:00"
+  },
+  {
+    "name": "DATETIME rounds .001 to tick zero",
+    "category": "assignment",
+    "source_basis": "Legacy DATETIME rounds .001 seconds to .000; stored tick behavior remains broader than this example.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_dt) VALUES ('X','2025-01-01','2025-01-01T12:00:00.001') RETURNING legacy_dt::text;",
+    "expected_result": "2025-01-01 12:00:00"
+  },
+  {
+    "name": "BINARY(16) pads a short binary input",
+    "category": "assignment",
+    "source_basis": "Binary-to-binary conversion pads on the right with zero bytes.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/binary-and-varbinary-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,bin_fixed) VALUES ('X','2025-01-01',decode('ff','hex')) RETURNING encode(bin_fixed,'hex');",
+    "expected_result": "ff000000000000000000000000000000"
+  },
+  {
+    "name": "VARCHAR comparison ignores trailing spaces",
+    "category": "comparison",
+    "source_basis": "SQL Server pads strings for equality comparison, independently of ANSI_PADDING storage settings.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/language-elements/string-comparison-assignment?view=sql-server-ver17",
+    "sql": "INSERT INTO \"Companies\"(code,name) VALUES ('GAP','Gap'); SELECT code='GAP ' FROM \"Companies\" WHERE code='GAP';",
+    "expected_result": "t"
+  },
+  {
+    "name": "NVARCHAR UTF16 supplementary boundary control",
+    "category": "control",
+    "source_basis": "Under an SC source collation, 2000 supplementary characters occupy 4000 UTF-16 units. This control does not establish the unknown source collation.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/nchar-and-nvarchar-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,n_inline_max) VALUES ('X','2025-01-01',repeat(chr(128512),2000)) RETURNING n_inline_max=repeat(chr(128512),2000);",
+    "expected_result": "t"
+  },
+  {
+    "name": "NVARCHAR UTF16 supplementary overflow control",
+    "category": "control",
+    "source_basis": "Under an SC source collation, 2001 supplementary characters exceed NVARCHAR(4000); retain the existing UTF-16 unit guard.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/nchar-and-nvarchar-transact-sql?view=sql-server-ver17",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN EXECUTE q; RETURN false; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE IN ('22001','23514'); END $$; SELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,n_inline_max) VALUES ('X','2025-01-01',repeat(chr(128512),2001))$probe$);",
+    "expected_result": "t"
+  }
+]

@@ -375,6 +375,10 @@ type ForeignKey struct {
 type CheckConstraint struct {
 	Name       string `json:"name"`
 	Definition string `json:"definition"`
+	// Validated records whether the target catalog proves existing rows were
+	// checked. Nil means older snapshots or a reader without that evidence.
+	// Legacy comparison and rendering do not consume this optional metadata.
+	Validated *bool `json:"validated,omitempty"`
 	// DefinitionOverride, when set, is emitted verbatim as the CHECK predicate
 	// instead of translating Definition. Transient, runtime-only (not
 	// persisted) — the AI fix-suggestion splice point for a CHECK (#134),

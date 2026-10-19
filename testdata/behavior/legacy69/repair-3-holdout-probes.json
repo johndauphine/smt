@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Repair 3 held out: adjacent TIME(7) values remain distinct",
+    "category": "stored_value",
+    "source_basis": "Frozen during repair 3 before receiving its response, and excluded from that request. SQL Server TIME(7) distinguishes adjacent 100 ns values. This checks value distinction rather than a particular text rendering; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_default) VALUES ('X','2025-01-01','08:09:10.1234561'),('X','2025-01-01','08:09:10.1234562'); SELECT COUNT(DISTINCT t_default)=2 FROM \"TypeSmoke\";",
+    "expected_result": "t"
+  },
+  {
+    "name": "Repair 3 held out: adjacent DATETIME2(7) values remain distinct",
+    "category": "stored_value",
+    "source_basis": "Frozen during repair 3 before receiving its response, and excluded from that request. Default source DATETIME2 precision is seven fractional digits. This checks value distinction rather than a particular text rendering; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetime2-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"Companies\"(code,name,created_at) VALUES ('HOLD1','First','2026-02-03T08:09:10.7654321'),('HOLD2','Second','2026-02-03T08:09:10.7654322'); SELECT COUNT(DISTINCT created_at)=2 FROM \"Companies\";",
+    "expected_result": "t"
+  },
+  {
+    "name": "Repair 3 held out: trailing-space duplicate company code rejected",
+    "category": "comparison",
+    "source_basis": "Frozen during repair 3 before receiving its response, and excluded from that request. SQL Server comparison padding makes these ASCII codes equal for uniqueness. No assumption about case/accent sensitivity and no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/language-elements/string-comparison-assignment?view=sql-server-ver17",
+    "sql": "INSERT INTO \"Companies\"(code,name) VALUES ('PAD','First'); CREATE FUNCTION pg_temp.rejects(q text) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN EXECUTE q; RETURN false; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE='23505'; END $$; SELECT pg_temp.rejects($probe$INSERT INTO \"Companies\"(code,name) VALUES ('PAD   ','Second')$probe$);",
+    "expected_result": "t"
+  }
+]

@@ -74,7 +74,8 @@ import (
 // "20": public schema-evolution rendering adds deterministic drop, ALTER,
 // default, and truncate operations, including explicit session-affinity
 // batches for destructive MySQL and SQLite paths.
-const RendererVersion = "20"
+// "21": opt-in SQL Server to PostgreSQL fidelity constraints; legacy SQL is unchanged.
+const RendererVersion = "21"
 
 // ClickHouseNullableCompositeError reports a nullable composite that ClickHouse
 // cannot represent as Nullable(T). Rewriting it to Array(Nullable(T)) would

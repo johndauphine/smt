@@ -27,6 +27,8 @@ target:
 schema_generation:
   mode: deterministic                  # deterministic
   unknown_type_policy: fail            # fail | warn | text_fallback
+  # fidelity_profile: legacy           # legacy (default) | checked | strict
+                                       # checked/strict: MSSQL -> PostgreSQL only
 
 ai_review:
   enabled: false                       # optional review of deterministic DDL

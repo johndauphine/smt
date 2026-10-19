@@ -1,0 +1,497 @@
+{
+  "suite": "behavior-v1",
+  "reference_engine": {
+    "runtime": "wslc 3.0.3.0",
+    "image": "mcr.microsoft.com/azure-sql-edge@sha256:3544cf1c6847c5cb60e071638c48b1b45d05a64eb2d88d0f83d44b397f40b186",
+    "image_id": "sha256:9d0e27694fc9e99e3bfbe807eff0dc6a930d9d2af9d878845de7b819257c7ada",
+    "image_digests": [
+      "mcr.microsoft.com/azure-sql-edge@sha256:3544cf1c6847c5cb60e071638c48b1b45d05a64eb2d88d0f83d44b397f40b186"
+    ],
+    "client_sha256": "466c03c2e1546bcc7cb31a68fcb51cfaf09bcf01087b7ff9689c37c7d0e717ef",
+    "isolation": {
+      "network": "none",
+      "user": "mssql",
+      "host_bind_mounts": false,
+      "published_ports": false
+    },
+    "container_id": "489e1dc47b726d13bac0ff89c1100ad308870143fdc79ecf4778acc9d497c425",
+    "server": {
+      "ok": true,
+      "rows": [
+        {
+          "collation": "Latin1_General_100_BIN2",
+          "compatibility_level": 150,
+          "product_version": "15.0.2000.1574",
+          "session_options": "22392",
+          "version": "Microsoft Azure SQL Edge Developer (RTM) - 15.0.2000.1574 (ARM64) \n\tJan 25 2023 10:36:08 \n\tCopyright (C) 2019 Microsoft Corporation\n\tLinux (Ubuntu 18.04.6 LTS aarch64) <ARM64>"
+        }
+      ]
+    }
+  },
+  "settings": "SET NOCOUNT ON; SET XACT_ABORT ON; SET ANSI_NULLS ON;\nSET ANSI_WARNINGS ON; SET QUOTED_IDENTIFIER ON; SET ANSI_PADDING ON;\nSET CONCAT_NULL_YIELDS_NULL ON; SET NUMERIC_ROUNDABORT OFF; SET ARITHABORT ON;",
+  "cases": [
+    {
+      "id": "tiny_insert_0",
+      "observation": {
+        "kind": "value",
+        "value": "0"
+      }
+    },
+    {
+      "id": "tiny_insert_1",
+      "observation": {
+        "kind": "value",
+        "value": "1"
+      }
+    },
+    {
+      "id": "tiny_insert_254",
+      "observation": {
+        "kind": "value",
+        "value": "254"
+      }
+    },
+    {
+      "id": "tiny_insert_255",
+      "observation": {
+        "kind": "value",
+        "value": "255"
+      }
+    },
+    {
+      "id": "tiny_insert_reject_-1",
+      "observation": {
+        "kind": "rejection",
+        "category": "range"
+      }
+    },
+    {
+      "id": "tiny_update_reject_-1",
+      "observation": {
+        "kind": "rejection",
+        "category": "range"
+      }
+    },
+    {
+      "id": "tiny_insert_reject_256",
+      "observation": {
+        "kind": "rejection",
+        "category": "range"
+      }
+    },
+    {
+      "id": "tiny_update_reject_256",
+      "observation": {
+        "kind": "rejection",
+        "category": "range"
+      }
+    },
+    {
+      "id": "tiny_update_255",
+      "observation": {
+        "kind": "value",
+        "value": "255"
+      }
+    },
+    {
+      "id": "tiny_null",
+      "observation": {
+        "kind": "value",
+        "value": "null"
+      }
+    },
+    {
+      "id": "payload_null",
+      "observation": {
+        "kind": "value",
+        "value": "null"
+      }
+    },
+    {
+      "id": "tiny_default",
+      "observation": {
+        "kind": "value",
+        "value": "7"
+      }
+    },
+    {
+      "id": "tiny_bound_255",
+      "observation": {
+        "kind": "value",
+        "value": "255"
+      }
+    },
+    {
+      "id": "tiny_bound_256",
+      "observation": {
+        "kind": "rejection",
+        "category": "range"
+      }
+    },
+    {
+      "id": "tiny_cast_255",
+      "observation": {
+        "kind": "value",
+        "value": "255"
+      }
+    },
+    {
+      "id": "tiny_cast_256",
+      "observation": {
+        "kind": "rejection",
+        "category": "range"
+      }
+    },
+    {
+      "id": "binary_insert_0",
+      "observation": {
+        "kind": "value",
+        "value": "0"
+      }
+    },
+    {
+      "id": "binary_insert_1",
+      "observation": {
+        "kind": "value",
+        "value": "1"
+      }
+    },
+    {
+      "id": "binary_insert_49",
+      "observation": {
+        "kind": "value",
+        "value": "49"
+      }
+    },
+    {
+      "id": "binary_insert_50",
+      "observation": {
+        "kind": "value",
+        "value": "50"
+      }
+    },
+    {
+      "id": "binary_update_50",
+      "observation": {
+        "kind": "value",
+        "value": "50"
+      }
+    },
+    {
+      "id": "binary_insert_51",
+      "observation": {
+        "kind": "rejection",
+        "category": "length"
+      }
+    },
+    {
+      "id": "binary_update_51",
+      "observation": {
+        "kind": "rejection",
+        "category": "length"
+      }
+    },
+    {
+      "id": "binary_bound_50",
+      "observation": {
+        "kind": "value",
+        "value": "50"
+      }
+    },
+    {
+      "id": "binary_bound_51",
+      "observation": {
+        "kind": "rejection",
+        "category": "length"
+      }
+    },
+    {
+      "id": "binary_default",
+      "observation": {
+        "kind": "value",
+        "value": "AB"
+      }
+    },
+    {
+      "id": "binary_explicit_preassignment_truncation",
+      "observation": {
+        "kind": "value",
+        "value": "50"
+      }
+    },
+    {
+      "id": "binary_native_equality",
+      "observation": {
+        "kind": "value",
+        "value": "equal"
+      }
+    },
+    {
+      "id": "tiny_native_arithmetic_order",
+      "observation": {
+        "kind": "value",
+        "value": "255"
+      }
+    },
+    {
+      "id": "not_null",
+      "observation": {
+        "kind": "rejection",
+        "category": "nullability"
+      }
+    },
+    {
+      "id": "primary_key",
+      "observation": {
+        "kind": "rejection",
+        "category": "unique"
+      }
+    },
+    {
+      "id": "unique_code",
+      "observation": {
+        "kind": "rejection",
+        "category": "unique"
+      }
+    },
+    {
+      "id": "decimal_999.99",
+      "observation": {
+        "kind": "value",
+        "value": "999.99"
+      }
+    },
+    {
+      "id": "decimal_1.235",
+      "observation": {
+        "kind": "value",
+        "value": "1.24"
+      }
+    },
+    {
+      "id": "decimal_1000",
+      "observation": {
+        "kind": "rejection",
+        "category": "range"
+      }
+    },
+    {
+      "id": "fixed_padding_1",
+      "observation": {
+        "kind": "value",
+        "value": "AB000000000000000000000000000000"
+      }
+    },
+    {
+      "id": "fixed_padding_16",
+      "observation": {
+        "kind": "value",
+        "value": "ABABABABABABABABABABABABABABABAB"
+      }
+    },
+    {
+      "id": "fixed_padding_17",
+      "observation": {
+        "kind": "rejection",
+        "category": "length"
+      }
+    },
+    {
+      "id": "time0_insert_00:00:00",
+      "observation": {
+        "kind": "value",
+        "value": "00:00:00"
+      }
+    },
+    {
+      "id": "time0_insert_12:34:56.500000",
+      "observation": {
+        "kind": "value",
+        "value": "12:34:57"
+      }
+    },
+    {
+      "id": "time0_insert_23:59:59.500000",
+      "observation": {
+        "kind": "value",
+        "value": "23:59:59"
+      }
+    },
+    {
+      "id": "time0_update_23:59:59.500000",
+      "observation": {
+        "kind": "value",
+        "value": "23:59:59"
+      }
+    },
+    {
+      "id": "time0_insert_23:59:59.9999999",
+      "observation": {
+        "kind": "value",
+        "value": "23:59:59"
+      }
+    },
+    {
+      "id": "time0_insert_24:00:00",
+      "observation": {
+        "kind": "rejection",
+        "category": "datetime"
+      }
+    },
+    {
+      "id": "time0_update_24:00:00",
+      "observation": {
+        "kind": "rejection",
+        "category": "datetime"
+      }
+    },
+    {
+      "id": "time3_insert_12:34:56.1234",
+      "observation": {
+        "kind": "value",
+        "value": "12:34:56.123"
+      }
+    },
+    {
+      "id": "time3_insert_23:59:59.999500",
+      "observation": {
+        "kind": "value",
+        "value": "23:59:59.999"
+      }
+    },
+    {
+      "id": "time3_update_23:59:59.999500",
+      "observation": {
+        "kind": "value",
+        "value": "23:59:59.999"
+      }
+    },
+    {
+      "id": "time3_insert_23:59:59.9999999",
+      "observation": {
+        "kind": "value",
+        "value": "23:59:59.999"
+      }
+    },
+    {
+      "id": "time3_insert_24:00:00",
+      "observation": {
+        "kind": "rejection",
+        "category": "datetime"
+      }
+    },
+    {
+      "id": "time3_update_24:00:00",
+      "observation": {
+        "kind": "rejection",
+        "category": "datetime"
+      }
+    },
+    {
+      "id": "legacy_2025-01-01T12:00:00.004",
+      "observation": {
+        "kind": "value",
+        "value": "2025-01-01 12:00:00.003"
+      }
+    },
+    {
+      "id": "legacy_2025-01-01T23:59:59.999",
+      "observation": {
+        "kind": "value",
+        "value": "2025-01-02 00:00:00.000"
+      }
+    },
+    {
+      "id": "minute_2025-01-01T12:00:29.999",
+      "observation": {
+        "kind": "value",
+        "value": "2025-01-01 12:01:00.000"
+      }
+    },
+    {
+      "id": "unicode_supplementary_1",
+      "observation": {
+        "kind": "value",
+        "value": "😀"
+      }
+    },
+    {
+      "id": "unicode_supplementary_2",
+      "observation": {
+        "kind": "rejection",
+        "category": "length"
+      }
+    },
+    {
+      "id": "time0_typed_maximum",
+      "observation": {
+        "kind": "value",
+        "value": "23:59:59"
+      }
+    },
+    {
+      "id": "time3_typed_maximum",
+      "observation": {
+        "kind": "value",
+        "value": "23:59:59.999"
+      }
+    },
+    {
+      "id": "tiny_update_null",
+      "observation": {
+        "kind": "value",
+        "value": "null"
+      }
+    },
+    {
+      "id": "payload_update_null",
+      "observation": {
+        "kind": "value",
+        "value": "null"
+      }
+    },
+    {
+      "id": "tiny_bound_negative",
+      "observation": {
+        "kind": "rejection",
+        "category": "range"
+      }
+    },
+    {
+      "id": "binary_cast_unbounded_51",
+      "observation": {
+        "kind": "rejection",
+        "category": "length"
+      }
+    },
+    {
+      "id": "tiny_native_order",
+      "observation": {
+        "kind": "value",
+        "value": "0"
+      }
+    },
+    {
+      "id": "unique_nullable_two_nulls",
+      "observation": {
+        "kind": "rejection",
+        "category": "unique"
+      }
+    },
+    {
+      "id": "ordinary_index_exists",
+      "observation": {
+        "kind": "value",
+        "value": "index"
+      }
+    },
+    {
+      "id": "decimal_update_boundary",
+      "observation": {
+        "kind": "value",
+        "value": "999.99"
+      }
+    }
+  ],
+  "fresh_source_runs": 2
+}
