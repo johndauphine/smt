@@ -31,11 +31,19 @@ context that does not render side objects.
 Checked create/apply refuses existing tables before executing its plan. Live
 drift/sync recognizes generated checks by expected name, supported predicate and
 validated catalog status. Exact binary defaults compare by parsed bytes. New
-tables and verified no-ops are supported; existing-table evolution, profile
+tables and verified no-ops within the assessed comparison scope are supported.
+Existing tables with managed source CHECK predicates or managed filtered indexes
+on either side explicitly refuse verification: matching names, counts or
+predicate text do not establish cross-dialect predicate equivalence. The source
+check/index management flags gate that refusal; generated fidelity checks remain
+required. Detected existing-table changes, profile
 transitions and snapshot-based opt-in sync explicitly refuse before returning a
 partial plan. Optional manifests carry profile, semantics version, requirements
 and findings; opt-in input and plan hashes distinguish policies. Renderer version
 21 records the new capability. AI did not author any executable migration SQL.
+A checked no-op does not establish cross-dialect computed-expression
+equivalence; that behavior remains a finding, and strict refuses computed-column
+semantics.
 
 ## Validation results
 
@@ -46,7 +54,7 @@ and findings; opt-in input and plan hashes distinguish policies. Renderer versio
 | DMT pinned dependency and candidate | Both pass | Adapter/driver/generic writer tests and CLI build pass without changing DMT source or dependencies. |
 | Independent source oracle | 66/66 agree in two fresh databases | Expectations are frozen from live source observations before target evaluation. |
 | Checked behavioral suite | 47/66, repeated identically | 42/43 simple cases and 5/23 edge cases match the source; all covered tinyint/varbinary restrictions and literal defaults pass. |
-| Live checked lifecycle | 24/24 | Create/introspect and repeated sync are no-ops; missing, altered or unvalidated restrictions and wrong defaults are detected and refused. |
+| Live checked lifecycle | 24/24 | The fixture has no managed source CHECK predicates or filtered indexes. Create/introspect and repeated sync are no-ops; missing, altered or unvalidated generated restrictions and wrong defaults are detected and refused. |
 | Historical CRM regression suite | Legacy 31/69; checked 34/69 | All 31 prior passing cases are retained; both tinyint rejection boundaries and varbinary overflow now pass. |
 
 The full unit suite ran in a disposable Linux copy. SQL and `.golden` files in
@@ -90,18 +98,25 @@ interfaces need further work; a stored-byte CHECK does not reproduce all
 source-side casts. Optional AI semantic review has not been extended in this
 milestone. It remains a later diagnostic layer over deterministic SQL.
 
-Checked/strict do not support altering existing schemas yet. Source check
-expression semantics and cross-table side-object naming remain subject to the
-existing renderer's limitations. Strict's assessed scope must not be advertised
-as full schema behavioral equivalence.
+Checked/strict do not support altering existing schemas yet. Opt-in drift/sync
+also refuse existing-table verification when managed source CHECK predicates or
+managed filtered indexes need comparison, including unchanged predicates. The
+refusal reports missing equivalence verification and returns no partial plan.
+New-table predicate rendering and cross-table side-object naming remain subject
+to the existing renderer's limitations. Strict's assessed scope must not be
+advertised as full schema behavioral equivalence.
 
-Live source evidence uses the pinned retired Azure SQL Edge ARM64 build
-15.0.2000.1574 and PostgreSQL 17.11. Before a release claim, run the supported
-SQL Server acceptance gate and the full nine-pair CRM matrix. Race-detector and
-golangci-lint gates remain outstanding because the WSL environment lacks a C
-compiler and golangci-lint. No new live AI request was needed. The user authorized
-a local branch commit after validation. No push, merge, release, or deployment
-was performed.
+The 66-case source oracle uses the pinned retired Azure SQL Edge ARM64 build
+15.0.2000.1574 and PostgreSQL 17.11. That behavioral oracle has not yet been run
+against a supported SQL Server release, so its Edge-specific results must not be
+advertised as a completed supported-SQL-Server behavioral gate.
+
+The branch has been pushed and a pull request is open. Initial commit `673221b`
+passed all five CI jobs, including the race detector, lint and full nine-pair CRM
+matrix ([CI run](https://github.com/johndauphine/smt/actions/runs/39333537903)).
+The follow-up predicate-verification and fingerprint fixes require a fresh CI run
+before merge. No new live AI request was needed. No merge, release or deployment
+has been performed.
 
 ## Local evidence
 

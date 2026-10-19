@@ -57,6 +57,94 @@ func TestFidelityLifecycleNoOpExactChecks(t *testing.T) {
 	}
 }
 
+func TestFidelityLifecycleRefusesUnverifiedManagedPredicates(t *testing.T) {
+	for _, profile := range []fidelity.Profile{fidelity.Checked, fidelity.Strict} {
+		for _, threshold := range []string{"5", "10"} {
+			for _, kind := range []string{"source check", "unique filtered index", "ordinary filtered index", "target filtered index"} {
+				t.Run(string(profile)+"/"+kind+"/target-bound-"+threshold, func(t *testing.T) {
+					want := driver.Table{Schema: "public", Name: "limits", Columns: []driver.Column{{Name: "value", DataType: "int"}}}
+					have := deepCopyTable(want)
+					have.Columns[0].DataType = "integer"
+					if kind == "source check" {
+						want.CheckConstraints = []driver.CheckConstraint{{Name: "ck_bound", Definition: "[value] >= 5"}}
+						have.CheckConstraints = []driver.CheckConstraint{{Name: "ck_bound", Definition: "value >= " + threshold}}
+					} else {
+						want.Indexes = []driver.Index{{Name: "ix_bound", Columns: []string{"value"}, IsUnique: kind == "unique filtered index", Filter: "[value] >= 5"}}
+						have.Indexes = []driver.Index{{Name: "ix_bound", Columns: []string{"value"}, IsUnique: kind == "unique filtered index", Filter: "value >= " + threshold}}
+						if kind == "target filtered index" {
+							want.Indexes[0].Filter = ""
+						}
+					}
+					desired, existing := []driver.Table{want}, []driver.Table{have}
+					options := DefaultDriftOptions()
+					drift, _, err := ComputeDriftWithFidelity(desired, existing, "mssql", "postgres", options, profile)
+					var unsupported *FidelityEvolutionError
+					if !errors.As(err, &unsupported) || !strings.Contains(unsupported.Reason, "cannot verify") || !reflect.DeepEqual(drift, Drift{}) {
+						t.Fatalf("unverified predicate returned successful drift report: %#v, %v", drift, err)
+					}
+					// A new table preceding the unverifiable existing table must
+					// not escape as a partial executable migration.
+					desired = append([]driver.Table{{Name: "new_table", Columns: []driver.Column{{Name: "id", DataType: "int"}}}}, desired...)
+					diff, _, err := ComputeLiveDiffWithFidelity(desired, existing, "mssql", "postgres", options, profile)
+					if !errors.As(err, &unsupported) || !reflect.DeepEqual(diff, Diff{}) {
+						t.Fatalf("unverified predicate returned partial diff: %#v, %v", diff, err)
+					}
+					legacyDrift, _, err := ComputeDriftWithFidelity(desired, existing, "mssql", "postgres", options, fidelity.Legacy)
+					if err != nil || !reflect.DeepEqual(legacyDrift, ComputeDrift(desired, existing, "mssql", "postgres", options)) {
+						t.Fatalf("legacy drift changed: %#v, %v", legacyDrift, err)
+					}
+					legacyDiff, _, err := ComputeLiveDiffWithFidelity(desired, existing, "mssql", "postgres", options, fidelity.Legacy)
+					if err != nil || !reflect.DeepEqual(legacyDiff, ComputeLiveDiff(desired, existing, "mssql", "postgres", options)) {
+						t.Fatalf("legacy sync changed: %#v, %v", legacyDiff, err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestFidelityLifecyclePredicateRefusalHonorsManagedOptions(t *testing.T) {
+	for _, profile := range []fidelity.Profile{fidelity.Checked, fidelity.Strict} {
+		want := driver.Table{Name: "limits", Columns: []driver.Column{{Name: "value", DataType: "int"}},
+			CheckConstraints: []driver.CheckConstraint{{Name: "ck_bound", Definition: "[value] >= 5"}},
+			Indexes:          []driver.Index{{Name: "ix_bound", Columns: []string{"value"}, IsUnique: true, Filter: "[value] >= 5"}}}
+		have := driver.Table{Name: "limits", Columns: []driver.Column{{Name: "value", DataType: "integer"}}, Indexes: []driver.Index{{Name: "ix_bound", Columns: []string{"value"}, IsUnique: true, Filter: "value >= 10"}}}
+		desired, existing := []driver.Table{want}, []driver.Table{have}
+		drift, _, err := ComputeDriftWithFidelity(desired, existing, "mssql", "postgres", DriftOptions{}, profile)
+		if err != nil || !drift.IsEmpty() {
+			t.Fatalf("disabled source predicates unexpectedly compared: %#v, %v", drift, err)
+		}
+		diff, _, err := ComputeLiveDiffWithFidelity(desired, existing, "mssql", "postgres", DriftOptions{}, profile)
+		if err != nil || !diff.IsEmpty() {
+			t.Fatalf("disabled source predicates unexpectedly planned: %#v, %v", diff, err)
+		}
+		// Target checks outside current generated requirements retain the
+		// existing conservative behavior even when source checks are unmanaged.
+		existing[0].CheckConstraints = []driver.CheckConstraint{{Name: "unexplained", Definition: "value >= 10"}}
+		drift, _, err = ComputeDriftWithFidelity(desired, existing, "mssql", "postgres", DriftOptions{}, profile)
+		if err != nil || drift.IsEmpty() || !strings.Contains(drift.ChangedTables[0].CheckDrift, "unexplained restrictions") {
+			t.Fatalf("disabled CHECK comparison bypassed existing unexplained-check behavior: %#v, %v", drift, err)
+		}
+	}
+}
+
+func TestFidelityLifecycleManagedPredicatesAllowNewTables(t *testing.T) {
+	for _, profile := range []fidelity.Profile{fidelity.Checked, fidelity.Strict} {
+		want := driver.Table{Schema: "public", Name: "limits", Columns: []driver.Column{{Name: "value", DataType: "int"}},
+			CheckConstraints: []driver.CheckConstraint{{Name: "ck_bound", Definition: "[value] >= 5"}},
+			Indexes:          []driver.Index{{Name: "ix_bound", Columns: []string{"value"}, IsUnique: true, Filter: "[value] >= 5"}}}
+		managed := DefaultDriftOptions()
+		diff, _, err := ComputeLiveDiffWithFidelity([]driver.Table{want}, nil, "mssql", "postgres", managed, profile)
+		if err != nil || len(diff.AddedTables) != 1 {
+			t.Fatalf("new table predicates refused: %#v, %v", diff, err)
+		}
+		plan, err := RenderLiveDiffWithFidelity(diff, RenderOptions{SourceDialect: "mssql", TargetDialect: "postgres", TargetSchema: "public"}, managed, profile)
+		if err != nil || len(plan.Statements) != 3 {
+			t.Fatalf("new table predicate plan changed: %#v, %v", plan, err)
+		}
+	}
+}
+
 func TestFidelityLifecycleStrictRejectsNullableUniqueEvenWhenSideObjectsUnmanaged(t *testing.T) {
 	desired := []driver.Table{{Schema: "public", Name: "nullable_key", Columns: []driver.Column{{Name: "key", DataType: "int", IsNullable: true}}, Indexes: []driver.Index{{Name: "uq_key", Columns: []string{"key"}, IsUnique: true}}}}
 	diff, assessment, err := ComputeLiveDiffWithFidelity(desired, nil, "mssql", "postgres", DriftOptions{}, fidelity.Checked)

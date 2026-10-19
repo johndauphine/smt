@@ -65,6 +65,9 @@ func prepareFidelityComparison(desired, existing []driver.Table, source, target 
 			continue
 		}
 		have := &result.existing[index]
+		if err := refuseUnverifiedManagedPredicates(table, *have, opts); err != nil {
+			return result, err
+		}
 		if strings.TrimSpace(source) != "" {
 			result.columnDrift[table.Name] = normalizeFidelityBinaryDefaults(&result.desired[i], have, source)
 			if len(result.columnDrift[table.Name]) == 0 {
@@ -108,9 +111,39 @@ func prepareFidelityComparison(desired, existing []driver.Table, source, target 
 	return result, nil
 }
 
+// The legacy comparators intentionally use CHECK counts and filtered-index
+// presence rather than cross-dialect predicate equivalence. Opt-in comparisons
+// must not interpret those coarse matches as verified unchanged restrictions.
+// Generated fidelity checks use their separate exact predicate comparison.
+func refuseUnverifiedManagedPredicates(want, have driver.Table, opts DriftOptions) error {
+	var predicates []string
+	if opts.CompareChecks && len(want.CheckConstraints) > 0 {
+		predicates = append(predicates, "managed source CHECK predicates")
+	}
+	if opts.CompareIndexes {
+		filtered := false
+		for _, indexes := range [][]driver.Index{want.Indexes, have.Indexes} {
+			for _, index := range indexes {
+				if strings.TrimSpace(index.Filter) != "" {
+					filtered = true
+					break
+				}
+			}
+		}
+		if filtered {
+			predicates = append(predicates, "managed filtered-index predicates")
+		}
+	}
+	if len(predicates) == 0 {
+		return nil
+	}
+	return &FidelityEvolutionError{Reason: fmt.Sprintf("cannot verify %s for existing table %q; opt-in drift/sync does not establish cross-dialect predicate equivalence, including when names, counts or predicate text match", strings.Join(predicates, " and "), want.Name)}
+}
+
 // ComputeDriftWithFidelity compares exact current generated checks in addition
 // to the legacy schema dimensions. Desired identifiers must already be target
-// normalized, while columns retain original source types and metadata.
+// normalized, while columns retain original source types and metadata. Existing
+// tables with managed source CHECKs or filtered indexes cannot be verified yet.
 func ComputeDriftWithFidelity(desired, existing []driver.Table, source, target string, opts DriftOptions, profile fidelity.Profile) (Drift, fidelity.Assessment, error) {
 	profile, err := fidelity.ParseProfile(string(profile))
 	if err != nil {
@@ -157,6 +190,8 @@ func ComputeDriftWithFidelity(desired, existing []driver.Table, source, target s
 // ComputeLiveDiffWithFidelity currently supports new tables and exact no-op
 // comparisons. Existing-table evolution and profile transitions fail explicitly
 // before rendering, including bound changes invisible in a bytea type alone.
+// Managed source CHECKs and filtered indexes also refuse existing-table
+// verification until their cross-dialect predicate equivalence is established.
 func ComputeLiveDiffWithFidelity(desired, existing []driver.Table, source, target string, opts DriftOptions, profile fidelity.Profile) (Diff, fidelity.Assessment, error) {
 	profile, err := fidelity.ParseProfile(string(profile))
 	if err != nil {

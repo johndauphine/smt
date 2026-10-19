@@ -62,6 +62,26 @@ func TestFidelitySyncManifestAndLegacyFingerprint(t *testing.T) {
 	}
 }
 
+func TestLegacySyncFingerprintPreservesEmptyConstraintList(t *testing.T) {
+	// Existing snapshots distinguish an absent list from an explicitly empty
+	// list in JSON. Neither representation may change when validation evidence
+	// is removed for the legacy fingerprint.
+	for _, checks := range [][]driver.CheckConstraint{nil, {}} {
+		tables := []driver.Table{{Name: "empty", CheckConstraints: checks}}
+		before, err := json.Marshal(tables)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := json.Marshal(syncFingerprintTables(tables))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(before) != string(after) {
+			t.Fatalf("legacy snapshot representation changed: before=%s after=%s", before, after)
+		}
+	}
+}
+
 func TestFidelityFlagsOnSyncAndDrift(t *testing.T) {
 	for _, command := range []struct {
 		name string

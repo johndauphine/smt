@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -719,7 +720,7 @@ func syncFingerprintTables(tables []driver.Table) []driver.Table {
 		out[i].RowCount = 0
 		out[i].EstimatedRowSize = 0
 		out[i].Columns = append([]driver.Column(nil), tables[i].Columns...)
-		out[i].CheckConstraints = append([]driver.CheckConstraint(nil), tables[i].CheckConstraints...)
+		out[i].CheckConstraints = slices.Clone(tables[i].CheckConstraints)
 		for j := range out[i].CheckConstraints {
 			// Optional catalog validation evidence was absent from legacy
 			// snapshots; it must not change their established fingerprint.
