@@ -86,6 +86,20 @@ snapshots, manifests, and renderer versions.
 
 ## Contribution and safety principles
 
+- Always do implementation work on a dedicated topic branch, never directly on
+  `main` or `master`. Reuse the appropriate current task branch, or create a
+  descriptive `codex/` branch before editing. Do not switch away from unrelated
+  work or overwrite it.
+- Commit completed, reviewed work on that branch after relevant verification.
+  This is the user's standing authorization for local commits unless the user
+  explicitly asks to leave work uncommitted. Keep commits scoped and report the
+  branch, commit, validation, and any remaining gates.
+- Gate every merge on a successful review of the current candidate. Resolve all
+  blocking review findings and pass the required checks before merging. Review
+  approval for an older revision does not cover subsequent substantive changes;
+  obtain a fresh review of those changes. User authorization to merge does not
+  waive this review gate.
+
 - Preserve public `schema` API compatibility. Additive capability interfaces are
   preferred; unsupported dialect features should return typed errors.
 - Keep schema diffing structural and deterministic. Risk labels and
@@ -99,5 +113,5 @@ snapshots, manifests, and renderer versions.
 - Never commit credentials, local configuration, state databases, runtime
   `schema.sql`/`migration.sql` artifacts, or acceptance outputs. Follow
   `.gitignore` and update tracked examples when configuration contracts change.
-- Keep changes scoped and preserve unrelated user work. Do not commit, push,
-  publish, or merge unless explicitly requested.
+- Keep changes scoped and preserve unrelated user work. Pushing, publishing,
+  merging, and releasing still require the user's explicit request.

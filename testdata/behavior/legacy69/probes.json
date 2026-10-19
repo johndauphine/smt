@@ -1,0 +1,94 @@
+[
+  {
+    "name": "numeric(38,10) maximum exact value",
+    "sql": "INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,num_max_prec) VALUES ('X','2025-01-01',9999999999999999999999999999.9999999999) RETURNING num_max_prec=9999999999999999999999999999.9999999999;"
+  },
+  {
+    "name": "numeric(38,10) overflow rejected",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,num_max_prec) VALUES ('X','2025-01-01',10000000000000000000000000000)$probe$, ARRAY['22003']);"
+  },
+  {
+    "name": "decimal(1,0) negative boundary accepted",
+    "sql": "INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,dec_min_prec) VALUES ('X','2025-01-01',-9) RETURNING dec_min_prec=-9;"
+  },
+  {
+    "name": "decimal(1,0) overflow rejected",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,dec_min_prec) VALUES ('X','2025-01-01',10)$probe$, ARRAY['22003']);"
+  },
+  {
+    "name": "tinyint upper boundary accepted",
+    "sql": "INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,tiny_col) VALUES ('X','2025-01-01',255) RETURNING tiny_col=255;"
+  },
+  {
+    "name": "tinyint below range rejected",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,tiny_col) VALUES ('X','2025-01-01',-1)$probe$, ARRAY['23514','22003']);"
+  },
+  {
+    "name": "tinyint above range rejected",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,tiny_col) VALUES ('X','2025-01-01',256)$probe$, ARRAY['23514','22003']);"
+  },
+  {
+    "name": "varchar(1) overlength rejected",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\"(s_min,dt2_p0) VALUES ('XX','2025-01-01')$probe$, ARRAY['22001','23514']);"
+  },
+  {
+    "name": "varchar(8000) boundary accepted",
+    "sql": "INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,s_inline_max) VALUES ('X','2025-01-01',repeat('x',8000)) RETURNING length(s_inline_max)=8000;"
+  },
+  {
+    "name": "varchar(8000) overlength rejected",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,s_inline_max) VALUES ('X','2025-01-01',repeat('x',8001))$probe$, ARRAY['22001','23514']);"
+  },
+  {
+    "name": "nvarchar(4000) BMP boundary accepted",
+    "sql": "INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,n_inline_max) VALUES ('X','2025-01-01',repeat('x',4000)) RETURNING length(n_inline_max)=4000;"
+  },
+  {
+    "name": "nvarchar(4000) BMP overlength rejected",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,n_inline_max) VALUES ('X','2025-01-01',repeat('x',4001))$probe$, ARRAY['22001','23514']);"
+  },
+  {
+    "name": "varbinary(50) boundary accepted",
+    "sql": "INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,vbin_sized) VALUES ('X','2025-01-01',decode(repeat('ff',50),'hex')) RETURNING octet_length(vbin_sized)=50;"
+  },
+  {
+    "name": "varbinary(50) overlength rejected",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,vbin_sized) VALUES ('X','2025-01-01',decode(repeat('ff',51),'hex'))$probe$, ARRAY['22001','23514']);"
+  },
+  {
+    "name": "binary(16) exact size accepted",
+    "sql": "INSERT INTO \"TypeSmoke\" (s_min,dt2_p0,bin_fixed) VALUES ('X','2025-01-01',decode(repeat('ff',16),'hex')) RETURNING octet_length(bin_fixed)=16;"
+  },
+  {
+    "name": "NOT NULL s_min enforced",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\"(s_min,dt2_p0) VALUES (NULL,'2025-01-01')$probe$, ARRAY['23502']);"
+  },
+  {
+    "name": "numeric and char defaults",
+    "sql": "INSERT INTO \"TypeSmoke\" (s_min,dt2_p0) VALUES ('X','2025-01-01') RETURNING num_max_prec=0 AND ch_min='Y';"
+  },
+  {
+    "name": "products decimal rounding and stored margin",
+    "sql": "INSERT INTO \"Products\"(sku,name,unit_price,cost_price) VALUES ('A','A',1.235,1.00) RETURNING unit_price=1.24 AND margin=0.24;"
+  },
+  {
+    "name": "product negative price CHECK",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"Products\"(sku,name,unit_price) VALUES ('A','A',-1)$probe$, ARRAY['23514']);"
+  },
+  {
+    "name": "foreign key enforcement",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"Departments\"(company_id,name,code) VALUES (-999,'A','A')$probe$, ARRAY['23503']);"
+  },
+  {
+    "name": "composite uniqueness enforced",
+    "sql": "INSERT INTO \"Companies\"(code,name) VALUES ('A','A');\nINSERT INTO \"Departments\"(company_id,name,code) SELECT id,'A','A' FROM \"Companies\";\nCREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"Departments\"(company_id,name,code) SELECT id,'B','A' FROM \"Companies\"$probe$, ARRAY['23505']);"
+  },
+  {
+    "name": "tag hexadecimal predicate accepts valid color",
+    "sql": "INSERT INTO \"Companies\"(code,name) VALUES ('A','A');\nINSERT INTO \"Tags\"(company_id,name,color) SELECT id,'x','#aB019F' FROM \"Companies\" RETURNING color='#aB019F';"
+  },
+  {
+    "name": "tag hexadecimal predicate rejects bad color",
+    "sql": "INSERT INTO \"Companies\"(code,name) VALUES ('A','A');\nCREATE FUNCTION pg_temp.rejects(q text, allowed text[]) RETURNS boolean LANGUAGE plpgsql AS $$\nBEGIN EXECUTE q; RETURN false;\nEXCEPTION WHEN OTHERS THEN RETURN SQLSTATE = ANY(allowed);\nEND $$;\nSELECT pg_temp.rejects($probe$INSERT INTO \"Tags\"(company_id,name,color) SELECT id,'x','#GGGGGG' FROM \"Companies\"$probe$, ARRAY['23514']);"
+  }
+]

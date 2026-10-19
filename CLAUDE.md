@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Branch and commit workflow
+
+Follow the repository's [agent guide](AGENTS.md). Always use a dedicated topic
+branch (`codex/` by default), never commit implementation directly to `main` or
+`master`, and commit completed work after relevant verification unless the user
+asks to leave it uncommitted. This standing local-commit preference does not
+authorize pushing, merging, publishing, or releasing.
+Merging also requires a successful review of the current candidate, resolution
+of all blocking findings, and passing required checks. Re-review substantive
+changes made after approval; permission to merge does not bypass the review gate.
+
 ## What this project is
 
 SMT is a schema migration tool. It extracts the schema of a source database, generates the matching DDL on a target database, and applies incremental schema changes (ALTER TABLE, CREATE INDEX, ...) detected by diffing the current source schema against a stored snapshot.

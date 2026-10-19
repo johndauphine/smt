@@ -8,6 +8,7 @@ import (
 
 	"github.com/johndauphine/smt/internal/driver"
 	exprir "github.com/johndauphine/smt/internal/expr"
+	"github.com/johndauphine/smt/internal/fidelity"
 	"github.com/johndauphine/smt/internal/logging"
 	"github.com/johndauphine/smt/schema/canonical"
 )
@@ -122,6 +123,16 @@ func RenderCreateCheckConstraintDDLWithSource(t *driver.Table, chk *driver.Check
 }
 
 func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlogged bool) (string, map[string]string, error) {
+	return r.createTableWithChecks(t, targetSchema, unlogged, nil)
+}
+
+// RenderCreateTableWithFidelityChecks adds only deterministic assessed checks.
+// It shares the ordinary table renderer; legacy callers supply no extra checks.
+func RenderCreateTableWithFidelityChecks(t *driver.Table, targetSchema, unknownTypePolicy, sourceDialect string, checks []fidelity.Check) (string, map[string]string, error) {
+	return newDeterministicDDL(unknownTypePolicy).withSource(sourceDialect).createTableWithChecks(t, targetSchema, false, checks)
+}
+
+func (r deterministicDDL) createTableWithChecks(t *driver.Table, targetSchema string, unlogged bool, checks []fidelity.Check) (string, map[string]string, error) {
 	tableName := sanitizePGTableName(t.Name)
 	columnTypes := make(map[string]string, len(t.Columns))
 	lines := make([]string, 0, len(t.Columns)+1)
@@ -144,6 +155,10 @@ func (r deterministicDDL) createTable(t *driver.Table, targetSchema string, unlo
 		pkName := sanitizePGIdentifier("pk_" + tableName)
 		lines = append(lines, fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)",
 			r.dialect.QuoteIdentifier(pkName), strings.Join(cols, ", ")))
+	}
+
+	for _, check := range checks {
+		lines = append(lines, "    "+check.Definition)
 	}
 
 	create := "CREATE TABLE"

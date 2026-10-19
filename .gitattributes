@@ -1,0 +1,5 @@
+# Frozen behavioral inputs and historical archives are hashed byte-for-byte.
+# Preserve the original bytes, including the historical CRLF probe file.
+testdata/behavior/v1/** -text
+testdata/behavior/legacy69/** -text
+testdata/behavior/legacy69/probes.json whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

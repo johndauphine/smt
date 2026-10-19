@@ -1,0 +1,30 @@
+[
+  {
+    "name": "Repair 2 review: t_p0 accepts pre-cast valid seven-digit input",
+    "category": "post_response_target_compatibility",
+    "source_basis": "Added after reading repair 2, not a frozen holdout. Checks whether a previously accepted target assignment path survives. The source-valid TIME(7) maximum is pre-parsed by PostgreSQL to native 24:00:00, losing its original spelling; this is a target-interface regression check, not a live SQL Server observation.",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01',TIME '23:59:59.9999999') RETURNING t_p0::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Repair 2 review: t_p3 accepts pre-cast valid seven-digit input",
+    "category": "post_response_target_compatibility",
+    "source_basis": "Added after reading repair 2, not a frozen holdout. Checks whether a previously accepted target assignment path survives. The source-valid TIME(7) maximum is pre-parsed by PostgreSQL to native 24:00:00, losing its original spelling; this is a target-interface regression check, not a live SQL Server observation.",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01',TIME '23:59:59.9999999') RETURNING t_p3::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Repair 2 review: t_p0 supports native hour extraction",
+    "category": "post_response_target_compatibility",
+    "source_basis": "Added after reading repair 2, not a frozen holdout. Target API compatibility check: a time-valued column should retain the prior candidate's native time operations without a new application cast. This does not claim that PostgreSQL EXTRACT syntax is SQL Server syntax.",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','12:34:56') RETURNING EXTRACT(HOUR FROM t_p0)::integer;",
+    "expected_result": "12"
+  },
+  {
+    "name": "Repair 2 review: t_p3 supports native hour extraction",
+    "category": "post_response_target_compatibility",
+    "source_basis": "Added after reading repair 2, not a frozen holdout. Target API compatibility check: a time-valued column should retain the prior candidate's native time operations without a new application cast. This does not claim that PostgreSQL EXTRACT syntax is SQL Server syntax.",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','12:34:56.123') RETURNING EXTRACT(HOUR FROM t_p3)::integer;",
+    "expected_result": "12"
+  }
+]

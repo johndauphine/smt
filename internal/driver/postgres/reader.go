@@ -630,7 +630,8 @@ func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) erro
 	rows, err := r.sqlDB.QueryContext(ctx, `
 		SELECT
 			c.conname,
-			pg_get_expr(c.conbin, c.conrelid) AS definition
+			pg_get_expr(c.conbin, c.conrelid) AS definition,
+			c.convalidated
 		FROM pg_constraint c
 		JOIN pg_class cl     ON c.conrelid = cl.oid
 		JOIN pg_namespace ns ON cl.relnamespace = ns.oid
@@ -644,9 +645,11 @@ func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) erro
 
 	for rows.Next() {
 		var chk driver.CheckConstraint
-		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
+		var validated bool
+		if err := rows.Scan(&chk.Name, &chk.Definition, &validated); err != nil {
 			return fmt.Errorf("scanning check constraint for %s.%s: %w", t.Schema, t.Name, err)
 		}
+		chk.Validated = &validated
 		t.CheckConstraints = append(t.CheckConstraints, chk)
 	}
 	return rows.Err()

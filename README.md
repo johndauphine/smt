@@ -86,7 +86,14 @@ ai_review:
 
 PostgreSQL, SQL Server, and MySQL target `smt create` and `smt sync` do not require LM Studio, Ollama, OpenAI, Anthropic, Google, or any other AI provider. SMT introspects source schema metadata, maps source types to target types through deterministic rules, renders target DDL, and writes SQL artifacts under `migration.data_dir`. Use `--apply` to execute generated SQL against a live target.
 
+The unreleased opt-in fidelity profiles add source restrictions and diagnostics
+for SQL Server to PostgreSQL while preserving existing default output and public
+APIs. See [the CLI fidelity contract](docs/cli.md#opt-in-fidelity-profiles),
+[the separate public API](docs/public-fidelity-api.md), and
+[source-backed behavioral acceptance](docs/behavioral-acceptance.md).
+
 ## Optional AI Review
+
 
 AI review is optional. When enabled, the AI reviews deterministic DDL before apply and reports issues. It does not silently rewrite executable SQL.
 

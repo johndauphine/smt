@@ -37,6 +37,49 @@ change in any 1.x release.
 
 ## Command Flags
 
+### Opt-in fidelity profiles
+
+The unreleased `--fidelity legacy|checked|strict` flag is available on `create`,
+`drift`, and `sync`. It overrides `schema_generation.fidelity_profile` only when
+explicitly supplied. An omitted or empty setting preserves legacy SQL and
+behavior. Existing configuration and saved profiles continue to load.
+
+Checked and strict initially support SQL Server to PostgreSQL. Checked adds
+tinyint range and bounded varbinary byte-length constraints, translates literal
+binary defaults deterministically, and reports unresolved source semantics.
+Strict rejects plans containing unresolved findings before returning executable
+SQL. It is a gate over assessed metadata, not a guarantee of complete emulation.
+Both profiles reject unsupported binary default expressions and unsupported
+dialect pairs. AI-authored `--apply-suggested` SQL is refused with these profiles.
+
+```sh
+smt create --fidelity checked --out reviewed.sql
+smt drift --fidelity checked
+smt sync --fidelity checked
+```
+
+Use the same profile for generation and subsequent drift/sync. Checked/strict
+create/apply refuses existing tables rather than trusting their names. Live sync
+supports new tables and a verified no-op against an existing checked schema
+within the assessed comparison scope. Existing tables with managed source CHECK
+predicates or managed filtered indexes on either side return an explicit
+cannot-verify error, even when names, counts or predicate text match. Their
+cross-dialect predicate equivalence has not been established. The
+`migration.create_check_constraints` and `migration.create_indexes` settings
+control whether these source side objects are managed. Generated fidelity checks
+are always assessed; unexplained target checks retain their conservative drift
+and sync handling when source check management is disabled.
+Detected changes to existing tables, missing or altered generated checks, profile
+transitions, and snapshot-based opt-in sync refuse before producing a partial
+plan. A check must have the expected name, predicate, and validated catalog
+status; a naming prefix alone does not establish ownership. See the
+[sync contract](sync-contract.md) and [public API scope](public-fidelity-api.md).
+
+A checked no-op covers the supported comparisons. It does not establish
+cross-dialect computed-expression equivalence; computed-column assessment
+continues to report that unresolved behavior, and strict refuses it.
+
+
 ### `smt init`
 
 | flag | status | description |

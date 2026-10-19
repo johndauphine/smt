@@ -14,6 +14,7 @@ import (
 	"github.com/johndauphine/smt/internal/checkpoint"
 	"github.com/johndauphine/smt/internal/ddl"
 	"github.com/johndauphine/smt/internal/driver"
+	"github.com/johndauphine/smt/internal/fidelity"
 	"github.com/johndauphine/smt/internal/logging"
 	"github.com/johndauphine/smt/internal/schemadiff"
 	"github.com/johndauphine/smt/internal/source"
@@ -71,6 +72,22 @@ func (o *Orchestrator) renderDDLPlan(ctx context.Context, runID string) (schemad
 	renderer, err := o.newCreateDDLRenderer()
 	if err != nil {
 		return schemadiff.Plan{}, err
+	}
+	if renderer.fidelityProfile != fidelity.Legacy {
+		// Source names must be reserved even when their separate create phase is
+		// disabled. Generated type restrictions are intrinsic to this profile.
+		for i := range o.tables {
+			t := &o.tables[i]
+			if err := o.source.LoadIndexes(ctx, t); err != nil {
+				return schemadiff.Plan{}, fmt.Errorf("loading fidelity constraint names for %s: %w", t.Name, err)
+			}
+			if err := o.source.LoadForeignKeys(ctx, t); err != nil {
+				return schemadiff.Plan{}, fmt.Errorf("loading fidelity foreign-key names for %s: %w", t.Name, err)
+			}
+			if err := o.source.LoadCheckConstraints(ctx, t); err != nil {
+				return schemadiff.Plan{}, fmt.Errorf("loading fidelity check names for %s: %w", t.Name, err)
+			}
+		}
 	}
 
 	// Fail closed on identifier collisions before emitting any DDL: on a
@@ -139,6 +156,7 @@ type createDDLRenderer struct {
 	sourceContext        *driver.DatabaseContext
 	targetContext        *driver.DatabaseContext // nil in generate-only mode (no target connection)
 	unknownTypePolicy    string
+	fidelityProfile      fidelity.Profile
 	ddlRenderer          ddl.Renderer
 	aiReviewEnabled      bool
 	aiReviewMode         string
@@ -155,6 +173,18 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 		return createDDLRenderer{}, err
 	}
 	ddlRenderer = ddlRenderer.WithSource(sourceType)
+	profile, err := fidelity.ParseProfile(o.config.SchemaGeneration.FidelityProfile)
+	if err != nil {
+		return createDDLRenderer{}, err
+	}
+	if profile != fidelity.Legacy && o.opts.ApplySuggested {
+		return createDDLRenderer{}, fmt.Errorf("AI-authored suggested SQL is not supported by opt-in fidelity profiles")
+	}
+	// Validate the capability even when source filters select no tables, before
+	// emitting a schema or initializing an optional review provider.
+	if _, err := ddlRenderer.AssessTableFidelity(&driver.Table{}, profile); err != nil {
+		return createDDLRenderer{}, err
+	}
 
 	reviewEnabled := aiReviewEnabled(o.config)
 
@@ -194,6 +224,7 @@ func (o *Orchestrator) newCreateDDLRenderer() (createDDLRenderer, error) {
 		sourceContext:        o.source.DatabaseContext(),
 		targetContext:        targetContext,
 		unknownTypePolicy:    o.config.SchemaGeneration.UnknownTypePolicy,
+		fidelityProfile:      profile,
 		ddlRenderer:          ddlRenderer,
 		aiReviewEnabled:      reviewEnabled,
 		aiReviewMode:         o.config.AIReview.Mode,
@@ -244,6 +275,7 @@ func (o *Orchestrator) renderCreateIndexStatements(ctx context.Context, runID st
 	results := make([][]schemadiff.Statement, len(o.tables))
 
 	if err := runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
+		t.Indexes = nil
 		if err := o.source.LoadIndexes(ctx, &t); err != nil {
 			return fmt.Errorf("loading indexes for %s: %w", t.Name, err)
 		}
@@ -277,6 +309,7 @@ func (o *Orchestrator) renderCreateForeignKeyStatements(ctx context.Context, run
 	results := make([][]schemadiff.Statement, len(o.tables))
 
 	if err := runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
+		t.ForeignKeys = nil
 		if err := o.source.LoadForeignKeys(ctx, &t); err != nil {
 			return fmt.Errorf("loading FKs for %s: %w", t.Name, err)
 		}
@@ -312,6 +345,7 @@ func (o *Orchestrator) renderCreateCheckStatements(ctx context.Context, runID st
 	results := make([][]schemadiff.Statement, len(o.tables))
 
 	if err := runParallel(ctx, o.tables, o.aiConcurrency(), func(ctx context.Context, i int, t source.Table) error {
+		t.CheckConstraints = nil
 		if err := o.source.LoadCheckConstraints(ctx, &t); err != nil {
 			return fmt.Errorf("loading checks for %s: %w", t.Name, err)
 		}
@@ -344,9 +378,12 @@ func (o *Orchestrator) renderCreateCheckStatements(ctx context.Context, runID st
 }
 
 func (r createDDLRenderer) renderTable(ctx context.Context, t *driver.Table) (string, error) {
-	ddl, _, err := r.ddlRenderer.CreateTableDDL(t)
+	ddl, assessment, err := r.ddlRenderer.CreateTableWithFidelity(t, r.fidelityProfile)
 	if err != nil {
 		return "", err
+	}
+	for _, finding := range assessment.Findings {
+		logging.Warn("fidelity %s: %s.%s: %s", finding.Code, finding.Object.Table, finding.Object.Column, finding.Reason)
 	}
 	if err := r.reviewTable(ctx, t, ddl); err != nil {
 		return "", err

@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "suite": "original-crm-legacy69",
+  "case_count": 69,
+  "status": "legacy diagnostic only; original expectations include eight source-contradicted midnight cases",
+  "original_scores": {
+    "SMT": 31,
+    "Astra": 57
+  },
+  "source_verified": false,
+  "files": {
+    "probes.json": "41e5ac87536badc9ee7e4a8bfafba4ad36f1643eb8691a7afbba5fc54b61d94a",
+    "gap-probes.json": "b95270b5e6aa57db11acd09153e1ded44024629d321b5dae248603778beb063c",
+    "repair-holdout-probes.json": "1a16e5aa002e7b9b63ca88515904ccc34b99efe61b27bc373056aaa18c4e2d81",
+    "repair-review-probes.json": "724b995e475b3518408a17e92811f1880e6ca9d6550f4c1528d5111f2b0d6066",
+    "time-regression-probes.json": "86a103155a99912ab3c39a06bee2465efd5ff2cacb7e1d50d5eea627541d58b1",
+    "repair-2-review-probes.json": "bcf8cd0204e6f6b4a6343bf77e796c24e5abcd8c57ca20421a0a60cd0dccd30f",
+    "repair-3-holdout-probes.json": "a85016cbbf96f7349a59261f77e8df6779a8ccba0382902c6ae38fa10ca55afb"
+  }
+}

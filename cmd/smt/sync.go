@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +37,7 @@ import (
 	"github.com/johndauphine/smt/internal/ddl"
 	"github.com/johndauphine/smt/internal/driver"
 	"github.com/johndauphine/smt/internal/exitcodes"
+	"github.com/johndauphine/smt/internal/fidelity"
 	"github.com/johndauphine/smt/internal/logging"
 	"github.com/johndauphine/smt/internal/orchestrator"
 	"github.com/johndauphine/smt/internal/pool"
@@ -173,6 +176,7 @@ func syncCommand() *cli.Command {
 		Name:  "sync",
 		Usage: "Diff source schema against the live target (or the latest snapshot) and (optionally) apply ALTERs",
 		Flags: []cli.Flag{
+			fidelityFlag(),
 			&cli.StringFlag{Name: "against", Value: "target", Usage: "Baseline to diff against: 'target' (introspect the live target) or 'snapshot' (latest stored snapshot; offline planning)"},
 			&cli.BoolFlag{Name: "apply", Usage: "Execute ALTERs against the target (default: emit SQL for review)"},
 			&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Value: "migration.sql", Usage: "Output file when not applying"},
@@ -209,6 +213,10 @@ func syncPhase(mode, step string) string {
 
 func runSyncAgainstTarget(c *cli.Context) error {
 	cfg, profileName, configPath, err := loadConfig(c)
+	if err != nil {
+		return err
+	}
+	fidelityProfile, err := fidelity.ParseProfile(cfg.SchemaGeneration.FidelityProfile)
 	if err != nil {
 		return err
 	}
@@ -287,11 +295,19 @@ func runSyncAgainstTarget(c *cli.Context) error {
 	if len(cfg.Migration.IncludeTables) > 0 || len(cfg.Migration.ExcludeTables) > 0 {
 		existing = filterToManagedSet(existing, desired, allSourceNorm)
 	}
-	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
+	loadOpts := opts
+	if fidelityProfile != fidelity.Legacy {
+		loadOpts.CompareChecks = true
+	}
+	if err := loadConstraintsGated(ctx, targetReader, existing, loadOpts); err != nil {
 		return err
 	}
 
-	diff := schemadiff.ComputeLiveDiff(desired, existing, sourceDialect, targetDialect, opts)
+	diff, assessment, err := schemadiff.ComputeLiveDiffWithFidelity(desired, existing, sourceDialect, targetDialect, opts, fidelityProfile)
+	printFidelityFindings(assessment.Findings)
+	if err != nil {
+		return err
+	}
 	if diff.IsEmpty() {
 		fmt.Println("No schema drift: target matches the source-derived schema.")
 		return nil
@@ -300,13 +316,13 @@ func runSyncAgainstTarget(c *cli.Context) error {
 	fmt.Printf("Diff: %s\n", diff.Summary())
 
 	logging.Info("rendering diff deterministically as %s SQL...", cfg.Target.Type)
-	plan, err := schemadiff.RenderDeterministicWithOptions(diff, schemadiff.RenderOptions{
+	plan, err := schemadiff.RenderLiveDiffWithFidelity(diff, schemadiff.RenderOptions{
 		TargetSchema:      cfg.Target.Schema,
 		TargetDialect:     targetDialect,
 		SourceDialect:     sourceDialect,
 		ExistingDialect:   targetDialect,
 		UnknownTypePolicy: cfg.SchemaGeneration.UnknownTypePolicy,
-	})
+	}, opts, fidelityProfile)
 	if err != nil {
 		return err
 	}
@@ -328,6 +344,11 @@ func runSyncAgainstSnapshot(c *cli.Context) error {
 	cfg, profileName, configPath, err := loadConfig(c)
 	if err != nil {
 		return err
+	}
+	if profile, err := fidelity.ParseProfile(cfg.SchemaGeneration.FidelityProfile); err != nil {
+		return err
+	} else if profile != fidelity.Legacy {
+		return &schemadiff.FidelityEvolutionError{Reason: "snapshot baselines do not prove target restriction ownership or validation; use --against target"}
 	}
 
 	apply := c.Bool("apply")
@@ -410,6 +431,11 @@ func runSyncAgainstSnapshot(c *cli.Context) error {
 // planning offline and the caller's snapshot safe to persist as the next
 // baseline.
 func buildSnapshotSyncPlan(prev, curr schemadiff.Snapshot, cfg *config.Config) (schemadiff.Diff, schemadiff.Plan, error) {
+	if profile, err := fidelity.ParseProfile(cfg.SchemaGeneration.FidelityProfile); err != nil {
+		return schemadiff.Diff{}, schemadiff.Plan{}, err
+	} else if profile != fidelity.Legacy {
+		return schemadiff.Diff{}, schemadiff.Plan{}, &schemadiff.FidelityEvolutionError{Reason: "snapshot baselines do not prove target restriction ownership or validation; use --against target"}
+	}
 	include, exclude := cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables
 	prev.Tables = filterDesiredScope(prev.Tables, include, exclude)
 	curr.Tables = filterDesiredScope(curr.Tables, include, exclude)
@@ -500,17 +526,21 @@ type syncRunMetadata struct {
 }
 
 type syncRunManifest struct {
-	SMTVersion                string `json:"smt_version"`
-	RendererVersion           string `json:"renderer_version"`
-	SourceDialect             string `json:"source_dialect"`
-	TargetDialect             string `json:"target_dialect"`
-	TargetSchema              string `json:"target_schema"`
-	UnknownTypePolicy         string `json:"unknown_type_policy"`
-	SyncMode                  string `json:"sync_mode"`
-	StatementCount            int    `json:"statement_count"`
-	UnsupportedCount          int    `json:"unsupported_count"`
-	SourceSnapshotFingerprint string `json:"source_snapshot_fingerprint"`
-	PlanFingerprint           string `json:"plan_fingerprint"`
+	SMTVersion                string                 `json:"smt_version"`
+	RendererVersion           string                 `json:"renderer_version"`
+	SourceDialect             string                 `json:"source_dialect"`
+	TargetDialect             string                 `json:"target_dialect"`
+	TargetSchema              string                 `json:"target_schema"`
+	UnknownTypePolicy         string                 `json:"unknown_type_policy"`
+	SyncMode                  string                 `json:"sync_mode"`
+	StatementCount            int                    `json:"statement_count"`
+	UnsupportedCount          int                    `json:"unsupported_count"`
+	SourceSnapshotFingerprint string                 `json:"source_snapshot_fingerprint"`
+	PlanFingerprint           string                 `json:"plan_fingerprint"`
+	FidelityProfile           string                 `json:"fidelity_profile,omitempty"`
+	SourceSemanticsVersion    string                 `json:"source_semantics_version,omitempty"`
+	FidelityRequirements      []fidelity.Requirement `json:"fidelity_requirements,omitempty"`
+	FidelityFindings          []fidelity.Finding     `json:"fidelity_findings,omitempty"`
 }
 
 func applySyncPlan(ctx context.Context, tgt sqlExecutor, plan schemadiff.Plan, opts syncApplyOptions) error {
@@ -626,7 +656,7 @@ func buildSyncRunManifest(plan schemadiff.Plan, opts syncApplyOptions) (syncRunM
 	if err != nil {
 		return syncRunManifest{}, err
 	}
-	return syncRunManifest{
+	manifest := syncRunManifest{
 		SMTVersion:                version.Version,
 		RendererVersion:           ddl.RendererVersion,
 		SourceDialect:             driver.Canonicalize(opts.cfg.Source.Type),
@@ -638,7 +668,30 @@ func buildSyncRunManifest(plan schemadiff.Plan, opts syncApplyOptions) (syncRunM
 		UnsupportedCount:          len(plan.Unsupported),
 		SourceSnapshotFingerprint: sourceFP,
 		PlanFingerprint:           syncFingerprintBytes([]byte(plan.SQL())),
-	}, nil
+	}
+	profile, err := fidelity.ParseProfile(opts.cfg.SchemaGeneration.FidelityProfile)
+	if err != nil {
+		return syncRunManifest{}, err
+	}
+	if profile != fidelity.Legacy {
+		manifest.FidelityProfile = string(profile)
+		manifest.SourceSemanticsVersion = fidelity.SemanticsVersion
+		manifest.SourceSnapshotFingerprint = syncFingerprintBytes([]byte(string(profile) + "\x00" + fidelity.SemanticsVersion + "\x00" + sourceFP))
+		manifest.PlanFingerprint = syncFingerprintBytes([]byte(string(profile) + "\x00" + fidelity.SemanticsVersion + "\x00" + plan.SQL()))
+		tables := append([]driver.Table(nil), filterDesiredScope(opts.currSnap.Tables, opts.cfg.Migration.IncludeTables, opts.cfg.Migration.ExcludeTables)...)
+		sort.SliceStable(tables, func(i, j int) bool {
+			return tables[i].Schema+"\x00"+tables[i].Name < tables[j].Schema+"\x00"+tables[j].Name
+		})
+		for _, table := range tables {
+			assessment, err := fidelity.AssessTable(&table, opts.cfg.Source.Type, opts.cfg.Target.Type)
+			if err != nil {
+				return syncRunManifest{}, err
+			}
+			manifest.FidelityRequirements = append(manifest.FidelityRequirements, assessment.Requirements...)
+			manifest.FidelityFindings = append(manifest.FidelityFindings, assessment.Findings...)
+		}
+	}
+	return manifest, nil
 }
 
 func syncSnapshotFingerprint(snap schemadiff.Snapshot) (string, error) {
@@ -667,6 +720,12 @@ func syncFingerprintTables(tables []driver.Table) []driver.Table {
 		out[i].RowCount = 0
 		out[i].EstimatedRowSize = 0
 		out[i].Columns = append([]driver.Column(nil), tables[i].Columns...)
+		out[i].CheckConstraints = slices.Clone(tables[i].CheckConstraints)
+		for j := range out[i].CheckConstraints {
+			// Optional catalog validation evidence was absent from legacy
+			// snapshots; it must not change their established fingerprint.
+			out[i].CheckConstraints[j].Validated = nil
+		}
 		for j := range out[i].Columns {
 			out[i].Columns[j].SampleValues = nil
 		}

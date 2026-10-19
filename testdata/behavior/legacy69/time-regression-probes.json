@@ -1,0 +1,137 @@
+[
+  {
+    "name": "Time focus: t_p0 rejects invalid UPDATE",
+    "category": "invalid_input",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','12:00:00'); CREATE FUNCTION pg_temp.rejects(q text) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN EXECUTE q; RETURN false; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE IN ('22007','22008','23514'); END $$;  SELECT pg_temp.rejects($probe$UPDATE \"TypeSmoke\" SET t_p0='24:00:00'$probe$) AND (SELECT t_p0::text='12:00:00' FROM \"TypeSmoke\");",
+    "expected_result": "t"
+  },
+  {
+    "name": "Time focus: t_p0 rejects typed invalid input",
+    "category": "invalid_input",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN EXECUTE q; RETURN false; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE IN ('22007','22008','23514'); END $$; SELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01',TIME '24:00:00')$probe$);",
+    "expected_result": "t"
+  },
+  {
+    "name": "Time focus: t_p0 accepts midnight",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','00:00:00') RETURNING t_p0::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Time focus: t_p0 rounds below midpoint",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','12:34:56.499999') RETURNING t_p0::text;",
+    "expected_result": "12:34:56"
+  },
+  {
+    "name": "Time focus: t_p0 rounds at midpoint",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','12:34:56.500000') RETURNING t_p0::text;",
+    "expected_result": "12:34:57"
+  },
+  {
+    "name": "Time focus: t_p0 rounds valid microsecond input across midnight",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','23:59:59.500000') RETURNING t_p0::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Time focus: t_p0 rounds valid seven-digit input across midnight",
+    "category": "native_input_ambiguity",
+    "source_basis": "Valid SQL Server TIME(7) maximum rounds to midnight at lower precision; PostgreSQL native input has already rounded this to 24:00 before the trigger. This case measures a pre-existing accepted input which a naive guard would lose. Expected result follows source rounding and range rules; live source confirmation remains unavailable.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','23:59:59.9999999') RETURNING t_p0::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Time focus: t_p0 UPDATE preserves rollover",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','12:00:00'); UPDATE \"TypeSmoke\" SET t_p0='23:59:59.500000' RETURNING t_p0::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Time focus: t_p3 rejects invalid UPDATE",
+    "category": "invalid_input",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','12:00:00'); CREATE FUNCTION pg_temp.rejects(q text) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN EXECUTE q; RETURN false; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE IN ('22007','22008','23514'); END $$;  SELECT pg_temp.rejects($probe$UPDATE \"TypeSmoke\" SET t_p3='24:00:00'$probe$) AND (SELECT t_p3::text='12:00:00' FROM \"TypeSmoke\");",
+    "expected_result": "t"
+  },
+  {
+    "name": "Time focus: t_p3 rejects typed invalid input",
+    "category": "invalid_input",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN EXECUTE q; RETURN false; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE IN ('22007','22008','23514'); END $$; SELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01',TIME '24:00:00')$probe$);",
+    "expected_result": "t"
+  },
+  {
+    "name": "Time focus: t_p3 accepts midnight",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','00:00:00') RETURNING t_p3::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Time focus: t_p3 rounds below midpoint",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','12:34:56.123499') RETURNING t_p3::text;",
+    "expected_result": "12:34:56.123"
+  },
+  {
+    "name": "Time focus: t_p3 rounds at midpoint",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','12:34:56.123500') RETURNING t_p3::text;",
+    "expected_result": "12:34:56.124"
+  },
+  {
+    "name": "Time focus: t_p3 rounds valid microsecond input across midnight",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','23:59:59.999500') RETURNING t_p3::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Time focus: t_p3 rounds valid seven-digit input across midnight",
+    "category": "native_input_ambiguity",
+    "source_basis": "Valid SQL Server TIME(7) maximum rounds to midnight at lower precision; PostgreSQL native input has already rounded this to 24:00 before the trigger. This case measures a pre-existing accepted input which a naive guard would lose. Expected result follows source rounding and range rules; live source confirmation remains unavailable.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','23:59:59.9999999') RETURNING t_p3::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Time focus: t_p3 UPDATE preserves rollover",
+    "category": "preserve_time_behavior",
+    "source_basis": "Document-derived time range/rounding expectation; no live SQL Server oracle.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','12:00:00'); UPDATE \"TypeSmoke\" SET t_p3='23:59:59.999500' RETURNING t_p3::text;",
+    "expected_result": "00:00:00"
+  },
+  {
+    "name": "Time focus: both NULLs preserved",
+    "category": "control",
+    "source_basis": "Both source columns are nullable.",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0,t_p3) VALUES ('X','2025-01-01',NULL,NULL) RETURNING t_p0 IS NULL AND t_p3 IS NULL;",
+    "expected_result": "t"
+  }
+]

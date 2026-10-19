@@ -6,6 +6,13 @@ are release gates that must be invoked explicitly.
 All release-gate artifacts are written under `.acceptance-artifacts/` so CI can
 archive the directory.
 
+The separate [behavioral acceptance suite](behavioral-acceptance.md) freezes live
+source observations before evaluating unchanged generated SQL. It includes
+simple-schema and edge-case tiers plus checked create/introspect/drift/sync
+validation. Its pinned Azure SQL Edge ARM64 evidence supplements, and does not
+replace, the supported-server CRM matrix below. A candidate that cannot apply
+has unverified behavioral cases, not a fabricated behavioral failure count.
+
 ## StackOverflow2010 No-AI Gate
 
 This gate proves the historical SQL Server to PostgreSQL no-AI path.

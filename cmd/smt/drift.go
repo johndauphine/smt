@@ -22,6 +22,7 @@ import (
 	"github.com/johndauphine/smt/internal/config"
 	"github.com/johndauphine/smt/internal/driver"
 	"github.com/johndauphine/smt/internal/exitcodes"
+	"github.com/johndauphine/smt/internal/fidelity"
 	"github.com/johndauphine/smt/internal/logging"
 	"github.com/johndauphine/smt/internal/orchestrator"
 	"github.com/johndauphine/smt/internal/pool"
@@ -33,6 +34,7 @@ func driftCommand() *cli.Command {
 		Name:  "drift",
 		Usage: "Report schema drift between the source-derived schema and the live target (read-only)",
 		Flags: []cli.Flag{
+			fidelityFlag(),
 			&cli.BoolFlag{Name: "fail-on-destructive-only", Usage: "Exit non-zero only when drift requires drops (extra tables/columns); additive drift exits 0"},
 		},
 		Action: runDrift,
@@ -41,6 +43,10 @@ func driftCommand() *cli.Command {
 
 func runDrift(c *cli.Context) error {
 	cfg, profileName, configPath, err := loadConfig(c)
+	if err != nil {
+		return err
+	}
+	fidelityProfile, err := fidelity.ParseProfile(cfg.SchemaGeneration.FidelityProfile)
 	if err != nil {
 		return err
 	}
@@ -90,7 +96,14 @@ func runDrift(c *cli.Context) error {
 	// drift's scope is identical to what the migration manages.
 	include, exclude := cfg.Migration.IncludeTables, cfg.Migration.ExcludeTables
 	desired = filterDesiredScope(desired, include, exclude)
-	if err := loadConstraintsGated(ctx, orch.Source(), desired, opts); err != nil {
+	loadOpts := opts
+	if fidelityProfile != fidelity.Legacy {
+		loadOpts = schemadiff.DefaultDriftOptions()
+		if err := driver.CheckIdentifierCollisions(targetDialect, desired); err != nil {
+			return err
+		}
+	}
+	if err := loadConstraintsGated(ctx, orch.Source(), desired, loadOpts); err != nil {
 		return err
 	}
 	// Fold every desired identifier — table, column, AND index/FK column lists
@@ -122,11 +135,19 @@ func runDrift(c *cli.Context) error {
 	if len(include) > 0 || len(exclude) > 0 {
 		existing = filterToManagedSet(existing, desired, allSourceNorm)
 	}
-	if err := loadConstraintsGated(ctx, targetReader, existing, opts); err != nil {
+	loadOpts = opts
+	if fidelityProfile != fidelity.Legacy {
+		loadOpts.CompareChecks = true
+	}
+	if err := loadConstraintsGated(ctx, targetReader, existing, loadOpts); err != nil {
 		return err
 	}
 
-	drift := schemadiff.ComputeDrift(desired, existing, sourceDialect, targetDialect, opts)
+	drift, assessment, err := schemadiff.ComputeDriftWithFidelity(desired, existing, sourceDialect, targetDialect, opts, fidelityProfile)
+	printFidelityFindings(assessment.Findings)
+	if err != nil {
+		return err
+	}
 	printDriftReport(drift)
 
 	if drift.IsEmpty() {
@@ -137,6 +158,12 @@ func runDrift(c *cli.Context) error {
 	}
 	// cli.Exit sets the process exit code without printing a Go error trace.
 	return cli.Exit("", exitcodes.DriftDetected)
+}
+
+func printFidelityFindings(findings []fidelity.Finding) {
+	for _, finding := range findings {
+		logging.Warn("fidelity %s on %s.%s.%s: %s", finding.Code, finding.Object.Schema, finding.Object.Table, finding.Object.Column, finding.Reason)
+	}
 }
 
 // targetAsSource adapts the target connection into a SourceConfig so the same

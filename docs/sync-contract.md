@@ -18,6 +18,32 @@ gating — with these deltas from the target-mode contract:
 
 ## Supported Changes
 
+These existing operations describe the default legacy profile. The unreleased
+`--fidelity checked|strict` path is deliberately narrower: SQL Server to
+PostgreSQL new tables and existing tables unchanged within the assessed
+comparison scope only. It compares
+generated restrictions by exact expected name, recognized predicate, and live
+validation status. An existing table with managed source CHECK predicates or any
+managed filtered index on the source or target cannot currently be verified.
+Opt-in drift and sync return an explicit inability-to-verify error, including
+when names, counts or predicate text match, because cross-dialect predicate
+equivalence has not been established. No partial diff or executable plan is
+returned. New-table creation can still render supported source checks and
+filtered indexes. Disabling `migration.create_check_constraints` or
+`migration.create_indexes` excludes the corresponding source side objects from
+this comparison guard; generated fidelity checks remain required, and
+unexplained target checks retain their existing conservative handling.
+Detected existing-table changes, target-only tables, missing or
+changed restrictions, and snapshot baselines return an explicit error before a
+partial plan can be applied. A stronger profile never truncates or cleans rows.
+See [CLI fidelity profiles](cli.md#opt-in-fidelity-profiles).
+
+A checked no-op does not establish cross-dialect computed-expression
+equivalence. That behavior remains an assessment finding, and strict rejects
+computed-column semantics. The no-op result covers only the supported
+comparisons.
+
+
 SMT v1 can render these sync changes:
 
 - added tables, including managed indexes, foreign keys, and check constraints;

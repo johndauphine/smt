@@ -11,6 +11,7 @@ import (
 
 	"github.com/johndauphine/smt/internal/checkpoint"
 	"github.com/johndauphine/smt/internal/config"
+	"github.com/johndauphine/smt/internal/fidelity"
 )
 
 // loadConfig returns the resolved Config along with the profile name and
@@ -19,6 +20,9 @@ import (
 func loadConfig(c *cli.Context) (*config.Config, string, string, error) {
 	if profileName := c.String("profile"); profileName != "" {
 		cfg, err := loadProfile(profileName)
+		if err == nil {
+			err = applyFidelityOverride(c, cfg)
+		}
 		return cfg, profileName, "", err
 	}
 
@@ -27,7 +31,26 @@ func loadConfig(c *cli.Context) (*config.Config, string, string, error) {
 		return nil, "", "", fmt.Errorf("configuration file not found: %s", configPath)
 	}
 	cfg, err := config.Load(configPath)
+	if err == nil {
+		err = applyFidelityOverride(c, cfg)
+	}
 	return cfg, "", configPath, err
+}
+
+func fidelityFlag() cli.Flag {
+	return &cli.StringFlag{Name: "fidelity", Usage: "Opt-in source behavior profile: legacy, checked, or strict (default: config or legacy)"}
+}
+
+func applyFidelityOverride(c *cli.Context, cfg *config.Config) error {
+	if !c.IsSet("fidelity") {
+		return nil
+	}
+	profile, err := fidelity.ParseProfile(c.String("fidelity"))
+	if err != nil {
+		return err
+	}
+	cfg.SchemaGeneration.FidelityProfile = string(profile)
+	return nil
 }
 
 // configPathOf walks the cli.Context lineage so `smt -c X create` and

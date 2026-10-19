@@ -1,0 +1,65 @@
+[
+  {
+    "name": "Held out: SMALLDATETIME 29.998 rounds down",
+    "category": "assignment",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/smalldatetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_smalldt) VALUES ('X','2025-01-01','2025-01-01T12:00:29.998') RETURNING legacy_smalldt::text;",
+    "expected_result": "2025-01-01 12:00:00"
+  },
+  {
+    "name": "Held out: SMALLDATETIME 29.999 rounds up",
+    "category": "assignment",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/smalldatetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_smalldt) VALUES ('X','2025-01-01','2025-01-01T12:00:29.999') RETURNING legacy_smalldt::text;",
+    "expected_result": "2025-01-01 12:01:00"
+  },
+  {
+    "name": "Held out: SMALLDATETIME next-day rollover",
+    "category": "assignment",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/smalldatetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_smalldt) VALUES ('X','2025-01-01','2025-01-01T23:59:30') RETURNING legacy_smalldt::text;",
+    "expected_result": "2025-01-02 00:00:00"
+  },
+  {
+    "name": "Held out: SMALLDATETIME UPDATE rounds",
+    "category": "assignment",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/smalldatetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_smalldt) VALUES ('X','2025-01-01','2025-01-01T12:00:00'); UPDATE \"TypeSmoke\" SET legacy_smalldt='2025-01-01T12:00:30' RETURNING legacy_smalldt::text;",
+    "expected_result": "2025-01-01 12:01:00"
+  },
+  {
+    "name": "Held out: DATETIME .004 rounds to .003",
+    "category": "assignment",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_dt) VALUES ('X','2025-01-01','2025-01-01T12:00:00.004') RETURNING legacy_dt::text;",
+    "expected_result": "2025-01-01 12:00:00.003"
+  },
+  {
+    "name": "Held out: DATETIME next-day rollover",
+    "category": "assignment",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetime-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_dt) VALUES ('X','2025-01-01','2025-01-01T23:59:59.999') RETURNING legacy_dt::text;",
+    "expected_result": "2025-01-02 00:00:00"
+  },
+  {
+    "name": "Held out: BINARY(16) empty input padding",
+    "category": "assignment",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/binary-and-varbinary-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,bin_fixed) VALUES ('X','2025-01-01',decode('','hex')) RETURNING encode(bin_fixed,'hex');",
+    "expected_result": "00000000000000000000000000000000"
+  },
+  {
+    "name": "Held out: BINARY(16) UPDATE padding",
+    "category": "assignment",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/binary-and-varbinary-transact-sql?view=sql-server-ver17",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,bin_fixed) VALUES ('X','2025-01-01',decode(repeat('00',16),'hex')); UPDATE \"TypeSmoke\" SET bin_fixed=decode('ab','hex') RETURNING encode(bin_fixed,'hex');",
+    "expected_result": "ab000000000000000000000000000000"
+  },
+  {
+    "name": "Held out: NULLs survive assignment helpers",
+    "category": "control",
+    "source_basis": "All three fixture columns are nullable.",
+    "sql": "INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,legacy_smalldt,legacy_dt,bin_fixed) VALUES ('X','2025-01-01',NULL,NULL,NULL) RETURNING legacy_smalldt IS NULL AND legacy_dt IS NULL AND bin_fixed IS NULL;",
+    "expected_result": "t"
+  }
+]

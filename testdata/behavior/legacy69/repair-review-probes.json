@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Review: t_p0 rejects explicit 24:00:00",
+    "category": "restriction_regression",
+    "source_basis": "SQL Server TIME permits hours 00 through 23. Explicit 24:00 is invalid, distinct from rounding a valid pre-midnight value. Added after inspection of the repair, not a pre-response holdout.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN EXECUTE q; RETURN false; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE IN ('22007','22008','23514'); END $$; SELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p0) VALUES ('X','2025-01-01','24:00:00')$probe$);"
+  },
+  {
+    "name": "Review: t_p3 rejects explicit 24:00:00",
+    "category": "restriction_regression",
+    "source_basis": "SQL Server TIME permits hours 00 through 23. Explicit 24:00 is invalid, distinct from rounding a valid pre-midnight value. Added after inspection of the repair, not a pre-response holdout.",
+    "reference": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql?view=sql-server-ver17",
+    "sql": "CREATE FUNCTION pg_temp.rejects(q text) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN EXECUTE q; RETURN false; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE IN ('22007','22008','23514'); END $$; SELECT pg_temp.rejects($probe$INSERT INTO \"TypeSmoke\"(s_min,dt2_p0,t_p3) VALUES ('X','2025-01-01','24:00:00')$probe$);"
+  }
+]

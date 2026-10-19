@@ -1,0 +1,1788 @@
+[
+  {
+    "id": "tiny_insert_0",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',0)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',0)"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "0"
+    }
+  },
+  {
+    "id": "tiny_insert_1",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "1"
+    }
+  },
+  {
+    "id": "tiny_insert_254",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',254)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',254)"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "254"
+    }
+  },
+  {
+    "id": "tiny_insert_255",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',255)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',255)"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "255"
+    }
+  },
+  {
+    "id": "tiny_insert_reject_-1",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',-1)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',-1)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "range"
+    }
+  },
+  {
+    "id": "tiny_update_reject_-1",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET tiny=-1"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET tiny=-1"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "range"
+    }
+  },
+  {
+    "id": "tiny_insert_reject_256",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',256)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',256)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "range"
+    }
+  },
+  {
+    "id": "tiny_update_reject_256",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET tiny=256"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET tiny=256"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "range"
+    }
+  },
+  {
+    "id": "tiny_update_255",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',0)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET tiny=255"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',0)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET tiny=255"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "255"
+    }
+  },
+  {
+    "id": "tiny_null",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',NULL)"
+      },
+      {
+        "sql": "SELECT CASE WHEN tiny IS NULL THEN 'null' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',NULL)"
+      },
+      {
+        "sql": "SELECT CASE WHEN tiny IS NULL THEN 'null' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "null"
+    }
+  },
+  {
+    "id": "payload_null",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',NULL)"
+      },
+      {
+        "sql": "SELECT CASE WHEN payload IS NULL THEN 'null' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',NULL)"
+      },
+      {
+        "sql": "SELECT CASE WHEN payload IS NULL THEN 'null' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "null"
+    }
+  },
+  {
+    "id": "tiny_default",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,'x')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,'x')"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "7"
+    }
+  },
+  {
+    "id": "tiny_bound_255",
+    "tier": "simple",
+    "input_path": "wire_parameter",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',@v)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "int",
+            "value": 255
+          }
+        ]
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',$1)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "int",
+            "value": 255
+          }
+        ]
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "255"
+    }
+  },
+  {
+    "id": "tiny_bound_256",
+    "tier": "simple",
+    "input_path": "wire_parameter",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',@v)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "int",
+            "value": 256
+          }
+        ]
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',$1)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "int",
+            "value": 256
+          }
+        ]
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "range"
+    }
+  },
+  {
+    "id": "tiny_cast_255",
+    "tier": "simple",
+    "input_path": "explicit_cast",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',CAST(255 AS int))"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',255::integer)"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "255"
+    }
+  },
+  {
+    "id": "tiny_cast_256",
+    "tier": "simple",
+    "input_path": "explicit_cast",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',CAST(256 AS int))"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),tiny) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',256::integer)"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "range"
+    }
+  },
+  {
+    "id": "binary_insert_0",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',0x)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('','hex'))"
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "0"
+    }
+  },
+  {
+    "id": "binary_insert_1",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',0xAB)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('ab','hex'))"
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "1"
+    }
+  },
+  {
+    "id": "binary_insert_49",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('ababababababababababababababababababababababababababababababababababababababababababababababababab','hex'))"
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "49"
+    }
+  },
+  {
+    "id": "binary_insert_50",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('abababababababababababababababababababababababababababababababababababababababababababababababababab','hex'))"
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "50"
+    }
+  },
+  {
+    "id": "binary_update_50",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',0xAB)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET payload=0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('ab','hex'))"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET payload=decode('abababababababababababababababababababababababababababababababababababababababababababababababababab','hex')"
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "50"
+    }
+  },
+  {
+    "id": "binary_insert_51",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('ababababababababababababababababababababababababababababababababababababababababababababababababababab','hex'))"
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "length"
+    }
+  },
+  {
+    "id": "binary_update_51",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',0xAB)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET payload=0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('ab','hex'))"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET payload=decode('ababababababababababababababababababababababababababababababababababababababababababababababababababab','hex')"
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "length"
+    }
+  },
+  {
+    "id": "binary_bound_50",
+    "tier": "simple",
+    "input_path": "wire_parameter",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',@v)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "bytes",
+            "value": "abababababababababababababababababababababababababababababababababababababababababababababababababab"
+          }
+        ]
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',$1)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "bytes",
+            "value": "abababababababababababababababababababababababababababababababababababababababababababababababababab"
+          }
+        ]
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "50"
+    }
+  },
+  {
+    "id": "binary_bound_51",
+    "tier": "simple",
+    "input_path": "wire_parameter",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',@v)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "bytes",
+            "value": "ababababababababababababababababababababababababababababababababababababababababababababababababababab"
+          }
+        ]
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',$1)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "bytes",
+            "value": "ababababababababababababababababababababababababababababababababababababababababababababababababababab"
+          }
+        ]
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "length"
+    }
+  },
+  {
+    "id": "binary_default",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,'x')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),payload,2) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,'x')"
+      },
+      {
+        "sql": "SELECT upper(encode(payload,'hex')) AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "AB"
+    }
+  },
+  {
+    "id": "binary_explicit_preassignment_truncation",
+    "tier": "simple",
+    "input_path": "explicit_conversion_to_source_declared_width",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',CAST(0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB AS varbinary(50)))"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(payload)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',substring(decode('ababababababababababababababababababababababababababababababababababababababababababababababababababab','hex') from 1 for 50))"
+      },
+      {
+        "sql": "SELECT octet_length(payload)::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "50"
+    }
+  },
+  {
+    "id": "binary_native_equality",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',0xAB)"
+      },
+      {
+        "sql": "SELECT CASE WHEN payload=0xAB THEN 'equal' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('ab','hex'))"
+      },
+      {
+        "sql": "SELECT CASE WHEN payload=decode('ab','hex') THEN 'equal' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "equal"
+    }
+  },
+  {
+    "id": "tiny_native_arithmetic_order",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',255),(2,'y',0)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),SUM(CONVERT(int,tiny))+MIN(tiny)) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',255),(2,'y',0)"
+      },
+      {
+        "sql": "SELECT (sum(tiny::integer)+min(tiny))::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "255"
+    }
+  },
+  {
+    "id": "not_null",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,required) VALUES(1,'x',NULL)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,required) VALUES(1,'x',NULL)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "nullability"
+    }
+  },
+  {
+    "id": "primary_key",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,'x'),(1,'y')"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,'x'),(1,'y')"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "unique"
+    }
+  },
+  {
+    "id": "unique_code",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,'x'),(2,'x')"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,'x'),(2,'x')"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "unique"
+    }
+  },
+  {
+    "id": "decimal_999.99",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,amount) VALUES(1,'x',999.99)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),amount) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,amount) VALUES(1,'x',999.99)"
+      },
+      {
+        "sql": "SELECT amount::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "999.99"
+    }
+  },
+  {
+    "id": "decimal_1.235",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,amount) VALUES(1,'x',1.235)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),amount) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,amount) VALUES(1,'x',1.235)"
+      },
+      {
+        "sql": "SELECT amount::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "1.24"
+    }
+  },
+  {
+    "id": "decimal_1000",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,amount) VALUES(1,'x',1000)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),amount) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,amount) VALUES(1,'x',1000)"
+      },
+      {
+        "sql": "SELECT amount::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "range"
+    }
+  },
+  {
+    "id": "fixed_padding_1",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,fixed) VALUES(1,0xAB)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),fixed,2) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,fixed) VALUES(1,decode('ab','hex'))"
+      },
+      {
+        "sql": "SELECT upper(encode(fixed,'hex')) AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "AB000000000000000000000000000000"
+    }
+  },
+  {
+    "id": "fixed_padding_16",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,fixed) VALUES(1,0xABABABABABABABABABABABABABABABAB)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),fixed,2) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,fixed) VALUES(1,decode('abababababababababababababababab','hex'))"
+      },
+      {
+        "sql": "SELECT upper(encode(fixed,'hex')) AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "ABABABABABABABABABABABABABABABAB"
+    }
+  },
+  {
+    "id": "fixed_padding_17",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,fixed) VALUES(1,0xABABABABABABABABABABABABABABABABAB)"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),fixed,2) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,fixed) VALUES(1,decode('ababababababababababababababababab','hex'))"
+      },
+      {
+        "sql": "SELECT upper(encode(fixed,'hex')) AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "length"
+    }
+  },
+  {
+    "id": "time0_insert_00:00:00",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'00:00:00')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t0) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'00:00:00')"
+      },
+      {
+        "sql": "SELECT t0::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "00:00:00"
+    }
+  },
+  {
+    "id": "time0_insert_12:34:56.500000",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'12:34:56.500000')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t0) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'12:34:56.500000')"
+      },
+      {
+        "sql": "SELECT t0::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "12:34:57"
+    }
+  },
+  {
+    "id": "time0_insert_23:59:59.500000",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'23:59:59.500000')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t0) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'23:59:59.500000')"
+      },
+      {
+        "sql": "SELECT t0::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "23:59:59"
+    }
+  },
+  {
+    "id": "time0_update_23:59:59.500000",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'12:00:00')"
+      },
+      {
+        "sql": "UPDATE {{edge}} SET t0='23:59:59.500000'"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t0) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'12:00:00')"
+      },
+      {
+        "sql": "UPDATE {{edge}} SET t0='23:59:59.500000'"
+      },
+      {
+        "sql": "SELECT t0::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "23:59:59"
+    }
+  },
+  {
+    "id": "time0_insert_23:59:59.9999999",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'23:59:59.9999999')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t0) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'23:59:59.9999999')"
+      },
+      {
+        "sql": "SELECT t0::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "23:59:59"
+    }
+  },
+  {
+    "id": "time0_insert_24:00:00",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'24:00:00')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t0) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'24:00:00')"
+      },
+      {
+        "sql": "SELECT t0::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "datetime"
+    }
+  },
+  {
+    "id": "time0_update_24:00:00",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'12:00:00')"
+      },
+      {
+        "sql": "UPDATE {{edge}} SET t0='24:00:00'"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t0) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'12:00:00')"
+      },
+      {
+        "sql": "UPDATE {{edge}} SET t0='24:00:00'"
+      },
+      {
+        "sql": "SELECT t0::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "datetime"
+    }
+  },
+  {
+    "id": "time3_insert_12:34:56.1234",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'12:34:56.1234')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t3) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'12:34:56.1234')"
+      },
+      {
+        "sql": "SELECT t3::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "12:34:56.123"
+    }
+  },
+  {
+    "id": "time3_insert_23:59:59.999500",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'23:59:59.999500')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t3) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'23:59:59.999500')"
+      },
+      {
+        "sql": "SELECT t3::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "23:59:59.999"
+    }
+  },
+  {
+    "id": "time3_update_23:59:59.999500",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'12:00:00')"
+      },
+      {
+        "sql": "UPDATE {{edge}} SET t3='23:59:59.999500'"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t3) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'12:00:00')"
+      },
+      {
+        "sql": "UPDATE {{edge}} SET t3='23:59:59.999500'"
+      },
+      {
+        "sql": "SELECT t3::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "23:59:59.999"
+    }
+  },
+  {
+    "id": "time3_insert_23:59:59.9999999",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'23:59:59.9999999')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t3) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'23:59:59.9999999')"
+      },
+      {
+        "sql": "SELECT t3::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "23:59:59.999"
+    }
+  },
+  {
+    "id": "time3_insert_24:00:00",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'24:00:00')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t3) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'24:00:00')"
+      },
+      {
+        "sql": "SELECT t3::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "datetime"
+    }
+  },
+  {
+    "id": "time3_update_24:00:00",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'12:00:00')"
+      },
+      {
+        "sql": "UPDATE {{edge}} SET t3='24:00:00'"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t3) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'12:00:00')"
+      },
+      {
+        "sql": "UPDATE {{edge}} SET t3='24:00:00'"
+      },
+      {
+        "sql": "SELECT t3::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "datetime"
+    }
+  },
+  {
+    "id": "legacy_2025-01-01T12:00:00.004",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,legacy) VALUES(1,'2025-01-01T12:00:00.004')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),legacy,121) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,legacy) VALUES(1,'2025-01-01T12:00:00.004')"
+      },
+      {
+        "sql": "SELECT to_char(legacy,'YYYY-MM-DD HH24:MI:SS.MS') AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "2025-01-01 12:00:00.003"
+    }
+  },
+  {
+    "id": "legacy_2025-01-01T23:59:59.999",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,legacy) VALUES(1,'2025-01-01T23:59:59.999')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),legacy,121) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,legacy) VALUES(1,'2025-01-01T23:59:59.999')"
+      },
+      {
+        "sql": "SELECT to_char(legacy,'YYYY-MM-DD HH24:MI:SS.MS') AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "2025-01-02 00:00:00.000"
+    }
+  },
+  {
+    "id": "minute_2025-01-01T12:00:29.999",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,minute) VALUES(1,'2025-01-01T12:00:29.999')"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),minute,121) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,minute) VALUES(1,'2025-01-01T12:00:29.999')"
+      },
+      {
+        "sql": "SELECT to_char(minute,'YYYY-MM-DD HH24:MI:SS.MS') AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "2025-01-01 12:01:00.000"
+    }
+  },
+  {
+    "id": "unicode_supplementary_1",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,unicode) VALUES(1,REPLICATE(CAST(NCHAR(55357)+NCHAR(56832) AS nvarchar(max)),1))"
+      },
+      {
+        "sql": "SELECT CONVERT(nvarchar(20),unicode) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,unicode) VALUES(1,repeat(chr(128512),1))"
+      },
+      {
+        "sql": "SELECT unicode::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "😀"
+    }
+  },
+  {
+    "id": "unicode_supplementary_2",
+    "tier": "edge",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,unicode) VALUES(1,REPLICATE(CAST(NCHAR(55357)+NCHAR(56832) AS nvarchar(max)),2))"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),DATALENGTH(unicode)) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,unicode) VALUES(1,repeat(chr(128512),2))"
+      },
+      {
+        "sql": "SELECT octet_length(convert_to(unicode,'UTF8'))::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "length"
+    }
+  },
+  {
+    "id": "time0_typed_maximum",
+    "tier": "edge",
+    "input_path": "explicit_cast_native_precision",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,CAST('23:59:59.9999999' AS time(7)))"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t0) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t0) VALUES(1,'23:59:59.9999999'::time(6))"
+      },
+      {
+        "sql": "SELECT t0::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "23:59:59"
+    }
+  },
+  {
+    "id": "time3_typed_maximum",
+    "tier": "edge",
+    "input_path": "explicit_cast_native_precision",
+    "source": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,CAST('23:59:59.9999999' AS time(7)))"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),t3) AS value FROM {{edge}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{edge}}(id,t3) VALUES(1,'23:59:59.9999999'::time(6))"
+      },
+      {
+        "sql": "SELECT t3::text AS value FROM {{edge}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "23:59:59.999"
+    }
+  },
+  {
+    "id": "tiny_update_null",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET tiny=NULL"
+      },
+      {
+        "sql": "SELECT CASE WHEN tiny IS NULL THEN 'null' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET tiny=NULL"
+      },
+      {
+        "sql": "SELECT CASE WHEN tiny IS NULL THEN 'null' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "null"
+    }
+  },
+  {
+    "id": "payload_update_null",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',NULL)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET payload=NULL"
+      },
+      {
+        "sql": "SELECT CASE WHEN payload IS NULL THEN 'null' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',NULL)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET payload=NULL"
+      },
+      {
+        "sql": "SELECT CASE WHEN payload IS NULL THEN 'null' ELSE 'wrong' END AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "null"
+    }
+  },
+  {
+    "id": "tiny_bound_negative",
+    "tier": "simple",
+    "input_path": "wire_parameter",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',@v)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "int",
+            "value": -1
+          }
+        ]
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',$1)",
+        "params": [
+          {
+            "name": "v",
+            "kind": "int",
+            "value": -1
+          }
+        ]
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "range"
+    }
+  },
+  {
+    "id": "binary_cast_unbounded_51",
+    "tier": "simple",
+    "input_path": "explicit_cast_unbounded",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',CAST(0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB AS varbinary(max)))"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,payload) VALUES(1,'x',decode('ababababababababababababababababababababababababababababababababababababababababababababababababababab','hex')::bytea)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "length"
+    }
+  },
+  {
+    "id": "tiny_native_order",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',255),(2,'y',0)"
+      },
+      {
+        "sql": "SELECT TOP(1) CONVERT(varchar(100),tiny) AS value FROM {{simple}} ORDER BY tiny ASC"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,tiny) VALUES(1,'x',255),(2,'y',0)"
+      },
+      {
+        "sql": "SELECT tiny::text AS value FROM {{simple}} ORDER BY tiny ASC LIMIT 1"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "0"
+    }
+  },
+  {
+    "id": "unique_nullable_two_nulls",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,NULL),(2,NULL)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code) VALUES(1,NULL),(2,NULL)"
+      },
+      {
+        "sql": "SELECT 'unexpected' AS value"
+      }
+    ],
+    "guard": {
+      "kind": "rejection",
+      "category": "unique"
+    }
+  },
+  {
+    "id": "ordinary_index_exists",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "SELECT CASE WHEN EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID('dbo.behavior_simple') AND name='ix_behavior_tiny' AND is_unique=0) THEN 'index' ELSE 'missing' END AS value"
+      }
+    ],
+    "target": [
+      {
+        "sql": "SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='behavior_simple' AND indexname='ix_behavior_tiny') THEN 'index' ELSE 'missing' END AS value"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "index"
+    }
+  },
+  {
+    "id": "decimal_update_boundary",
+    "tier": "simple",
+    "input_path": "literal",
+    "source": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,amount) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET amount=999.99"
+      },
+      {
+        "sql": "SELECT CONVERT(varchar(100),amount) AS value FROM {{simple}}"
+      }
+    ],
+    "target": [
+      {
+        "sql": "INSERT INTO {{simple}}(id,code,amount) VALUES(1,'x',1)"
+      },
+      {
+        "sql": "UPDATE {{simple}} SET amount=999.99"
+      },
+      {
+        "sql": "SELECT amount::text AS value FROM {{simple}}"
+      }
+    ],
+    "guard": {
+      "kind": "value",
+      "value": "999.99"
+    }
+  }
+]

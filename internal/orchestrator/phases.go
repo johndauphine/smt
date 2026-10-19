@@ -119,6 +119,22 @@ func (o *Orchestrator) runAllPhases(ctx context.Context, runID string) error {
 // DDL sidesteps the InnoDB metadata-lock deadlocks concurrent CHECK creation
 // used to hit (#25).
 func (o *Orchestrator) executePlan(ctx context.Context, runID string, plan schemadiff.Plan) error {
+	if p := o.config.SchemaGeneration.FidelityProfile; p != "" && p != "legacy" {
+		// A name-only skip cannot establish that generated restrictions exist.
+		// Preflight every table before executing even the schema statement.
+		for _, stmt := range plan.Statements {
+			if stmt.Kind != schemadiff.StatementKindTable {
+				continue
+			}
+			exists, err := o.planObjectExists(ctx, stmt)
+			if err != nil {
+				return fmt.Errorf("fidelity preflight for %s: %w", stmt.Description, err)
+			}
+			if exists {
+				return fmt.Errorf("fidelity create refuses existing table %s before execution; use drift or sync with the same fidelity profile to assess its constraints", stmt.Table)
+			}
+		}
+	}
 	_ = o.state.UpdatePhase(runID, string(TaskExecuteDDL))
 	total := len(plan.Statements)
 	logging.Info("[%s] executing %d DDL statement(s)", TaskExecuteDDL, total)
@@ -128,6 +144,9 @@ func (o *Orchestrator) executePlan(ctx context.Context, runID string, plan schem
 			return fmt.Errorf("checking existence for %s: %w", stmt.Description, err)
 		}
 		if exists {
+			if p := o.config.SchemaGeneration.FidelityProfile; p != "" && p != "legacy" && stmt.Kind != schemadiff.StatementKindSchema {
+				return fmt.Errorf("fidelity create refuses unverified existing object %s", stmt.Object)
+			}
 			logUnverifiedExistingObjectSkip(i+1, total, stmt)
 			continue
 		}

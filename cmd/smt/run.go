@@ -13,6 +13,7 @@ import (
 	"github.com/johndauphine/smt/internal/config"
 	"github.com/johndauphine/smt/internal/ddl"
 	"github.com/johndauphine/smt/internal/exitcodes"
+	"github.com/johndauphine/smt/internal/fidelity"
 	"github.com/johndauphine/smt/internal/orchestrator"
 )
 
@@ -25,6 +26,7 @@ func createCommand() *cli.Command {
 		Name:  "create",
 		Usage: "Extract source schema and generate matching target DDL",
 		Flags: []cli.Flag{
+			fidelityFlag(),
 			&cli.BoolFlag{Name: "apply", Usage: "Execute generated DDL against the target (default: emit SQL for review)"},
 			&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Value: "schema.sql", Usage: "Output file when not applying"},
 			&cli.StringFlag{Name: "source-schema", Usage: "Override source schema from config"},
@@ -45,6 +47,13 @@ func runCreate(c *cli.Context) error {
 	}
 	if c.IsSet("target-schema") {
 		cfg.Target.Schema = c.String("target-schema")
+	}
+	profile, err := fidelity.ParseProfile(cfg.SchemaGeneration.FidelityProfile)
+	if err != nil {
+		return err
+	}
+	if c.Bool("apply-suggested") && profile != fidelity.Legacy {
+		return fmt.Errorf("--apply-suggested cannot be combined with opt-in fidelity: executable SQL must remain deterministic")
 	}
 
 	if !c.Bool("apply") {

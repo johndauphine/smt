@@ -191,6 +191,9 @@ type SchemaGenerationConfig struct {
 	// UnknownTypePolicy controls how deterministic mapping handles unsupported
 	// source types. The default is "fail".
 	UnknownTypePolicy string `yaml:"unknown_type_policy"`
+
+	// FidelityProfile is opt-in; omission preserves the v1 legacy contract.
+	FidelityProfile string `yaml:"fidelity_profile,omitempty"`
 }
 
 // AIReviewConfig controls optional AI inspection of deterministic DDL.
@@ -908,6 +911,11 @@ func (c *Config) validate() error {
 	case "", "fail", "warn", "text_fallback":
 	default:
 		return fmt.Errorf("schema_generation.unknown_type_policy must be 'fail', 'warn', or 'text_fallback'")
+	}
+	switch c.SchemaGeneration.FidelityProfile {
+	case "", "legacy", "checked", "strict":
+	default:
+		return fmt.Errorf("schema_generation.fidelity_profile must be 'legacy', 'checked', or 'strict'")
 	}
 	switch c.AIReview.Mode {
 	case "", "warn", "fail":
